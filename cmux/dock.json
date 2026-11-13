@@ -1,0 +1,9 @@
+{
+  "controls": [
+    {
+      "id": "maru-status",
+      "title": "maru",
+      "command": "while :; do clear; \"$HOME/maru/scripts/maru-status.sh\"; sleep 30; done"
+    }
+  ]
+}
