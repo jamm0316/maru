@@ -1,8 +1,17 @@
 #!/bin/bash
 # 마루 설치. 여러 번 실행해도 안전하다(멱등). 하는 일을 모두 화면에 출력한다.
-# 사용: ./install.sh [--dry-run]   (--dry-run: 설정 파일·launchd 는 건드리지 않고 할 일만 출력)
+# 사용: ./install.sh [--dry-run] [--with-telegram]
+#   --dry-run: 설정 파일·launchd 는 건드리지 않고 할 일만 출력
+#   --with-telegram: 로그인 때 텔레그램 상시 세션을 시작하는 LaunchAgent(com.maru.telegram)도 등록(기본 꺼짐)
 set -u
-DRY=""; [ "${1:-}" = "--dry-run" ] && DRY="--dry-run"
+DRY=""; TG=""
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY="--dry-run";;
+    --with-telegram) TG=1;;
+    *) echo "알 수 없는 옵션: $a (사용: ./install.sh [--dry-run] [--with-telegram])" >&2; exit 2;;
+  esac
+done
 ROOT=$(cd "$(dirname "$0")" && pwd -P)
 . "$ROOT/scripts/lib.sh"        # MARU_HOME, MARU_DATA, MEM, CLAUDE_DIR 등
 CFG=(python3 -I "$MARU_HOME/scripts/maru_config.py")   # 배열: 경로에 공백이 있어도 안전
@@ -60,6 +69,41 @@ else
   done
   [ -n "$ok" ] || { echo "  launchctl bootstrap 실패(5회 시도): $PLIST"; exit 1; }
   echo "  등록: $PLIST"
+fi
+
+if [ -n "$TG" ]; then
+  TGLABEL=com.maru.telegram
+  TGPLIST=$HOME/Library/LaunchAgents/$TGLABEL.plist
+  say "launchd 작업 $TGLABEL (로그인 때 텔레그램 세션 시작 — 로그인한 뒤에만 시작됨)"
+  for c in bun tmux; do command -v "$c" >/dev/null 2>&1 || echo "  경고: $c 없음 — 설치 전까지 세션이 시작되지 않습니다(설치는 직접: brew install tmux oven-sh/bun/bun)"; done
+  tgrendered=$(python3 -I - "$MARU_HOME/launchd/$TGLABEL.plist.template" "$MARU_HOME" "$MARU_DATA" "$HOME" "${CLAUDE_CONFIG_DIR:-}" <<'PY'
+import sys
+from xml.sax.saxutils import escape
+t = open(sys.argv[1], encoding="utf-8").read()
+for k, v in zip(("{{MARU_HOME}}", "{{MARU_DATA}}", "{{HOME}}"), sys.argv[2:5]):
+    t = t.replace(k, escape(v))
+cfg = sys.argv[5]
+env = f"    <key>CLAUDE_CONFIG_DIR</key><string>{escape(cfg)}</string>\n" if cfg else ""
+print(t.replace("{{CLAUDE_CONFIG_ENV}}", env), end="")
+PY
+)
+  if [ -f "$TGPLIST" ] && [ "$(cat "$TGPLIST")" = "$tgrendered" ] && launchctl print "gui/$(id -u)/$TGLABEL" >/dev/null 2>&1; then
+    echo "  이미 최신으로 로드됨(변경 없음)"
+  elif [ -n "$DRY" ]; then
+    echo "  (dry-run) $TGPLIST 작성 후 launchctl bootstrap (RunAtLoad: 등록 즉시 telegram.sh start 실행)"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    launchctl bootout "gui/$(id -u)/$TGLABEL" >/dev/null 2>&1 || true
+    printf '%s\n' "$tgrendered" > "$TGPLIST"
+    plutil -lint "$TGPLIST" >/dev/null || { echo "  plist 검증 실패"; exit 1; }
+    ok=""
+    for i in 1 2 3 4 5; do
+      if launchctl bootstrap "gui/$(id -u)" "$TGPLIST" 2>/dev/null; then ok=1; break; fi
+      sleep 2
+    done
+    [ -n "$ok" ] || { echo "  launchctl bootstrap 실패(5회 시도): $TGPLIST"; exit 1; }
+    echo "  등록: $TGPLIST"
+  fi
 fi
 
 say "recall 스킬을 전역으로 복사"

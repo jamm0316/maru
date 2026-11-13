@@ -31,7 +31,13 @@ MARU_WORK=${MARU_WORK:-$HOME/.maru-work}
 MARU_SKILL_AUTOINSTALL=${MARU_SKILL_AUTOINSTALL:-}         # 1이면 install.sh 가 "검토 후 문제 없으면 에이전트가 직접 설치" 문구를 쓴다(기본: 사용자 동의 후 설치)
 MAX_DELETE=${MAX_DELETE:-5}                                # 한 번에 삭제 가능한 최대 기억 파일 수(비율 20%와 함께 적용)
 SKILLS_VIEW=${MARU_SKILLS_VIEW:-$MARU_DATA/skills-view}    # 헤드리스 모델이 읽는 스킬 복사본(심볼릭 링크 우회 방지)
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+# 텔레그램 상시 세션(scripts/telegram.sh). 값은 환경변수 또는 data/maru.conf 로 덮어쓴다.
+MARU_TELEGRAM_SESSION=${MARU_TELEGRAM_SESSION:-maru-telegram}   # tmux 세션 이름
+# 세션의 --permission-mode. 비워 두면 사용자의 평소 권한 모드를 그대로 쓴다(보수적 기본값).
+# 허용: acceptEdits auto plan manual dontAsk. bypassPermissions 는 스크립트가 거부한다. 장단점은 README 참고.
+MARU_TELEGRAM_PERMISSION_MODE=${MARU_TELEGRAM_PERMISSION_MODE:-}
+MARU_TELEGRAM_MAX_RESTARTS=${MARU_TELEGRAM_MAX_RESTARTS:-5}      # 1시간 안에 허용하는 자동 재시작 횟수
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 # ==============================================================================
 
 # 로그 1MB 초과 시 .1로 회전: rotate_log <파일>
@@ -134,6 +140,14 @@ notify_fail() {
   perl -e 'alarm 10; exec @ARGV' osascript -e \
     'display notification "회고/정리가 연속 실패했습니다. 로그인 만료 여부를 확인하세요: claude auth login" with title "마루"' \
     >/dev/null 2>&1 </dev/null || true
+  return 0
+}
+# 임의 문구 macOS 알림: notify_text <문구>. 실패해도 스크립트에는 영향 없음.
+notify_text() {
+  command -v osascript >/dev/null 2>&1 || return 0
+  perl -e 'alarm 10; exec @ARGV' osascript -e 'on run argv
+display notification (item 1 of argv) with title "마루"
+end run' "$1" >/dev/null 2>&1 </dev/null || true
   return 0
 }
 fail_bump() {

@@ -21,6 +21,15 @@ else
   [ -f "$PLIST" ] && rm -f "$PLIST" && echo "  삭제: $PLIST"
 fi
 
+say "launchd 작업 com.maru.telegram 제거(있을 때만)"
+TGPLIST=$HOME/Library/LaunchAgents/com.maru.telegram.plist
+if [ -n "$DRY" ]; then echo "  (dry-run) launchctl bootout, $TGPLIST 삭제(있으면)"
+else
+  launchctl bootout "gui/$(id -u)/com.maru.telegram" >/dev/null 2>&1 && echo "  bootout 완료" || echo "  로드되어 있지 않음"
+  [ -f "$TGPLIST" ] && rm -f "$TGPLIST" && echo "  삭제: $TGPLIST"
+  command -v tmux >/dev/null 2>&1 && tmux has-session -t "=$MARU_TELEGRAM_SESSION" 2>/dev/null && echo "  실행 중인 텔레그램 세션은 그대로 둠 — 끄려면: scripts/telegram.sh stop"
+fi
+
 say "~/.claude/CLAUDE.md 의 maru 블록 제거"
 "${CFG[@]}" claude-md-remove --file "$CLAUDE_DIR/CLAUDE.md" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"}
 
