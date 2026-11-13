@@ -6,7 +6,6 @@ CLAUDE_TIMEOUT="${DREAM_TIMEOUT:-600}"    # claude -p 하드 제한(초)
 MAX_SWEEP="${DREAM_MAX_SWEEP:-8}"         # 한 번에 회고할 최대 세션 수
 SWEEP_HOURS=36                            # 최근 이 시간 안에 수정된 transcript만
 IDLE_MIN=60                               # 이 분 안에 수정된 건 진행 중일 수 있어 제외
-MAX_DELETE=5                              # 한 번에 삭제 가능한 최대 파일 수(비율 20%와 함께 적용)
 SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 . "$SCRIPTS/lib.sh"   # MARU_HOME/MARU_DATA/MEM/STAGE 등 설정
 LOG=$LOGS/dream.log
@@ -14,35 +13,7 @@ MARKER=$STATE/dream.marker
 mkdir -p "$LOGS" "$STATE" "$MARU_DATA/backups"
 log() { echo "$(date '+%F %T') [dream] $*" >> "$LOG"; }
 
-# 삭제 가드: apply_deletions <memdir> <list>. 항목 하나라도 거부되거나 한도를 넘으면
-# 아무것도 지우지 않고 1을 반환한다(호출 쪽이 run 전체를 되돌림). 전부 통과하면 지우고 0.
-apply_deletions() {
-  local mem=$1 list=$2 n total name stem other bad=0
-  [ -f "$list" ] && [ ! -L "$list" ] || return 0
-  local ok=()
-  while IFS= read -r name || [ -n "$name" ]; do
-    name=${name%$'\r'}
-    [ -n "${name//[[:space:]]/}" ] || continue
-    case " ${ok[*]} " in *" $name "*) continue;; esac   # 중복 무시
-    if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*\.md$ ]]; then log "삭제 거부(이름 형식): $name"; bad=1; continue; fi
-    if [ -L "$mem/$name" ] || [ ! -f "$mem/$name" ]; then log "삭제 거부(일반 파일 아님/없음): $name"; bad=1; continue; fi
-    stem=${name%.md}
-    if grep -qF -e "($name)" -e "$name" -e "[[$stem]]" "$mem/MEMORY.md" 2>/dev/null; then
-      log "삭제 거부(MEMORY.md에 아직 있음): $name"; bad=1; continue
-    fi
-    other=$(grep -lF "[[$stem]]" "$mem"/*.md 2>/dev/null | grep -v "/$name$" | head -1)
-    if [ -n "$other" ]; then log "삭제 거부(다른 기억 $(basename "$other")이 [[${stem}]] 링크): $name"; bad=1; continue; fi
-    ok+=("$name")
-  done < "$list"
-  n=${#ok[@]}
-  total=$(find "$mem" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
-  if [ "$n" -gt "$MAX_DELETE" ] || [ $((n * 5)) -gt "$total" ]; then
-    log "삭제 목록 거부(${n}개 > 한도: 최대 ${MAX_DELETE}개·${total}개의 20%)"; bad=1
-  fi
-  if [ "$bad" = 1 ]; then log "삭제 목록 전체 거부 — 아무것도 지우지 않음"; return 1; fi
-  for name in "${ok[@]}"; do rm -f -- "$mem/$name" && log "삭제: $name"; done
-  return 0
-}
+# 삭제 가드 apply_deletions 는 lib.sh 에 있다(reflect 와 공용)
 
 if [ "$1" = "--apply-deletions" ]; then apply_deletions "$2" "$3"; exit $?; fi
 
@@ -71,7 +42,12 @@ while IFS= read -r f; do
   cnt=$((cnt+1))
   log "sweep $cnt: ${sid:0:8} (줄 ${done_l}→${total})"
   bash "$SCRIPTS/reflect.sh" --run "$f" "$sid" >> "$LOGS/reflect.log" 2>&1 </dev/null
-  echo "$total" > "$STATE/$sid.swept"
+  rrc=$?
+  # 성공(0)이거나 의도적 건너뜀(10)일 때만 처리 완료로 표시한다. 실패(11)·잠금 시간 초과(12)는 다음 실행에서 재시도.
+  case $rrc in
+    0|10) echo "$total" > "$STATE/$sid.swept" ;;
+    *) log "sweep ${sid:0:8}: reflect rc=$rrc — 처리 완료로 표시하지 않음(다음에 재시도)" ;;
+  esac
 done <<< "$cands"
 log "sweep 끝: 후보 ${found}개, 건너뜀 ${skipped}개, 처리 ${cnt}개(상한 $MAX_SWEEP)"
 
@@ -86,9 +62,10 @@ trap 'rm -rf "$RLOCK" "$DLOCK"; rotate_log "$LOG"' EXIT
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 TXN=$STATE/txn.dream
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
-txn_begin "$MEM" "$TXN" || { log "스냅샷 실패 — 정리 건너뜀"; rm -rf "$TXN"; exit 0; }
-prompt="$(sed -e "s#{{MEMORY_DIR}}#$MEM#g" -e "s#{{STAGE_DIR}}#$STAGE#g" "$MARU_HOME/prompts/consolidate-prompt.md")"
+prompt="$(render_template "$MARU_HOME/prompts/consolidate-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE")"
 mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || exit 0
+# 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
+txn_begin "$MEM" "$TXN" || { log "스냅샷 실패 — 정리 건너뜀"; txn_end "$TXN"; exit 0; }
 log "정리 시작"
 # 테스트 훅: DREAM_FAKE_MODEL(스크립트 경로)이 claude 호출을 대신한다. 사고 방지를 위해
 # DREAM_ALLOW_FAKE=yes-i-am-testing 도 함께 있어야만 동작한다. launchd plist·훅 환경에는 둘 다 없다.
@@ -106,6 +83,7 @@ out=$(AGENT_REFLECTING=1 perl -e 'alarm shift; exec @ARGV' "$CLAUDE_TIMEOUT" \
   </dev/null 2>&1)
 fi
 rc=$?
+txn_after "$MEM" "$TXN"
 [ $rc -eq 142 ] && log "claude ${CLAUDE_TIMEOUT}s 초과 — 강제 종료"
 log "claude 종료 rc=$rc"
 printf '%s\n' "$out" | grep -v '^Warning: this sign-in' >> "$LOG"
@@ -129,10 +107,9 @@ txn_end "$TXN"; rm -rf "$STAGE"
 # ---- c. Commit: 기억 폴더만
 summary=$(printf '%s\n' "$out" | grep -v '^Warning: this sign-in' | grep -v '^$' | head -1 \
   | python3 -c 'import sys;print(sys.stdin.read().strip()[:100])')
-H="$SCRIPTS/hist"
-"$H" add -A -- "$MEM" >> "$LOG" 2>&1
-if ! "$H" diff --cached --quiet -- "$MEM" 2>/dev/null; then
-  "$H" commit -q -m "dream: $(date +%F) — ${summary:-정리}" -- "$MEM" >> "$LOG" 2>&1 && log "커밋 완료"
+hist_git add -A -- "$MEM" >> "$LOG" 2>&1
+if ! hist_git diff --cached --quiet -- "$MEM" 2>/dev/null; then
+  hist_git commit -q -m "dream: $(date +%F) — ${summary:-정리}" -- "$MEM" >> "$LOG" 2>&1 && log "커밋 완료"
 else
   log "변경 없음(커밋 안 함)"
 fi

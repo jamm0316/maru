@@ -15,8 +15,8 @@ description: 과거 Claude Code 대화를 검색해 이전 작업·논의·결�
 
 1. 검색 (모든 단어가 같은 메시지에 있어야 함, 대소문자 무시, 최신 세션순)
 ```
-python3 ~/.claude/skills/recall/search.py hermes
-python3 ~/.claude/skills/recall/search.py 에이전트 구독 --days 365 --project datahub --limit 10 --context 300
+python3 ~/.claude/skills/recall/search.py 배포
+python3 ~/.claude/skills/recall/search.py 배포 롤백 --days 365 --project myproject --limit 10 --context 300
 ```
 옵션: `--days N`(기본 90) `--project 부분문자열`(프로젝트 경로 슬러그) `--limit N`(기본 20) `--context 글자수`(기본 200)
 

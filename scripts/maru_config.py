@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """install.sh / uninstall.sh 가 쓰는 설정 편집기. 사용자 설정 파일을 최소한으로만 고친다.
 사용: maru_config.py <명령> [옵션]   (모든 명령은 --dry-run 지원: 바꿀 내용만 출력)
-  hook-add     --settings F --command CMD --legacy-marker S [--backup-dir D]
+  hook-add     --settings F --command CMD [--backup-dir D]
   hook-remove  --settings F --match S [--backup-dir D]
-  claude-md    --file F --block-file B [--backup-dir D]       (maru 블록 추가/교체, 옛 포인터 줄 제거)
+  claude-md    --file F --block-file B [--backup-dir D]       (maru 블록만 추가/교체. 블록 밖은 건드리지 않는다)
   claude-md-remove --file F [--backup-dir D]
   local-settings --file F --dir DIR
+  local-settings-remove --file F --dir DIR   (우리가 넣은 항목만 제거, 비면 파일 삭제)
 """
 import argparse, json, os, re, shutil, sys, time
 
@@ -65,7 +66,7 @@ def strip_hooks(d, pred):
 def cmd_hook_add(a):
     d, ind, nl = load_json(a.settings)
     before = json.dumps(d, sort_keys=True)
-    strip_hooks(d, lambda c: c == a.command or a.legacy_marker in c)
+    strip_hooks(d, lambda c: c == a.command)
     d.setdefault("hooks", {}).setdefault("SessionEnd", []).append({"hooks": [{"type": "command", "command": a.command}]})
     if json.dumps(d, sort_keys=True) == before:
         print("  SessionEnd 훅: 이미 등록됨(변경 없음)"); return
@@ -86,9 +87,6 @@ def cmd_hook_remove(a):
     atomic_write(a.settings, dump_json(d, ind, nl))
 
 
-LEGACY = [re.compile(p) for p in (r"^# 개인 에이전트\s*$", r"\.claude/agent/", r"projects/-[^ `]*/memory/MEMORY\.md", r"`recall` 스킬")]
-
-
 def strip_block(text):
     pat = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.S)
     return pat.sub("", text)
@@ -98,8 +96,6 @@ def cmd_claude_md(a):
     block = open(a.block_file, encoding="utf-8").read().strip("\n")
     old = open(a.file, encoding="utf-8").read() if os.path.exists(a.file) else ""
     text = strip_block(old)
-    if BEGIN not in old:  # 처음 설치: 옛 포인터 줄(블록 이전 형식)을 정리
-        text = "\n".join(l for l in text.split("\n") if not any(p.search(l) for p in LEGACY))
     text = re.sub(r"\n{3,}", "\n\n", text).strip("\n")
     new = (text + "\n\n" if text else "") + block + "\n"
     if new == old:
@@ -135,11 +131,26 @@ def cmd_local_settings(a):
     atomic_write(a.file, dump_json(d, ind if os.path.exists(a.file) else 2, True))
 
 
+def cmd_local_settings_remove(a):
+    if not os.path.exists(a.file): print("  .claude/settings.local.json 없음"); return
+    d, ind, nl = load_json(a.file)
+    dirs = d.get("permissions", {}).get("additionalDirectories", [])
+    if a.dir not in dirs: print("  .claude/settings.local.json: 우리가 넣은 항목 없음"); return
+    dirs.remove(a.dir)
+    if not dirs: del d["permissions"]["additionalDirectories"]
+    if not d["permissions"]: del d["permissions"]
+    print(f"  .claude/settings.local.json: additionalDirectories 에서 {a.dir} 제거" + ("(파일이 비어 삭제)" if not d else ""))
+    if a.dry_run: return
+    if d: atomic_write(a.file, dump_json(d, ind, nl))
+    else: os.remove(a.file)
+
+
 p = argparse.ArgumentParser()
 p.add_argument("cmd")
-for o in ("settings", "command", "legacy-marker", "match", "file", "block-file", "dir", "backup-dir"):
+for o in ("settings", "command", "match", "file", "block-file", "dir", "backup-dir"):
     p.add_argument("--" + o)
 p.add_argument("--dry-run", action="store_true")
 a = p.parse_args()
 {"hook-add": cmd_hook_add, "hook-remove": cmd_hook_remove, "claude-md": cmd_claude_md,
- "claude-md-remove": cmd_claude_md_remove, "local-settings": cmd_local_settings}[a.cmd](a)
+ "claude-md-remove": cmd_claude_md_remove, "local-settings": cmd_local_settings,
+ "local-settings-remove": cmd_local_settings_remove}[a.cmd](a)

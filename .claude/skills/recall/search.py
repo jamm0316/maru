@@ -3,7 +3,7 @@
 import argparse, glob, json, os, sys, time
 from datetime import datetime, timezone
 
-ROOT = os.path.expanduser("~/.claude/projects")
+ROOT = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
 
 
 def texts(d):
