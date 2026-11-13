@@ -1,0 +1,108 @@
+#!/bin/bash
+# maru 런처. 아무것도 설치·수정하지 않는다(PATH 등록 없음). bash 3.2 호환.
+# 사용: maru [ui|status|log [reflect|dream]|hist ...|doctor|help]
+set -u
+
+# 자기 자신의 실제 경로(심볼릭 링크 해석)로 저장소 위치를 계산한다.
+src=${BASH_SOURCE[0]}
+while [ -L "$src" ]; do
+  d=$(cd "$(dirname "$src")" && pwd -P)
+  src=$(readlink "$src")
+  case "$src" in /*) ;; *) src=$d/$src ;; esac
+done
+MARU_HOME=$(cd "$(dirname "$src")/.." && pwd -P)
+export MARU_HOME
+LOGDIR=${MARU_LOGS:-${MARU_DATA:-$MARU_HOME/data}/logs}
+
+# python3 가 실패(Xcode 라이선스 미동의 등)하면 Command Line Tools 경로로 폴백한다.
+pick_python() {
+  if python3 -c 'pass' >/dev/null 2>&1; then echo python3; return 0; fi
+  if [ -x /Library/Developer/CommandLineTools/usr/bin/python3 ] \
+     && /Library/Developer/CommandLineTools/usr/bin/python3 -c 'pass' >/dev/null 2>&1; then
+    echo /Library/Developer/CommandLineTools/usr/bin/python3; return 0
+  fi
+  return 1
+}
+
+usage() {
+  cat <<'USAGE'
+maru — 개인 에이전트 마루 런처
+  maru                 저장소에서 claude 실행
+  maru ui              상황판(TUI): 1상태 2기억 3로그 4제안
+  maru status          maru-status.sh 출력 (--json 등 옵션 전달)
+  maru log [reflect|dream]   로그 마지막 줄 보기(기본 reflect)
+  maru hist ...        기억 변경 이력(읽기 전용: log show diff status ls-files)
+  maru doctor          읽기 전용 점검
+  maru help            이 도움말
+USAGE
+}
+
+doctor() {
+  local bad=0 py
+  ok()   { printf 'OK    %s\n' "$*"; }
+  warn() { printf '주의  %s\n' "$*"; bad=$((bad+1)); }
+  xcode_hint() { printf '      -> Xcode 라이선스 미동의로 보임: sudo xcodebuild -license\n'; }
+
+  if command -v claude >/dev/null 2>&1; then ok "claude 명령: $(command -v claude)"; else warn "claude 명령을 찾을 수 없음(PATH 확인)"; fi
+
+  if python3 -c 'pass' >/dev/null 2>&1; then ok "python3 동작"
+  else
+    out=$(python3 -c 'pass' 2>&1 | head -1)
+    warn "python3 실행 실패"
+    case "$out" in *license*|*xcodebuild*) xcode_hint ;; esac
+    if py=$(pick_python); then printf '      CLT 폴백 가능: %s\n' "$py"; fi
+  fi
+
+  if git --version >/dev/null 2>&1; then ok "git 동작"
+  else
+    out=$(git --version 2>&1 | head -1)
+    warn "git 실행 실패"
+    case "$out" in *license*|*xcodebuild*) xcode_hint ;; esac
+  fi
+
+  local sj=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json
+  if [ -f "$sj" ]; then
+    if grep -q 'reflect\.sh' "$sj" 2>/dev/null && grep -q '"SessionEnd"' "$sj" 2>/dev/null; then
+      ok "SessionEnd 훅에 reflect.sh 등록됨(문자열 검사, 구조까지는 미검증)"
+    else
+      warn "settings.json 에서 SessionEnd + reflect.sh 를 찾지 못함(install.sh 참고)"
+    fi
+  else
+    warn "settings.json 없음: $sj"
+  fi
+
+  if launchctl list com.maru.dream >/dev/null 2>&1; then ok "launchd com.maru.dream 로드됨"
+  else warn "launchd com.maru.dream 로드 안 됨(install.sh 참고)"; fi
+
+  local f hit any=0
+  for f in reflect dream; do
+    if [ -f "$LOGDIR/$f.log" ]; then
+      any=1
+      hit=$(tail -n 200 "$LOGDIR/$f.log" | grep -E 'rc=[1-9][0-9]*|되돌림|연속 실패|거부' | tail -n 1)
+      if [ -n "$hit" ]; then warn "$f.log 최근 200줄에 실패 흔적: $hit"; else ok "$f.log 최근 200줄에 실패 흔적 없음"; fi
+    fi
+  done
+  [ "$any" = 1 ] || warn "로그 없음: $LOGDIR"
+
+  [ "$bad" = 0 ] && echo "모두 정상" || echo "주의 ${bad}건"
+  return 0
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  "") cd "$MARU_HOME" && exec claude ;;
+  ui)
+    py=$(pick_python) || { echo "python3 를 쓸 수 없습니다. maru doctor 로 확인하세요." >&2; exit 1; }
+    exec "$py" "$MARU_HOME/scripts/maru_ui.py" "$@" ;;
+  status) exec "$MARU_HOME/scripts/maru-status.sh" "$@" ;;
+  log)
+    kind=${1:-reflect}
+    case "$kind" in reflect|dream) ;; *) echo "log: reflect 또는 dream" >&2; exit 2 ;; esac
+    [ -f "$LOGDIR/$kind.log" ] || { echo "로그 없음: $LOGDIR/$kind.log" >&2; exit 1; }
+    exec tail -n 50 "$LOGDIR/$kind.log" ;;
+  hist) exec "$MARU_HOME/scripts/hist" "$@" ;;
+  doctor) doctor ;;
+  help|-h|--help) usage ;;
+  *) echo "알 수 없는 명령: $cmd" >&2; usage >&2; exit 2 ;;
+esac

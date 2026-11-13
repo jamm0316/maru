@@ -1,9 +1,9 @@
 {
   "controls": [
     {
-      "id": "maru-status",
+      "id": "maru-ui",
       "title": "maru",
-      "command": "while :; do clear; \"$HOME/maru/scripts/maru-status.sh\"; sleep 30; done"
+      "command": "\"$HOME/maru/bin/maru\" ui"
     }
   ]
 }

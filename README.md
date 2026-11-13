@@ -87,10 +87,19 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 - **사용자가 직접 켜야 하는 권한**(시스템 설정 > 개인정보 보호 및 보안): 자동화(Finder·Safari·캘린더 등 앱별, 실행 주체 앱 단위), 손쉬운 사용(UI 스크립팅·키 입력), 화면 및 시스템 오디오 기록(스크린샷), 전체 디스크 접근(Mail·Messages·Safari 데이터 등). 필요한 순간 에이전트가 어느 항목·어느 앱인지 알려 줍니다. 대신 눌러 주지 않습니다.
 - **수동으로 남는 것**: 영구 삭제, 사용자 명의 발신, 결제·주문, 시스템·보안 설정 변경, 비밀번호·토큰 입력은 사용자가 직접 하거나 매번 확인을 받습니다. 삭제는 휴지통 이동이 기본입니다.
 
+## maru 명령과 cmux Dock
+- `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru ui`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 아무것도 설치·수정하지 않으므로 PATH 등록은 직접 합니다: `ln -s "$PWD/bin/maru" ~/.local/bin/maru` (심볼릭 링크를 따라 저장소 위치를 계산합니다).
+- `maru ui`(`scripts/maru_ui.py`, 파이썬 표준 라이브러리 curses, 네트워크·포트 없음): 40~60열 좁은 폭용 상황판. 탭 1 상태(30초 자동 갱신, `r`) / 2 기억(Enter 본문, `/` 필터) / 3 로그(`l` reflect·dream 전환) / 4 제안. `--once`는 상태를 평문으로 출력하고 `--selftest`는 임시 디렉터리에서 로직을 검증합니다.
+- 제안 설치는 제안 탭에서 `i` 후 정확히 `yes` 를 입력해야만 진행됩니다. 이름 정규식·심볼릭 링크 거부·기존 스킬 덮어쓰기 거부를 거치며 `SKILL.md` 만 복사합니다. `x` 는 삭제 없이 `data/skill-proposals/.rejected/` 로 옮깁니다. 제안 내용은 신뢰할 수 없는 데이터로 표시만 합니다.
+- cmux Dock: `cmux/dock.json` 을 `~/.config/cmux/dock.json` 에 복사하면 우측 Dock 에서 `maru ui` 가 실행됩니다(복사 방식·cmux 에서의 실제 표시는 미검증). Dock 의 PATH 에 `maru` 가 없어도 되도록 저장소의 `bin/maru` 경로를 직접 부릅니다(저장소가 `~/maru` 라고 가정).
+- 미검증: 실제 cmux Dock 안에서의 동작, 제안 설치·거절의 화면 조작(로직은 `--selftest` 로만 검증), `maru hist`(Xcode 라이선스 미동의 환경에서는 git 이 실패할 수 있음).
+
 ## 구조
 ```
 CLAUDE.md          에이전트 정체성과 규칙 (개인 정보 없음)
-scripts/           reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정 블록) digest.py hist maru_config.py
+scripts/           reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정 블록) digest.py hist maru_config.py maru-status.sh maru_ui.py
+bin/maru           런처(ui status log hist doctor)
+cmux/              dock.json 등 cmux 연동
 prompts/           회고·정리 프롬프트 템플릿 ({{MEMORY_DIR}} 등 자리표시자)
 launchd/           plist 템플릿 (설치 때 경로 치환)
 .claude/skills/    recall 스킬, mac-control 스킬(SKILL.md + reference/ cli·applescript·apps)
