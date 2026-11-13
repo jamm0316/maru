@@ -1,0 +1,36 @@
+#!/bin/bash
+# 개인 변경 이력(기억 폴더만)을 추적하는 git 래퍼. 원격 없음, push 금지.
+# git-dir: $MARU_DATA/history.git, work-tree: Claude 설정 폴더(~/.claude). 추적 대상은 허용 목록(info/exclude)으로 매번 재생성한다.
+# 이 저장소(maru 코드)의 .git 과는 별개다. 스킬 제안 폴더는 maru 저장소 안(중첩 .git)이라 이 이력에 넣을 수 없어 추적하지 않는다.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
+GD="$MARU_DATA/history.git"
+WT="$CLAUDE_DIR"
+if [ ! -d "$GD" ]; then
+  mkdir -p "$MARU_DATA" && git init -q --bare "$GD" && git --git-dir="$GD" symbolic-ref HEAD refs/heads/main
+  git --git-dir="$GD" config user.name maru; git --git-dir="$GD" config user.email maru@localhost
+fi
+# 허용 목록 생성: 전부 무시하고 기억 폴더만 추적. 각 경로의 상위 폴더를 단계별로 다시 포함시킨다.
+python3 - "$WT" "$GD/info/exclude" "$MEM" <<'PY'
+import os, sys
+wt, out = os.path.realpath(sys.argv[1]), sys.argv[2]
+lines = ["# 자동 생성(hist). 허용 목록 방식: 아래 경로만 추적", "/*"]
+seen = set()
+for p in sys.argv[3:]:
+    rel = os.path.relpath(os.path.realpath(p), wt)
+    if rel.startswith(".."):
+        continue  # work-tree 밖 경로는 추적하지 않는다
+    parts = rel.split(os.sep)
+    for i in range(len(parts)):
+        cur = "/" + "/".join(parts[:i + 1])
+        if i < len(parts) - 1:
+            for l in (f"!{cur}/", f"{cur}/*"):
+                if l not in seen: seen.add(l); lines.append(l)
+        else:
+            lines.append(f"!{cur}/")
+lines.append(".DS_Store")
+os.makedirs(os.path.dirname(out), exist_ok=True)
+new = "\n".join(lines) + "\n"
+if not os.path.exists(out) or open(out).read() != new:
+    open(out, "w").write(new)
+PY
+exec git --git-dir="$GD" --work-tree="$WT" "$@"

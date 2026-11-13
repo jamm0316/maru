@@ -1,0 +1,6 @@
+# 개인 데이터(기억 이력, 로그, 상태 등)는 저장소에 넣지 않는다
+data/
+.claude/settings.local.json
+.DS_Store
+__pycache__/
+*.pyc
