@@ -90,6 +90,10 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 - **사용자가 직접 켜야 하는 권한**(시스템 설정 > 개인정보 보호 및 보안): 자동화(Finder·Safari·캘린더 등 앱별, 실행 주체 앱 단위), 손쉬운 사용(UI 스크립팅·키 입력), 화면 및 시스템 오디오 기록(스크린샷), 전체 디스크 접근(Mail·Messages·Safari 데이터 등). 필요한 순간 에이전트가 어느 항목·어느 앱인지 알려 줍니다. 대신 눌러 주지 않습니다.
 - **수동으로 남는 것**: 영구 삭제, 사용자 명의 발신, 결제·주문, 시스템·보안 설정 변경, 비밀번호·토큰 입력은 사용자가 직접 하거나 매번 확인을 받습니다. 삭제는 휴지통 이동이 기본입니다.
 
+## 모델 배분
+메인 세션은 `.claude/settings.json` 의 `"model": "sonnet"` 으로 빠르게 접수·단순 처리하고, 어려운 일은 `.claude/agents/` 의 서브에이전트로 나눕니다: `scout`(haiku, 읽기 전용 찾기·조사), `worker`(sonnet, 절차가 정해진 여러 단계 작업), `expert`(opus, 되돌리기 어려운 결정·원인 분석·민감한 변경 리뷰). 기준은 CLAUDE.md 「위임 원칙」.
+메인 모델은 세션 중 스스로 바꿀 수 없으므로 `/model` 로 사용자가 바꾸거나 `claude --model` 로 덮어쓸 수 있습니다. 끄려면 settings.json 의 `model` 줄을 지우면 됩니다(서브에이전트 정의는 `.claude/agents/` 를 지우거나 그대로 두어도 무해). 모두 구독 사용량 안에서만 동작하며 별도 과금은 없습니다.
+
 ## maru 명령과 cmux Dock
 - `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru ui`, `maru suggest [번호]`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 아무것도 설치·수정하지 않으므로 PATH 등록은 직접 합니다: `ln -s "$PWD/bin/maru" ~/.local/bin/maru` (심볼릭 링크를 따라 저장소 위치를 계산합니다).
 - `maru ui`(`scripts/maru_ui.py`, 파이썬 표준 라이브러리 curses, 네트워크·포트 없음): 40~60열 좁은 폭용 상황판. 탭 1 상태(30초 자동 갱신, `r`) / 2 기억(Enter 본문, `/` 필터) / 3 로그(`l` reflect·dream 전환) / 4 제안 / 5 추천. `--once`는 상태를 평문으로 출력하고 `--selftest`는 임시 디렉터리에서 로직을 검증합니다.
