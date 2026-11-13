@@ -16,10 +16,16 @@ macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인)
 ./install.sh --dry-run   # 할 일만 출력
 ./install.sh             # 멱등: 여러 번 실행해도 안전
 ./uninstall.sh           # 설치한 것만 되돌림 (data/ 와 기억은 남김). --dry-run 지원
+./install.sh --with-cli --with-cmux   # 선택: maru 명령 링크 + cmux Dock 설정 (아래 설명)
 ```
 설치가 하는 일(경로에 공백이 있어도 동작): `data/`와 기억 폴더 생성 / `~/.claude/settings.json`의 SessionEnd에 훅 1개 등록(수정 전 `data/backups/`에 타임스탬프 백업. 파일 전체를 JSON으로 읽어 다시 쓰므로 **파일이 재작성된다**: 키 순서·알 수 없는 필드·다른 훅의 위치는 보존하고 들여쓰기 형식을 유지하며 임시 파일 + rename으로 원자적으로 쓰지만, 주석처럼 JSON 밖의 서식은 보존되지 않는다) / launchd 작업 `com.maru.dream` 등록 / `recall` 스킬을 `~/.claude/skills/recall`에 복사(`.maru` 표식 파일을 넣고, 표식 없는 기존 `recall`은 건드리지 않음) / `.claude/settings.local.json`에 홈 디렉터리 접근 허용 / `~/.claude/CLAUDE.md`에 `<!-- maru:begin -->`…`<!-- maru:end -->` 블록 유지.
 
 제거(`uninstall.sh`)는 설치가 한 일만 되돌립니다: 훅 항목, launchd 작업, `~/.claude/CLAUDE.md`의 maru 블록(블록 밖은 건드리지 않음), `.maru` 표식이 있는 전역 recall, `.claude/settings.local.json`의 홈 접근 항목, `~/.maru-work`. **`data/`(개인 데이터·변경 이력·백업)와 기억 폴더는 남깁니다.**
+
+선택 옵션(기본 꺼짐, `--dry-run` 지원, 옵션 없이 실행하면 위 동작과 동일):
+- `--with-cli`: `bin/maru` 를 `$MARU_BIN_DIR`(없으면 `~/.local/bin`, 없으면 생성)에 심볼릭 링크합니다. sudo·시스템 폴더(`/usr/local/bin` 등)는 쓰지 않고, 거기 이미 `maru` 가 있으면(다른 파일·다른 링크) 덮어쓰지 않고 경고 후 건너뜁니다(이 저장소를 가리키면 "이미 설치됨"). 폴더가 PATH 에 없으면 셸 설정 파일은 고치지 않고 추가할 한 줄만 안내합니다.
+- `--with-cmux`: cmux 가 있으면(`/Applications/cmux.app` 또는 `cmux` 명령) `${XDG_CONFIG_HOME:-~/.config}/cmux/dock.json` 을 설치합니다(`command` 에 설치 시점의 실제 저장소 경로를 채움). 파일이 없을 때 만들고, maru 가 만든 것(컨트롤이 id `maru-ui` 하나뿐이고 생성 내용과 같거나 `"$HOME/maru/bin/maru" ui` 형식이며 그 경로가 이 저장소)이면 갱신합니다. 그 외(다른 컨트롤이 있거나 내용이 다름)는 수정하지 않고 추가할 JSON 조각만 출력합니다(자동 병합 없음).
+- `uninstall.sh --with-cli --with-cmux`: 링크는 이 저장소 `bin/maru` 를 가리킬 때만, `dock.json` 은 maru 가 만든 것과 같을 때만 지웁니다(`data/backups/` 에 백업 후). 그 외는 건드리지 않고 안내합니다.
 
 ### 홈 디렉터리 전체 접근은 의도된 선택
 `.claude/settings.local.json`의 `permissions.additionalDirectories`에 홈을 넣는 것은 총괄 에이전트가 이 맥 전체에서 일하도록 한 의도적 선택입니다. 즉 `~/maru`에서 실행한 `claude`는 홈 아래 어디든 읽고(쓰기·실행은 일반 권한 규칙에 따름) 작업할 수 있으니, 신뢰할 수 있는 지시만 주세요. 좁히려면 그 파일의 `additionalDirectories`를 필요한 폴더 목록으로 바꾸거나 항목을 지우면 됩니다(`install.sh` 재실행은 홈을 다시 추가하므로 설치 후 직접 편집하세요). 이 설정은 헤드리스 회고에는 적용되지 않습니다(작업 폴더가 저장소 밖이므로).
@@ -95,12 +101,12 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 메인 모델은 세션 중 스스로 바꿀 수 없으므로 `/model` 로 사용자가 바꾸거나 `claude --model` 로 덮어쓸 수 있습니다. 끄려면 settings.json 의 `model` 줄을 지우면 됩니다(서브에이전트 정의는 `.claude/agents/` 를 지우거나 그대로 두어도 무해). 모두 구독 사용량 안에서만 동작하며 별도 과금은 없습니다.
 
 ## maru 명령과 cmux Dock
-- `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru ui`, `maru suggest [번호]`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 아무것도 설치·수정하지 않으므로 PATH 등록은 직접 합니다: `ln -s "$PWD/bin/maru" ~/.local/bin/maru` (심볼릭 링크를 따라 저장소 위치를 계산합니다).
+- `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru ui`, `maru suggest [번호]`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 런처 자체는 아무것도 설치·수정하지 않습니다. PATH 등록은 `./install.sh --with-cli` 로 합니다(심볼릭 링크를 따라 저장소 위치를 계산).
 - `maru ui`(`scripts/maru_ui.py`, 파이썬 표준 라이브러리 curses, 네트워크·포트 없음): 40~60열 좁은 폭용 상황판. 탭 1 상태(30초 자동 갱신, `r`) / 2 기억(Enter 본문, `/` 필터) / 3 로그(`l` reflect·dream 전환) / 4 제안 / 5 추천. `--once`는 상태를 평문으로 출력하고 `--selftest`는 임시 디렉터리에서 로직을 검증합니다.
 - 제안 설치는 제안 탭에서 보기를 열고 설치될 `SKILL.md`(PROPOSAL.md 보다 먼저 표시)를 끝까지 스크롤한 뒤 `i`, 정확히 `yes` 를 입력해야만 진행됩니다. 보기를 열 때 `SKILL.md` 를 한 번 읽어 스냅샷으로 고정하고 표시·설치는 그 바이트만 쓰며, 설치 직전 디스크의 sha256 이 다르면 거부합니다. 읽기는 `O_NOFOLLOW`+일반 파일·링크 수 1·100KB 이하만 허용합니다. 이름 정규식(전체 일치)·frontmatter `name` 이 디렉터리 이름과 같을 것·`name`/`description`/`argument-hint`(한 줄·100자 이하·제어 문자 없음일 때만) 외 frontmatter 키 거부(파싱 불가도 거부)·저장소 `.claude/skills` 이름 충돌 거부·기존 스킬 덮어쓰기 거부·숨김/제어 문자·잘못된 UTF-8 거부를 거치며 `SKILL.md` 만 복사합니다. `maru hist` 는 `--output`·`--ext-diff`·`--textconv`·`-c`·`-C`·`--git-dir`·`--work-tree`·`--exec-path` 인자를 거부합니다. `x` 는 삭제 없이 `data/skill-proposals/.rejected/` 로 옮깁니다. 제안 내용은 신뢰할 수 없는 데이터로 표시만 합니다.
 - 추천 요청: 회고·새벽 정리의 모델이 stage 폴더에 `suggestions.txt` 를 쓰면 셸(`lib.sh` 의 `apply_suggestions`)이 검증해 `data/suggestions.txt` 로 원자적 교체합니다(일반 파일만·64KB 이하·최대 8줄·줄당 120자 이하·제어/bidi/zero-width 문자 줄 제거·중복 제거, 실패하면 기존 목록 유지, 기억 트랜잭션과 독립이며 실패해도 로그만 남김). 보는 곳은 Dock 의 5 추천 탭(↑↓, Enter/`c` 로 클립보드 복사)과 `maru suggest`(목록), `maru suggest <번호>`(복사)입니다. **복사만 하고 절대 전송하지 않습니다**: 붙여넣고 내용을 확인한 뒤 직접 Enter 를 누르세요. cmux 의 다른 서피스로 직접 넣는 기능은 지원하지 않습니다(`cmux send` 가 텍스트의 `\n` 을 Enter 로 해석하고 대상이 기본적으로 호출한 서피스라서).
 - Claude Code 내장 프롬프트 추천(답변 뒤 회색 글씨, Tab/→ 로 채움, `promptSuggestionEnabled`)은 Claude Code 기능이라 내용을 조정할 수 없습니다. maru 의 추천은 위의 Dock 탭/`maru suggest` 와, 반복 요청을 `/스킬이름` 으로 부르게 하는 스킬 제안(필요하면 `argument-hint`)으로 제공됩니다.
-- cmux Dock: `cmux/dock.json` 을 `~/.config/cmux/dock.json` 에 복사하면 우측 Dock 에서 `maru ui` 가 실행됩니다(복사 방식·cmux 에서의 실제 표시는 미검증). Dock 의 PATH 에 `maru` 가 없어도 되도록 저장소의 `bin/maru` 경로를 직접 부릅니다(저장소가 `~/maru` 라고 가정).
+- cmux Dock: `./install.sh --with-cmux` 가 `~/.config/cmux/dock.json` 을 설치하면 우측 Dock 에서 `maru ui` 가 실행됩니다(cmux 에서의 실제 표시는 미검증). Dock 의 PATH 에 `maru` 가 없어도 되도록 설치 시점의 저장소 `bin/maru` 절대 경로를 직접 부릅니다. `cmux/dock.json` 은 `$HOME/maru` 가정의 예시 원본이며 설치는 `maru_config.py dock-gen` 이 만든 내용을 씁니다.
 - 미검증: 실제 cmux Dock 안에서의 동작, 제안 설치·거절의 화면 조작(로직은 `--selftest` 로만 검증), `maru hist`(Xcode 라이선스 미동의 환경에서는 git 이 실패할 수 있음).
 
 ## 구조

@@ -7,6 +7,8 @@
   claude-md-remove --file F [--backup-dir D]
   local-settings --file F --dir DIR
   local-settings-remove --file F --dir DIR   (우리가 넣은 항목만 제거, 비면 파일 삭제)
+  dock-gen     --dir ROOT      cmux Dock 설정(JSON)을 ROOT 저장소 기준으로 생성해 출력
+  dock-check   --file F --dir ROOT   F 가 maru 가 만든 것인지 판정: missing / same / legacy / other
 """
 import argparse, json, os, re, shutil, sys, time
 
@@ -145,6 +147,39 @@ def cmd_local_settings_remove(a):
     else: os.remove(a.file)
 
 
+DOCK_ID = "maru-ui"
+
+
+def dock_obj(root):
+    q = "'" + os.path.join(root, "bin", "maru").replace("'", "'\\''") + "'"   # 셸 단일따옴표 인용
+    return {"controls": [{"id": DOCK_ID, "title": "maru", "command": q + " ui"}]}
+
+
+def cmd_dock_gen(a):
+    sys.stdout.write(json.dumps(dock_obj(a.dir), ensure_ascii=False, indent=2) + "\n")
+
+
+def cmd_dock_check(a):
+    # same: 지금 생성될 내용과 동일 / legacy: 수동 설치된 `"$HOME/maru/bin/maru" ui` 이고 그 경로가 이 저장소
+    # (둘 다 "maru 가 만든 것") / other: 그 외(사용자 파일로 간주) / missing
+    if not os.path.exists(a.file):
+        print("missing"); return
+    try:
+        with open(a.file, encoding="utf-8") as f: d = json.load(f)
+    except Exception:
+        print("other"); return
+    if d == dock_obj(a.dir):
+        print("same"); return
+    try:
+        c = d["controls"]
+        legacy = (list(d) == ["controls"] and len(c) == 1 and c[0] == {"id": DOCK_ID, "title": "maru",
+                  "command": '"$HOME/maru/bin/maru" ui'}
+                  and os.path.realpath(os.path.join(os.environ["HOME"], "maru")) == os.path.realpath(a.dir))
+    except Exception:
+        legacy = False
+    print("legacy" if legacy else "other")
+
+
 p = argparse.ArgumentParser()
 p.add_argument("cmd")
 for o in ("settings", "command", "match", "file", "block-file", "dir", "backup-dir"):
@@ -153,4 +188,5 @@ p.add_argument("--dry-run", action="store_true")
 a = p.parse_args()
 {"hook-add": cmd_hook_add, "hook-remove": cmd_hook_remove, "claude-md": cmd_claude_md,
  "claude-md-remove": cmd_claude_md_remove, "local-settings": cmd_local_settings,
- "local-settings-remove": cmd_local_settings_remove}[a.cmd](a)
+ "local-settings-remove": cmd_local_settings_remove,
+ "dock-gen": cmd_dock_gen, "dock-check": cmd_dock_check}[a.cmd](a)

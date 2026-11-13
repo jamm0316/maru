@@ -1,15 +1,20 @@
 #!/bin/bash
 # 마루 설치. 여러 번 실행해도 안전하다(멱등). 하는 일을 모두 화면에 출력한다.
-# 사용: ./install.sh [--dry-run] [--with-telegram]
+# 사용: ./install.sh [--dry-run] [--with-telegram] [--with-cli] [--with-cmux]
 #   --dry-run: 설정 파일·launchd 는 건드리지 않고 할 일만 출력
 #   --with-telegram: 로그인 때 텔레그램 상시 세션을 시작하는 LaunchAgent(com.maru.telegram)도 등록(기본 꺼짐)
+#   --with-cli: bin/maru 를 $MARU_BIN_DIR(기본 ~/.local/bin)에 심볼릭 링크(sudo·시스템 폴더 안 씀, 셸 설정 안 건드림)
+#   --with-cmux: cmux Dock 설정을 ${XDG_CONFIG_HOME:-~/.config}/cmux/dock.json 에 설치(없을 때만/maru 가 만든 것만 갱신)
 set -u
-DRY=""; TG=""
+ORIG_PATH=$PATH
+DRY=""; TG=""; CLI=""; CMUX=""
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY="--dry-run";;
     --with-telegram) TG=1;;
-    *) echo "알 수 없는 옵션: $a (사용: ./install.sh [--dry-run] [--with-telegram])" >&2; exit 2;;
+    --with-cli) CLI=1;;
+    --with-cmux) CMUX=1;;
+    *) echo "알 수 없는 옵션: $a (사용: ./install.sh [--dry-run] [--with-telegram] [--with-cli] [--with-cmux])" >&2; exit 2;;
   esac
 done
 ROOT=$(cd "$(dirname "$0")" && pwd -P)
@@ -145,6 +150,12 @@ $PROPOSAL_LINE
 BLOCK
 "${CFG[@]}" claude-md --file "$CLAUDE_DIR/CLAUDE.md" --block-file "$blk" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"}
 rm -f "$blk"
+
+if [ -n "$CLI" ] || [ -n "$CMUX" ]; then
+  . "$ROOT/scripts/optional.sh"; BACKUPS=$MARU_DATA/backups
+  [ -z "$CLI" ] || { say "maru 명령 링크 (--with-cli)"; install_cli; }
+  [ -z "$CMUX" ] || { say "cmux Dock 설정 (--with-cmux)"; install_cmux; }
+fi
 
 say "끝"
 echo "  제거하려면 ./uninstall.sh (data/ 와 기억은 남겨 둡니다)."

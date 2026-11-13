@@ -1,8 +1,19 @@
 #!/bin/bash
 # install.sh 가 한 일만 되돌린다: SessionEnd 훅, launchd 작업, ~/.claude/CLAUDE.md 블록, 전역 recall 복사본.
-# data/(개인 데이터·변경 이력)와 기억 폴더는 지우지 않는다. 사용: ./uninstall.sh [--dry-run]
+# data/(개인 데이터·변경 이력)와 기억 폴더는 지우지 않는다. 사용: ./uninstall.sh [--dry-run] [--with-cli] [--with-cmux]
+#   --with-cli: 이 저장소 bin/maru 를 가리키는 $MARU_BIN_DIR(기본 ~/.local/bin)/maru 링크만 제거
+#   --with-cmux: maru 가 만든 cmux dock.json 과 동일할 때만 제거(data/backups 에 백업 후)
 set -u
-DRY=""; [ "${1:-}" = "--dry-run" ] && DRY="--dry-run"
+ORIG_PATH=$PATH
+DRY=""; CLI=""; CMUX=""
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY="--dry-run";;
+    --with-cli) CLI=1;;
+    --with-cmux) CMUX=1;;
+    *) echo "알 수 없는 옵션: $a (사용: ./uninstall.sh [--dry-run] [--with-cli] [--with-cmux])" >&2; exit 2;;
+  esac
+done
 ROOT=$(cd "$(dirname "$0")" && pwd -P)
 . "$ROOT/scripts/lib.sh"
 CFG=(python3 -I "$MARU_HOME/scripts/maru_config.py")
@@ -44,6 +55,12 @@ say "저장소용 홈 접근 허용(.claude/settings.local.json) 제거"
 say "헤드리스 작업 폴더 제거"
 if [ -n "$DRY" ]; then echo "  (dry-run) rmdir $MARU_WORK"
 elif [ -d "$MARU_WORK" ]; then rmdir "$MARU_WORK" 2>/dev/null && echo "  삭제: $MARU_WORK" || echo "  비어 있지 않아 남김: $MARU_WORK"; fi
+
+if [ -n "$CLI" ] || [ -n "$CMUX" ]; then
+  . "$ROOT/scripts/optional.sh"; BACKUPS=$MARU_DATA/backups
+  [ -z "$CLI" ] || { say "maru 명령 링크 제거 (--with-cli)"; uninstall_cli; }
+  [ -z "$CMUX" ] || { say "cmux Dock 설정 제거 (--with-cmux)"; uninstall_cmux; }
+fi
 
 say "남겨 둔 것"
 echo "  $MARU_DATA (개인 데이터·변경 이력·백업), 기억 폴더($MEM)"
