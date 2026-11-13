@@ -24,6 +24,9 @@ macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인)
 ### 홈 디렉터리 전체 접근은 의도된 선택
 `.claude/settings.local.json`의 `permissions.additionalDirectories`에 홈을 넣는 것은 총괄 에이전트가 이 맥 전체에서 일하도록 한 의도적 선택입니다. 즉 `~/maru`에서 실행한 `claude`는 홈 아래 어디든 읽고(쓰기·실행은 일반 권한 규칙에 따름) 작업할 수 있으니, 신뢰할 수 있는 지시만 주세요. 좁히려면 그 파일의 `additionalDirectories`를 필요한 폴더 목록으로 바꾸거나 항목을 지우면 됩니다(`install.sh` 재실행은 홈을 다시 추가하므로 설치 후 직접 편집하세요). 이 설정은 헤드리스 회고에는 적용되지 않습니다(작업 폴더가 저장소 밖이므로).
 
+### 읽기 전용 명령 자동 허용
+`.claude/settings.json`의 `permissions.allow`에는 맥 상태를 조회만 하는 명령(`mdls`, `pmset -g`, `brew list`, `bin/maru status` 등)이 들어 있어 매번 확인하지 않습니다. 변경·발신·삭제·네트워크 전송·스크립트 실행 같은 명령은 허용하지 않으므로 계속 확인을 받습니다. 끄려면 그 파일에서 해당 항목(또는 `allow` 전체)을 지우면 됩니다. 내 설정은 `.claude/settings.local.json`에 따로 둘 수 있습니다.
+
 ### 설정
 `scripts/lib.sh` 상단 블록의 값은 환경변수나 `data/maru.conf`(`VAR=${VAR:-값}` 형식)로 덮어씁니다. `CLAUDE_CONFIG_DIR`도 따릅니다(launchd plist에는 설치 때의 값이 기록됩니다).
 - `MARU_SKILL_AUTOINSTALL=1`(선택, 기본 꺼짐): install.sh가 `~/.claude/CLAUDE.md` 블록에 "에이전트가 검토 후 문제없으면 직접 설치하고 알린다"는 문구를 씁니다. **위험**: 세션에 주입된 텍스트(웹페이지·붙여넣은 문서)가 스킬 제안으로 흘러들어 사용자 승인 없이 설치되면, 그 스킬은 모든 프로젝트에서 로드됩니다. 켜기 전에 이 위험을 이해하고 설치 후 `install.sh`를 다시 실행하세요.
