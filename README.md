@@ -24,7 +24,7 @@ macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인)
 
 선택 옵션(기본 꺼짐, `--dry-run` 지원, 옵션 없이 실행하면 위 동작과 동일):
 - `--with-cli`: `bin/maru` 를 `$MARU_BIN_DIR`(없으면 `~/.local/bin`, 없으면 생성)에 심볼릭 링크합니다. sudo·시스템 폴더(`/usr/local/bin` 등)는 쓰지 않고, 거기 이미 `maru` 가 있으면(다른 파일·다른 링크) 덮어쓰지 않고 경고 후 건너뜁니다(이 저장소를 가리키면 "이미 설치됨"). 폴더가 PATH 에 없으면 셸 설정 파일은 고치지 않고 추가할 한 줄만 안내합니다.
-- `--with-cmux`: cmux 가 있으면(`/Applications/cmux.app` 또는 `cmux` 명령) `${XDG_CONFIG_HOME:-~/.config}/cmux/dock.json` 을 설치합니다(`command` 에 설치 시점의 실제 저장소 경로를 채움). 파일이 없을 때 만들고, maru 가 만든 것(컨트롤이 id `maru-ui` 하나뿐이고 생성 내용과 같거나 `"$HOME/maru/bin/maru" ui` 형식이며 그 경로가 이 저장소)이면 갱신합니다. 그 외(다른 컨트롤이 있거나 내용이 다름)는 수정하지 않고 추가할 JSON 조각만 출력합니다(자동 병합 없음).
+- `--with-cmux`: cmux 가 있으면(`/Applications/cmux.app` 또는 `cmux` 명령) `${XDG_CONFIG_HOME:-~/.config}/cmux/dock.json` 을 설치합니다(`command` 에 설치 시점의 실제 저장소 경로를 채움). 파일이 없을 때 만들고, maru 가 만든 것(컨트롤이 id `maru-ui` 하나뿐이고 생성 내용과 같거나 `"$HOME/maru/bin/maru" ui` 형식이며 그 경로가 이 저장소)이면 갱신합니다. 그 외(다른 컨트롤이 있거나 내용이 다름)는 수정하지 않고 추가할 JSON 조각만 출력합니다(자동 병합 없음). `dock.json` 이 심볼릭 링크(끊어진 링크 포함)이면 dotfiles 관리 대상으로 보고 절대 건드리지 않습니다(설정 폴더 자체가 링크인 것은 허용). 갱신·삭제 전 백업이 실패하면 아무것도 바꾸지 않고 중단합니다. `$MARU_BIN_DIR` 는 `..` 를 거부하고 실경로로 정규화해 시스템 폴더(`/Applications` 포함)를 막습니다. 시험은 `scripts/test-optional.sh`(임시 폴더만 사용).
 - `uninstall.sh --with-cli --with-cmux`: 링크는 이 저장소 `bin/maru` 를 가리킬 때만, `dock.json` 은 maru 가 만든 것과 같을 때만 지웁니다(`data/backups/` 에 백업 후). 그 외는 건드리지 않고 안내합니다.
 
 ### 홈 디렉터리 전체 접근은 의도된 선택

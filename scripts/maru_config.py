@@ -162,7 +162,11 @@ def cmd_dock_gen(a):
 def cmd_dock_check(a):
     # same: 지금 생성될 내용과 동일 / legacy: 수동 설치된 `"$HOME/maru/bin/maru" ui` 이고 그 경로가 이 저장소
     # (둘 다 "maru 가 만든 것") / other: 그 외(사용자 파일로 간주) / missing
-    if not os.path.exists(a.file):
+    # 최종 파일이 심볼릭 링크(끊어진 것 포함)면 항상 other: 링크는 dotfiles 관리 대상이라 건드리지 않는다.
+    # (설정 폴더 자체가 링크인 것은 허용)
+    if os.path.islink(a.file):
+        print("other"); return
+    if not os.path.lexists(a.file):
         print("missing"); return
     try:
         with open(a.file, encoding="utf-8") as f: d = json.load(f)
