@@ -28,6 +28,15 @@ for c in claude jq python3 git perl; do
 done
 [ "$(uname)" = Darwin ] || { echo "  macOS 전용입니다(launchd·stat -f 사용)."; miss=1; }
 [ "$miss" = 0 ] || { echo "필요한 도구를 먼저 설치하세요."; exit 1; }
+if [ -n "$TG" ]; then
+  say "텔레그램 자동 시작 사전 확인"
+  if ! bash "$MARU_HOME/scripts/telegram.sh" check-access; then
+    echo "  --with-telegram 은 페어링과 allowlist 설정이 끝난 뒤에만 등록합니다. 먼저 README 「텔레그램으로 지시하기」의 1회 설정을 마친 뒤 다시 실행하세요(아무것도 등록하지 않고 종료)." >&2
+    exit 1
+  fi
+  sc=$(cd "$MARU_HOME" && claude plugin list 2>/dev/null | awk '/^ *❯ /{on=($0 ~ /telegram@claude-plugins-official/)} on && /Scope:/{sub(/.*Scope: */,""); print; exit}')
+  [ "$sc" = user ] && echo "  경고: 텔레그램 플러그인이 user 범위입니다. README 의 범위 이동 절차를 따르세요(설치 스크립트는 플러그인을 설치하지 않습니다)." >&2
+fi
 echo "  MARU_HOME=$MARU_HOME"; echo "  MARU_DATA=$MARU_DATA"; echo "  기억 폴더=$MEM"
 
 say "데이터·기억 폴더 생성"

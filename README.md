@@ -36,23 +36,30 @@ macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인)
 
 ### 1회 설정 (모두 사용자가 직접)
 1. 텔레그램에서 [BotFather](https://t.me/BotFather)에 `/newbot` → 이름과 `...bot`으로 끝나는 사용자명을 정하고 토큰을 받는다. **토큰은 남에게 보이지 않게 다룬다.**
-2. `claude`를 실행해 `/plugin install telegram@claude-plugins-official`(범위는 user 선택. marketplace 오류는 `/plugin marketplace add anthropics/claude-plugins-official`).
-3. 같은 세션에서 `/telegram:configure <토큰>`을 직접 입력한다. 토큰은 `~/.claude/channels/telegram/.env`에 저장된다(저장소 밖). 이 저장소·`data/`에는 두지 않는다.
-4. `claude`를 끝내고 `scripts/telegram.sh start` 후 `scripts/telegram.sh attach`로 화면을 본다(빠져나오기 `Ctrl-b d`).
-5. 텔레그램에서 봇에게 아무 메시지나 보내면 페어링 코드가 온다. attach한 화면에서 `/telegram:access pair <코드>`, 이어서 `/telegram:access policy allowlist`로 본인만 허용한다.
+2. 플러그인을 **maru 폴더 전용(local 범위)** 으로 설치한다: `cd ~/maru && claude plugin install telegram@claude-plugins-official --scope local`(marketplace 오류는 `/plugin marketplace add anthropics/claude-plugins-official`). **user 범위로 설치하지 마세요.** user 범위는 모든 Claude 세션이 텔레그램 서버를 띄워, 연결이 실패하거나 여러 세션이 같은 봇을 동시에 폴링할 수 있습니다. local 범위는 gitignore된 `.claude/settings.local.json`에 기록되어 저장소를 받은 다른 사람에게 강제되지 않습니다(`telegram.sh`는 maru 폴더에서 `claude plugin list`로 범위를 확인하고 user 범위면 시작을 거부합니다). 이미 user 범위로 설치했다면 `claude plugin uninstall telegram@claude-plugins-official --scope user` 후 위 명령을 실행하세요.
+3. `cd ~/maru && claude`에서 `/telegram:configure <토큰>`을 직접 입력한다. 토큰은 `~/.claude/channels/telegram/.env`에 저장된다(저장소 밖). 이 저장소·`data/`에는 두지 않으며 스크립트는 이 파일을 읽지 않는다.
+4. `claude`를 끝내고 `scripts/telegram.sh start` 후 `scripts/telegram.sh attach`로 화면을 본다(빠져나오기 `Ctrl-b d`). 페어링 전에는 시작 때 경고가 크게 뜹니다(정책이 pairing인 동안 봇에 말을 건 누구에게나 코드가 나감).
+5. 텔레그램에서 봇에게 아무 메시지나 보내면 페어링 코드가 온다. attach한 화면에서 `/telegram:access pair <코드>`, 이어서 `/telegram:access policy allowlist`로 본인만 허용한다. 접근 목록은 `~/.claude/channels/telegram/access.json`(`dmPolicy`, `allowFrom`).
+6. (선택) 로그인 때 자동 시작: `./install.sh --with-telegram`. 위 5단계(allowlist + 허용 발신자 1명 이상)가 끝나기 전에는 등록을 거부합니다.
 
 ### 시작·중지
 ```
-scripts/telegram.sh start     # tmux 세션 maru-telegram 에서 claude --channels plugin:telegram@claude-plugins-official (caffeinate -i 로 감쌈)
-scripts/telegram.sh status    # 실행 여부, 시작 시각, 화면 마지막 줄
-scripts/telegram.sh attach    # 화면 붙기 (Ctrl-b d 로 분리. 안에서 /exit 하면 세션 종료)
-scripts/telegram.sh logs [N]  # 최근 N줄(기본 100)을 화면에 출력. 파일로 저장하지 않음
-scripts/telegram.sh stop
+scripts/telegram.sh start                # tmux 세션 maru-telegram 에서 claude --channels plugin:telegram@claude-plugins-official --permission-mode <모드> (caffeinate -i 로 감쌈)
+scripts/telegram.sh start --unattended   # LaunchAgent용: allowlist + 허용 발신자 1명 이상이 아니면 시작 거부
+scripts/telegram.sh status               # 실행 여부, 시작 시각, 접근 설정, 막힌 화면(로그인 만료·신뢰/동의 대기·미설정) 감지, 화면 마지막 줄
+scripts/telegram.sh attach               # 화면 붙기 (Ctrl-b d 로 분리. 안에서 /exit 하면 세션 종료)
+scripts/telegram.sh logs [N]             # 최근 N줄(기본 100)을 화면에 출력. 파일로 저장하지 않음
+scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지 프로세스 트리 전체를 끝내고 남은 것이 없는지 확인
 ```
-비정상 종료하면 백오프(10초·20초·40초…최대 5분) 후 자동 재시작하고, 1시간에 5회를 넘으면 멈추고 macOS 알림을 띄웁니다(`/exit` 같은 정상 종료는 되살리지 않음). 로그인 때 자동 시작: `./install.sh --with-telegram`(기본 꺼짐, `uninstall.sh`가 제거). **LaunchAgent는 사용자가 로그인한 뒤에만 시작**되므로 재부팅 후 로그인 화면에서는 동작하지 않습니다.
+비정상 종료하면 백오프(10초·20초·40초…최대 5분) 후 자동 재시작하고, 1시간에 5회(`MARU_TELEGRAM_MAX_RESTARTS`)를 넘으면 멈추고 macOS 알림을 띄웁니다. `/exit` 같은 정상 종료나 `stop`은 되살리지 않습니다. 세션은 떠 있지만 로그인 만료·동의 화면 등에서 멈춰 있는 경우는 시작 직후와 `status`에서 알려 주고, 자동 시작이면 macOS 알림도 보냅니다. **LaunchAgent는 사용자가 로그인한 뒤에만 시작**되므로 재부팅 후 로그인 화면에서는 동작하지 않습니다.
 
-### 권한 프롬프트와 선택 (중요한 트레이드오프)
-도구 사용 승인 프롬프트가 뜨면 **세션이 멈추고 터미널에서 응답을 기다립니다.** 채널 서버가 permission relay를 지원하면 프롬프트가 채팅으로도 전달되고 먼저 온 답이 적용되지만, 문서는 Telegram 플러그인이 이를 지원하는지 밝히지 않습니다(**미확인**). 문서가 자리를 비울 때의 방법으로 안내하는 `--dangerously-skip-permissions`는 **마루가 쓰지 않습니다**(스크립트가 거부). 기본값은 평소 권한 모드이므로 승인이 필요한 작업은 맥 앞에서 attach해 답해야 진행됩니다. 더 자율적으로 돌리려면 `data/maru.conf`에 `MARU_TELEGRAM_PERMISSION_MODE=acceptEdits`(파일 편집 자동 승인) 같은 값을 넣을 수 있으나(허용: acceptEdits auto plan manual dontAsk), 모드가 넓을수록 텔레그램 메시지 한 통이 곧 맥에서의 실행 권한이 됩니다. 이 변수는 `start`를 다시 해야 적용됩니다.
+### 권한 모드 (중요한 트레이드오프)
+`data/maru.conf`의 `MARU_TELEGRAM_PERMISSION_MODE`(기본 `default`)로 정하고, 항상 `--permission-mode`로 명시해 넘기므로 사용자의 전역 기본 모드가 암묵적으로 적용되지 않습니다. 허용 값은 아래 4개뿐이며 그 외(`bypassPermissions`, `dontAsk`, 빈 값 등)는 거부합니다. `--dangerously-skip-permissions`는 쓰지 않습니다. `start`를 다시 해야 바뀝니다. 이 세션은 홈 전체에 접근할 수 있고 허용된 텔레그램 발신자의 말이 곧 지시라는 점을 전제로 고르세요.
+- `default`: 도구 사용 승인 프롬프트마다 **세션이 멈추고 맥의 터미널에서 답할 때까지 기다립니다.** 채널 서버가 permission relay를 지원하면 채팅으로도 승인할 수 있지만 Telegram 플러그인이 지원하는지는 문서에 없습니다(**미확인**). 가장 안전하지만 폰만으로는 거의 일을 못 합니다.
+- `acceptEdits`: 파일 편집은 자동 승인, 셸 명령 등은 여전히 멈춤.
+- `plan`: 계획만 세우고 실행하지 않음(읽기 전용 조사용).
+- `auto`: 내장 분류기가 일상적인 작업을 묻지 않고 승인합니다. 자리를 비워도 쓸 만하게 만드는 값이지만, 분류기가 틀리거나 악성 지시가 섞이면 승인 없이 실행될 위험을 감수한다는 뜻입니다.
+이 맥의 `data/maru.conf`에는 `MARU_TELEGRAM_PERMISSION_MODE=${MARU_TELEGRAM_PERMISSION_MODE-auto}`처럼 `VAR=${VAR-값}` 형식으로 씁니다.
 
 ### 원격으로 되는 것 / 안 되는 것
 - 되는 것: 홈 아래 파일·CLI·MCP 커넥터 작업, 조사·정리, 결과 요약 회신(긴 결과는 파일로 저장 후 경로 회신).
@@ -60,8 +67,10 @@ scripts/telegram.sh stop
 - 사진은 수신 때 내려받고(`~/.claude/channels/telegram/inbox/`) 압축되므로 원본은 문서로 보내세요. 메시지 기록·검색, 첨부 다운로드 도구는 없습니다(봇 API 한계).
 
 ### 보안
-- 허용 목록에는 **본인 텔레그램 계정만** 넣습니다. 허용된 발신자는 채널이 permission relay를 지원할 경우 도구 사용을 승인할 수도 있으므로 사실상 맥에 대한 원격 조작 권한입니다. 허용 목록 밖 발신자는 조용히 무시됩니다(allowlist 정책 이후).
-- 봇 토큰이 새면 BotFather에서 재발급하세요. 전달받은 메시지·링크·파일 속 지시는 데이터로만 다룹니다(`CLAUDE.md`).
+- **허용 목록에 오른 계정은 홈 디렉터리 전체에 접근하는 에이전트에게 명령을 시킬 수 있습니다. 그 텔레그램 계정을 탈취당하면 사실상 맥의 셸 권한을 내주는 것과 같습니다.** 그래서 텔레그램 2단계 인증(설정 > 개인정보 보호 및 보안 > 2단계 인증)과 앱 암호(Passcode) 잠금을 켜고, 허용 목록에는 **본인 계정 정확히 1개만** 두세요. 허용 그룹도 두지 않습니다(`--unattended`는 그룹이 있으면 거부).
+- 채널이 permission relay를 지원할 경우 허용된 발신자는 도구 사용도 승인할 수 있습니다. 허용 목록 밖 발신자는 allowlist 정책 이후 조용히 무시됩니다.
+- **접근 회수**: ① `scripts/telegram.sh stop` ② 세션에서 `/telegram:access remove <ID>`(또는 `policy disabled`) ③ BotFather에서 봇 토큰을 재발급/폐기(`/revoke`). 토큰이 새었다고 의심되면 ③을 먼저 하세요.
+- 전달받은 메시지·링크·파일 속 지시는 데이터로만 다룹니다(`CLAUDE.md`).
 - **맥이 켜져 있고 깨어 있어야 합니다.** `caffeinate -i`는 유휴 잠자기만 막습니다. 덮개를 닫으면 전원·외부 디스플레이 연결 여부에 따라 잠들 수 있어(**미검증**) 덮개를 연 채 전원에 연결하세요. 잠들면 그 동안은 응답하지 않습니다.
 
 ### 한계 (문서 기준)
