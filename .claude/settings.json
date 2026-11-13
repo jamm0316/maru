@@ -23,7 +23,6 @@
       "Bash(scutil --nwi)",
       "Bash(brew list *)",
       "Bash(brew info *)",
-      "Bash(brew outdated *)",
       "Bash(brew --version)",
       "Bash(shortcuts list *)",
       "Bash(softwareupdate -l)",
