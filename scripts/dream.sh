@@ -101,7 +101,9 @@ else
   mem_snap "$MEM" | md5 -q > "$MARKER"
   fail_reset dream
 fi
-txn_end "$TXN"; rm -rf "$STAGE"
+txn_end "$TXN"
+[ -z "$reason" ] && apply_suggestions "$STAGE/suggestions.txt"   # 추천 목록: 기억 트랜잭션과 독립(lib.sh)
+rm -rf "$STAGE"
 [ -n "$reason" ] && exit 0
 
 # ---- c. Commit: 기억 폴더만

@@ -1,6 +1,6 @@
 #!/bin/bash
 # maru 런처. 아무것도 설치·수정하지 않는다(PATH 등록 없음). bash 3.2 호환.
-# 사용: maru [ui|status|log [reflect|dream]|hist ...|doctor|help]
+# 사용: maru [ui|suggest [번호]|status|log [reflect|dream]|hist ...|doctor|help]
 set -u
 
 # 자기 자신의 실제 경로(심볼릭 링크 해석)로 저장소 위치를 계산한다.
@@ -28,7 +28,8 @@ usage() {
   cat <<'USAGE'
 maru — 개인 에이전트 마루 런처
   maru                 저장소에서 claude 실행
-  maru ui              상황판(TUI): 1상태 2기억 3로그 4제안
+  maru ui              상황판(TUI): 1상태 2기억 3로그 4제안 5추천
+  maru suggest [번호]  추천 요청 목록 보기 / 그 번호의 줄을 클립보드에 복사(전송 안 함)
   maru status          maru-status.sh 출력 (--json 등 옵션 전달)
   maru log [reflect|dream]   로그 마지막 줄 보기(기본 reflect)
   maru hist ...        기억 변경 이력(읽기 전용: log show diff status ls-files)
@@ -95,6 +96,9 @@ case "$cmd" in
   ui)
     py=$(pick_python) || { echo "python3 를 쓸 수 없습니다. maru doctor 로 확인하세요." >&2; exit 1; }
     exec "$py" "$MARU_HOME/scripts/maru_ui.py" "$@" ;;
+  suggest)
+    py=$(pick_python) || { echo "python3 를 쓸 수 없습니다. maru doctor 로 확인하세요." >&2; exit 1; }
+    exec "$py" "$MARU_HOME/scripts/maru_ui.py" --suggest "$@" ;;
   status) exec "$MARU_HOME/scripts/maru-status.sh" "$@" ;;
   log)
     kind=${1:-reflect}

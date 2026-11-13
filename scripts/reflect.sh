@@ -137,6 +137,7 @@ for d in "$STAGE"/*; do
     "$n" "$today" "$short" "$exist" > "$PROPOSALS/$n/PROPOSAL.md"
   log "[$short] 스킬 제안 저장: $n ($exist)"
 done
+apply_suggestions "$STAGE/suggestions.txt"   # 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
 rm -rf "$STAGE"
 
 [ $rc -eq 0 ] && echo "$total" > "$LINES_FILE"

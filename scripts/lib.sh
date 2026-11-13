@@ -189,6 +189,49 @@ apply_deletions() {
   return 0
 }
 
+# ---- 추천 목록(기억 트랜잭션과 독립): apply_suggestions <stage의 suggestions.txt>
+# 모델이 쓴 후보를 검증해 $MARU_DATA/suggestions.txt 로 원자적 교체한다. 항상 0을 반환한다(실패는 로그만, 기존 목록 유지).
+# 검증: 일반 파일(심볼릭 링크 거부)·64KB 이하·UTF-8 / 줄마다 앞뒤 공백 제거, 빈 줄 제거, 120자 초과 줄 버림,
+# 제어·서식(bidi/zero-width 포함)·사설/미할당 문자, 줄 구분자, 한글 채움 문자가 든 줄 버림, 중복 제거, 앞에서 8줄까지.
+# 남은 줄이 하나도 없으면 기존 목록을 그대로 둔다.
+apply_suggestions() {
+  local src=$1 dst=$MARU_DATA/suggestions.txt tmp res
+  [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
+  mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "추천 목록: data 폴더 없음 — 건너뜀"; return 0; }
+  tmp=$(mktemp "$MARU_DATA/.suggestions.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "추천 목록: 임시 파일 실패 — 건너뜀"; return 0; }
+  res=$(python3 -I - "$src" "$tmp" <<'PY' 2>&1
+import os, stat, sys, unicodedata
+src, tmp = sys.argv[1:3]
+MAX_BYTES, MAX_LINES, MAX_CHARS = 65536, 8, 120
+HIDDEN = {"\u3164", "\u115f", "\u1160", "\uffa0", "\u2800"}
+try:
+    st = os.lstat(src)
+    if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
+    if st.st_size > MAX_BYTES: print("거부: 크기 초과(%d바이트)" % st.st_size); sys.exit(1)
+    with open(src, "rb") as f: raw = f.read(MAX_BYTES + 1)
+    text = raw.decode("utf-8")
+except (OSError, UnicodeDecodeError) as e:
+    print("거부: 읽기 실패(%s)" % type(e).__name__); sys.exit(1)
+out, seen, dropped = [], set(), 0
+for line in text.split("\n"):
+    if line.endswith("\r"): line = line[:-1]
+    line = line.strip(" ")
+    if not line: continue
+    if len(line) > MAX_CHARS or any(c in HIDDEN or unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") for c in line):
+        dropped += 1; continue
+    if line in seen: continue
+    seen.add(line); out.append(line)
+if not out: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
+over = max(0, len(out) - MAX_LINES)
+with open(tmp, "w", encoding="utf-8") as f: f.write("\n".join(out[:MAX_LINES]) + "\n")
+print("ok %d줄(버린 줄 %d, 상한 초과 %d)" % (len(out[:MAX_LINES]), dropped, over))
+PY
+  ) && [ -s "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$dst" 2>/dev/null
+  if [ $? -eq 0 ]; then type log >/dev/null 2>&1 && log "추천 목록 갱신: $res"
+  else rm -f "$tmp"; type log >/dev/null 2>&1 && log "추천 목록 유지(기존 목록 그대로): ${res:-반영 실패}"; fi
+  return 0
+}
+
 # 프롬프트 템플릿의 {{키}} 를 값으로 치환(경로에 어떤 문자가 있어도 안전): render_template <파일> 키=값...
 render_template() {
   python3 -I -c '

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """maru ui: cmux 우측 Dock 같은 좁은 터미널(40~60열)에서 쓰는 마루 상황판(curses, 표준 라이브러리만).
 
-사용: maru_ui.py [--once | --selftest]
-  (없음)      대화형 화면. 탭: 1 상태 / 2 기억 / 3 로그 / 4 제안 (Tab 으로 순환), q 종료
+사용: maru_ui.py [--once | --selftest | --suggest [번호]]
+  (없음)      대화형 화면. 탭: 1 상태 / 2 기억 / 3 로그 / 4 제안 / 5 추천 (Tab 으로 순환), q 종료
   --once      curses 없이 상태 탭 내용을 평문으로 한 번 출력
   --selftest  임시 디렉터리에서 로더·설치·거절 로직을 검증하고 0/1 로 종료
+  --suggest   추천 목록을 번호와 함께 출력. 번호를 주면 그 줄을 클립보드에 복사(전송은 하지 않는다)
 
-읽기 전용이 기본이다. 쓰기는 제안 탭의 설치(i, 정확히 yes 입력)와 거절(x, .rejected/ 로 이동)뿐이다.
+읽기 전용이 기본이다. 쓰기는 제안 탭의 설치(i, 정확히 yes 입력)와 거절(x, .rejected/ 로 이동), 추천 탭의 클립보드 복사(pbcopy)뿐이다.
 네트워크·서버·포트를 쓰지 않는다. 제안 내용은 신뢰할 수 없는 데이터라 표시만 하고 실행하지 않는다.
 """
 import hashlib
@@ -39,6 +40,7 @@ class Paths:
         self.logs = os.path.join(data, "logs")
         self.proposals = os.path.join(data, "skill-proposals")
         self.state = os.path.join(data, "state")
+        self.suggestions = os.path.join(data, "suggestions.txt")
         self.repo_skills = os.path.join(home, ".claude", "skills")   # 저장소 자체 스킬: 이름 사칭 방지용
         self.launchd_label = launchd_label
 
@@ -375,7 +377,18 @@ def read_regular(path, limit):
 
 
 HIDDEN_CHARS = {"\u3164", "\u115f", "\u1160", "\uffa0", "\u2800"}
-ALLOWED_KEYS = ("name", "description")
+ALLOWED_KEYS = ("name", "description", "argument-hint")
+ARG_HINT_MAX = 100
+
+
+def arg_hint_problem(val):
+    """argument-hint 값 검사: 한 줄·100자 이하·제어/숨김 문자 없음. 문제가 있으면 사유, 없으면 None."""
+    if len(val) > ARG_HINT_MAX:
+        return "argument-hint 가 %d자 초과" % ARG_HINT_MAX
+    if any(c in HIDDEN_CHARS or c in "\n\r" or unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")
+           for c in val):
+        return "argument-hint 에 제어·숨김 문자 또는 줄바꿈"
+    return None
 
 
 def skill_frontmatter(text):
@@ -421,6 +434,10 @@ def content_blockers(p, name, data):
         extra = sorted(k for k in keys if k not in ALLOWED_KEYS)
         if extra:
             why.append("허용되지 않은 frontmatter 키: " + ", ".join(extra))
+        if "argument-hint" in keys:
+            ah = arg_hint_problem(keys["argument-hint"])
+            if ah:
+                why.append(ah)
         if "name" in keys and keys["name"] != name:
             why.append("frontmatter name(%s)이 디렉터리 이름과 다름" % sanitize(keys["name"])[:40])
     try:
@@ -574,8 +591,84 @@ def press_install(p, rv):
     return "confirm", ""
 
 
+# ---------------------------------------------------------------- 추천 목록
+SUGGEST_MAX_BYTES = 64 * 1024
+SUGGEST_MAX_LINES = 8
+SUGGEST_MAX_CHARS = 120
+
+
+def load_suggestions(path):
+    """data/suggestions.txt 로더(신뢰할 수 없는 표시 데이터). 일반 파일·크기 상한·UTF-8 만 허용(아니면 []).
+    제어·서식(bidi/zero-width)·숨김 문자가 든 줄, 120자 초과 줄, 중복은 버리고 앞 8줄까지만 돌려준다."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > SUGGEST_MAX_BYTES:
+            return []
+        with open(path, "rb") as f:
+            text = f.read(SUGGEST_MAX_BYTES + 1).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    out, seen = [], set()
+    for line in text.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
+        line = line.strip(" ")
+        if not line or len(line) > SUGGEST_MAX_CHARS or line in seen:
+            continue
+        if any(c in HIDDEN_CHARS or unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") for c in line):
+            continue
+        seen.add(line)
+        out.append(line)
+    return out[:SUGGEST_MAX_LINES]
+
+
+def clipboard_argv():
+    """복사 명령. 텍스트는 인자가 아니라 표준입력으로 넘긴다(셸·인자 해석 없음)."""
+    return ["pbcopy"]
+
+
+def _run_pbcopy(argv, data):
+    subprocess.run(argv, input=data, check=True, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def copy_suggestion(text, runner=None):
+    """한 줄을 줄바꿈 없이 클립보드에 복사한다. 절대 전송하지 않는다. (ok, 메시지). runner(argv, bytes) 는 시험용 주입."""
+    line = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    if not line:
+        return False, "복사할 내용 없음"
+    try:
+        (runner or _run_pbcopy)(clipboard_argv(), line.encode("utf-8"))
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, "복사 실패: %s" % type(e).__name__
+    return True, "복사됨 — 대화창에 붙여넣고 내용을 확인한 뒤 Enter"
+
+
+def suggest_cli(p, args, runner=None, out=None):
+    """maru suggest [n]: 목록 출력 / n번 복사. 종료 코드를 돌려준다."""
+    out = out or sys.stdout
+    items = load_suggestions(p.suggestions)
+    if not args:
+        if not items:
+            print("추천 목록이 없습니다(회고·새벽 정리가 쌓으면 생깁니다).", file=out)
+            return 0
+        for i, t in enumerate(items, 1):
+            print("%d. %s" % (i, t), file=out)
+        print("복사: maru suggest <번호> (붙여넣은 뒤 직접 Enter)", file=out)
+        return 0
+    if len(args) != 1 or not re.fullmatch(r"[0-9]{1,3}", args[0]):
+        print("사용: maru suggest [번호]", file=sys.stderr)
+        return 2
+    n = int(args[0])
+    if not 1 <= n <= len(items):
+        print("번호 범위 밖(1~%d)" % len(items) if items else "추천 목록이 없습니다", file=sys.stderr)
+        return 1
+    ok, msg = copy_suggestion(items[n - 1], runner)
+    print(msg, file=out if ok else sys.stderr)
+    return 0 if ok else 1
+
+
 # ---------------------------------------------------------------- 대화형 화면
-TABS = ["상태", "기억", "로그", "제안"]
+TABS = ["상태", "기억", "로그", "제안", "추천"]
 MIN_W, MIN_H = 30, 8
 
 
@@ -598,6 +691,7 @@ def _ui(scr, p, curses):
         "tab": 0, "msg": "", "status": None, "status_at": 0.0,
         "mem": [], "mem_sel": 0, "mem_flt": "", "mem_view": None, "mem_scroll": 0,
         "log_kind": "reflect", "log_lines": None, "log_scroll": None,
+        "sugs": [], "sug_sel": 0,
         "props": [], "prop_sel": 0, "prop_view": None,   # prop_view: new_review() 결과(스냅샷 포함)
         "mode": "",      # '' | 'filter' | 'confirm-install' | 'confirm-reject'
         "input": "",
@@ -607,6 +701,8 @@ def _ui(scr, p, curses):
         S["status"] = load_status(p)
         S["status_at"] = time.time()
         S["mem"] = load_memories(p.mem)
+        S["sugs"] = load_suggestions(p.suggestions)
+        S["sug_sel"] = min(S["sug_sel"], max(0, len(S["sugs"]) - 1))
         S["props"] = list_proposals(p.proposals)
         S["prop_sel"] = min(S["prop_sel"], max(0, len(S["props"]) - 1))
         S["log_lines"] = tail_lines(os.path.join(p.logs, S["log_kind"] + ".log"))
@@ -670,8 +766,10 @@ def _ui(scr, p, curses):
             hint = draw_memory(1, body_h, W)
         elif tab == 2:
             hint = draw_log(1, body_h, W)
-        else:
+        elif tab == 3:
             hint = draw_props(1, body_h, W)
+        else:
+            hint = draw_sugs(1, body_h, W)
         if S["mode"] == "filter":
             put(h - 1, 0, "필터> " + S["input"] + "_", curses.A_BOLD)
         elif S["mode"] == "confirm-install":
@@ -771,6 +869,19 @@ def _ui(scr, p, curses):
                 curses.A_REVERSE if top + n == S["prop_sel"] else 0)
         return "j/k 이동 Enter 보기 i 설치 x 거절"
 
+    def draw_sugs(y0, h, W):
+        put(y0, 0, "! 복사만 합니다. 붙여넣고 확인한 뒤 직접 Enter", curses.A_BOLD)
+        if not S["sugs"]:
+            put(y0 + 1, 0, "추천 없음(회고·새벽 정리가 쌓습니다)")
+            return "r 갱신"
+        S["sug_sel"] = max(0, min(S["sug_sel"], len(S["sugs"]) - 1))
+        avail = h - 1
+        top = max(0, min(S["sug_sel"] - avail // 2, len(S["sugs"]) - avail))
+        for n, t in enumerate(S["sugs"][top:top + avail]):
+            put(y0 + 1 + n, 0, " %d %s" % (top + n + 1, sanitize(t)),
+                curses.A_REVERSE if top + n == S["sug_sel"] else 0)
+        return "↑↓ 이동 Enter/c 복사"
+
     def cur_prop():
         if S["props"] and 0 <= S["prop_sel"] < len(S["props"]):
             return S["props"][S["prop_sel"]]
@@ -802,6 +913,8 @@ def _ui(scr, p, curses):
         S["input"] = ""
         if S["tab"] == 3:
             S["props"] = list_proposals(p.proposals)
+        if S["tab"] == 4:
+            S["sugs"] = load_suggestions(p.suggestions)
 
     def handle_input_mode(k):
         """필터·확인 입력 모드. 처리했으면 True."""
@@ -886,7 +999,7 @@ def _ui(scr, p, curses):
         if k == curses.KEY_BTAB:
             switch(tab - 1)
             continue
-        if isinstance(k, str) and k in "1234" and len(k) == 1 and not in_view:
+        if isinstance(k, str) and k in "12345" and len(k) == 1 and not in_view:
             switch(int(k) - 1)
             continue
         if k == "r":
@@ -926,6 +1039,14 @@ def _ui(scr, p, curses):
                     total = sum(len(wrap_text(l, W - 1)) for l in S["log_lines"])
                 cur = S["log_scroll"] if S["log_scroll"] is not None else total
                 S["log_scroll"] = scroll_key(kk, cur, total, body_h)
+        elif tab == 4:
+            if kk in (curses.KEY_DOWN, ord("j")):
+                S["sug_sel"] = min(S["sug_sel"] + 1, max(0, len(S["sugs"]) - 1))
+            elif kk in (curses.KEY_UP, ord("k")):
+                S["sug_sel"] = max(S["sug_sel"] - 1, 0)
+            elif k in ("\n", "\r", "c") or k == curses.KEY_ENTER:
+                if S["sugs"]:
+                    S["msg"] = copy_suggestion(S["sugs"][min(S["sug_sel"], len(S["sugs"]) - 1)])[1]
         elif tab == 3:
             if S["prop_view"] is not None:
                 rv = S["prop_view"]
@@ -1191,6 +1312,64 @@ def selftest():
         check(st["memory_files"] is None and st["proposals"] is None and st["reflect"] is None, "empty env status")
         check(list_proposals(empty.proposals) == [], "empty proposals")
         check(sanitize("a\x1b[2Jb\tc") == "a?[2Jb    c", "sanitize")
+
+        # argument-hint 허용/거부, 그 외 키는 계속 거부
+        ah_md = "---\nname: %s\ndescription: d\nargument-hint: %s\n---\nb\n"
+        mk2("ah-ok", ah_md % ("ah-ok", "[주제] [기간]"))
+        check(not snapshot_proposal(p, "ah-ok")["blockers"], "argument-hint allowed")
+        mk2("ah-quoted", ah_md % ("ah-quoted", '"[a|b]"'))
+        check(not snapshot_proposal(p, "ah-quoted")["blockers"], "quoted argument-hint allowed")
+        mk2("ah-100", ah_md % ("ah-100", "a" * 100))
+        check(not snapshot_proposal(p, "ah-100")["blockers"], "argument-hint 100 chars allowed")
+        mk2("ah-101", ah_md % ("ah-101", "a" * 101))
+        refused("ah-101", "argument-hint too long", "argument-hint")
+        mk2("ah-ctl", ah_md % ("ah-ctl", "a\x07b"))
+        refused("ah-ctl", "argument-hint control char")
+        mk2("ah-bidi", ah_md % ("ah-bidi", "a\u202eb"))
+        refused("ah-bidi", "argument-hint bidi")
+        mk2("ah-dup", "---\nname: ah-dup\nargument-hint: a\nargument-hint: b\n---\nb\n")
+        refused("ah-dup", "duplicate argument-hint")
+        mk2("ah-multi", "---\nname: ah-multi\nargument-hint: a\n  continued\n---\nb\n")
+        refused("ah-multi", "multi-line argument-hint")
+        mk2("ah-other2", "---\nname: ah-other2\nargument-hint: x\nallowed-tools: Bash\n---\nb\n")
+        refused("ah-other2", "other key still rejected with argument-hint", "allowed-tools")
+
+        # 추천 목록 로더·검증·복사
+        sp = os.path.join(tmp, "sug.txt")
+        w(sp, "첫째 요청\n\n첫째 요청\n둘째 요청  \n숨김\u202e문자\n제로\u200b폭\n채움\u3164\n제어\x1b[0m\n탭\t줄\n" + "가" * 121 + "\n" + "나" * 120 + "\n")
+        got = load_suggestions(sp)
+        check(got == ["첫째 요청", "둘째 요청", "나" * 120], "loader drops hidden/long/dup/blank lines: %r" % got)
+        w(sp, "".join("줄 %d\n" % i for i in range(20)))
+        check(len(load_suggestions(sp)) == 8, "loader caps at 8 lines")
+        w(sp, "a" * (SUGGEST_MAX_BYTES + 1))
+        check(load_suggestions(sp) == [], "loader rejects oversize file")
+        with open(sp, "wb") as f:
+            f.write(b"\xff\xfe\n")
+        check(load_suggestions(sp) == [], "loader rejects invalid utf-8")
+        real = os.path.join(tmp, "real-sug.txt")
+        w(real, "정상 줄\n")
+        link = os.path.join(tmp, "link-sug.txt")
+        os.symlink(real, link)
+        check(load_suggestions(real) == ["정상 줄"] and load_suggestions(link) == [], "loader rejects symlink")
+        check(load_suggestions(os.path.join(tmp, "nope.txt")) == [], "loader missing file")
+        calls = []
+        ok, msg = copy_suggestion("a\nb\r\nc", runner=lambda argv, data: calls.append((argv, data)))
+        check(ok and calls == [(["pbcopy"], b"a b c")] and "붙여넣고" in msg and "Enter" in msg, "copy builds pbcopy stdin without newline")
+        check(not copy_suggestion("  \n ", runner=lambda a, d: calls.append(1))[0] and len(calls) == 1, "copy rejects empty")
+
+        def boom(argv, data):
+            raise OSError("x")
+        check(not copy_suggestion("x", runner=boom)[0], "copy failure reported")
+        import io
+        w(os.path.join(data, "suggestions.txt"), "하나\n둘\n")
+        buf = io.StringIO()
+        calls2 = []
+        check(suggest_cli(p, [], out=buf) == 0 and "1. 하나" in buf.getvalue() and "2. 둘" in buf.getvalue(), "suggest lists numbered")
+        check(suggest_cli(p, ["2"], runner=lambda a, d: calls2.append(d), out=io.StringIO()) == 0 and calls2 == ["둘".encode()], "suggest n copies line n")
+        check(suggest_cli(p, ["3"], runner=lambda a, d: calls2.append(d), out=io.StringIO()) == 1 and len(calls2) == 1, "suggest out of range")
+        os.remove(os.path.join(data, "suggestions.txt"))
+        buf = io.StringIO()
+        check(suggest_cli(p, [], out=buf) == 0 and "없습니다" in buf.getvalue(), "suggest empty list")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("selftest: %s" % ("OK" if not fails else "%d 실패" % len(fails)))
@@ -1204,11 +1383,13 @@ def main(argv):
     if "--selftest" in argv[1:]:
         return selftest()
     p = Paths.from_env()
+    if "--suggest" in argv[1:]:
+        return suggest_cli(p, argv[argv.index("--suggest") + 1:])
     if "--once" in argv[1:]:
         print("\n".join(status_lines(load_status(p))))
         return 0
     if len(argv) > 1:
-        print("알 수 없는 옵션: %s (--once, --selftest)" % " ".join(argv[1:]), file=sys.stderr)
+        print("알 수 없는 옵션: %s (--once, --selftest, --suggest)" % " ".join(argv[1:]), file=sys.stderr)
         return 2
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("터미널이 아닙니다. 평문 상태는 --once 를 쓰세요.", file=sys.stderr)
