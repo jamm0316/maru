@@ -6,6 +6,7 @@ Claude Code 위에서 도는 **개인 총괄 에이전트**입니다. 이 폴더
 - **정기 정리(dream)**: 매일 03:30 launchd 작업이 놓친 세션을 회고하고 기억을 정리합니다.
 - **스킬 제안**: 반복되는 절차는 `data/skill-proposals/`에 제안으로만 쌓입니다. 기본값에서는 에이전트가 제안 내용을 한 줄로 알리고 사용자가 명시적으로 승인한 뒤에만 설치합니다(아래 `MARU_SKILL_AUTOINSTALL` 참고).
 - **recall 스킬**: 과거 대화를 검색합니다.
+- **mac-control 스킬**: 맥 자체를 다루는 일(앱·파일·설정·시스템 상태·캘린더 등)을 가장 가벼운 수단부터 골라 수행합니다(아래 「맥 통제」).
 
 ## 요구사항
 macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인), `jq`, `python3`, `git`, `perl`.
@@ -79,13 +80,20 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 - 한 봇은 한 세션에서만 쓰는 것으로 가정하세요(문서에 명시 없음, **미확인**). 봇을 더 쓰려면 `TELEGRAM_STATE_DIR`로 상태 폴더를 분리합니다.
 - 여러 메시지가 한꺼번에 오면 다음 턴에 묶여 처리됩니다. 채널 답장은 터미널에 "sent" 정도만 보입니다.
 
+## 맥 통제
+이 폴더에서 `claude`를 실행하면 `mac-control` 스킬이 로드되어, "앱 열어 줘", "디스크 얼마 남았지", "다운로드 폴더에서 PDF 찾아 줘", "미리 알림에 추가해 줘" 같은 요청을 처리합니다. 전용 연동/API → CLI → AppleScript·단축어 → 브라우저 자동화 → 화면 조작 순으로 가벼운 수단부터 쓰고, 실행 전후에 상태를 조회해 결과를 확인합니다.
+- `scripts/mac-inventory.sh`: 설치 앱(번들 ID, 스크립트 지원 여부)·brew·단축어·CLI 도구를 `data/mac-inventory.md`에 기록합니다(읽기 전용, 앱 실행·권한 요청 없음, 시리얼·계정·네트워크 식별자 제외). 일주일이 지나면 에이전트가 다시 돌립니다.
+- 앱별 요령은 `.claude/skills/mac-control/reference/apps/`에 쌓이며 일반 지식만 담습니다.
+- **사용자가 직접 켜야 하는 권한**(시스템 설정 > 개인정보 보호 및 보안): 자동화(Finder·Safari·캘린더 등 앱별, 실행 주체 앱 단위), 손쉬운 사용(UI 스크립팅·키 입력), 화면 및 시스템 오디오 기록(스크린샷), 전체 디스크 접근(Mail·Messages·Safari 데이터 등). 필요한 순간 에이전트가 어느 항목·어느 앱인지 알려 줍니다. 대신 눌러 주지 않습니다.
+- **수동으로 남는 것**: 영구 삭제, 사용자 명의 발신, 결제·주문, 시스템·보안 설정 변경, 비밀번호·토큰 입력은 사용자가 직접 하거나 매번 확인을 받습니다. 삭제는 휴지통 이동이 기본입니다.
+
 ## 구조
 ```
 CLAUDE.md          에이전트 정체성과 규칙 (개인 정보 없음)
-scripts/           reflect.sh dream.sh telegram.sh lib.sh(설정 블록) digest.py hist maru_config.py
+scripts/           reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정 블록) digest.py hist maru_config.py
 prompts/           회고·정리 프롬프트 템플릿 ({{MEMORY_DIR}} 등 자리표시자)
 launchd/           plist 템플릿 (설치 때 경로 치환)
-.claude/skills/    recall 스킬
+.claude/skills/    recall 스킬, mac-control 스킬(SKILL.md + reference/ cli·applescript·apps)
 data/              개인 데이터 (gitignore): state logs digests skill-proposals stage history.git backups maru.conf
 ```
 - 코드는 `MARU_HOME`(스크립트 위치 기준), 개인 데이터는 `MARU_DATA`(기본 `$MARU_HOME/data`)에 둡니다. 설정은 `scripts/lib.sh` 상단 한 곳이며 환경변수 또는 `data/maru.conf`로 덮어씁니다.
