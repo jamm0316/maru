@@ -1,8 +1,32 @@
 #!/bin/bash
 # 개인 변경 이력(기억 폴더만 추적) 조회 도구. 읽기 전용 명령만 허용한다: log show diff status ls-files
 # (쓰기·되돌리기는 scripts 내부에서만 한다. 사람·에이전트가 checkout/reset/clean 등을 실수로 쓰지 못하게 막는다.)
+# 허용한 하위 명령도 파일을 쓰거나 외부 프로그램을 돌리는 옵션(--output, --ext-diff, --textconv 등)과
+# 저장소·설정을 바꾸는 옵션(-c, -C, --git-dir, --work-tree, --exec-path)은 거부한다. `--` 뒤는 경로라 검사하지 않는다.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
-case "${1:-}" in
-  log|show|diff|status|ls-files) hist_git "$@" ;;
-  *) echo "hist: '${1:-}' 는 허용되지 않습니다. 허용: log show diff status ls-files" >&2; exit 2 ;;
+unset GIT_EXTERNAL_DIFF GIT_PAGER GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+sub="${1:-}"
+case "$sub" in
+  log|show|diff|status|ls-files) shift ;;
+  *) echo "hist: '${sub}' 는 허용되지 않습니다. 허용: log show diff status ls-files" >&2; exit 2 ;;
+esac
+deny() { echo "hist: 옵션 '$1' 는 허용되지 않습니다(읽기 전용 도구)." >&2; exit 2; }
+for a in "$@"; do
+  [ "$a" = "--" ] && break
+  case "$a" in
+    --*)
+      # git 은 긴 옵션의 모호하지 않은 앞부분(--outp 등)도 받으므로, 금지 옵션의 앞부분이면 모두 거부한다
+      name="${a#--}"; name="${name%%=*}"
+      if [ -n "$name" ]; then
+        for f in output ext-diff textconv exec-path git-dir work-tree no-index; do
+          case "$f" in "$name"*) deny "$a" ;; esac
+        done
+      fi ;;
+    -c|-c*|-C|-C*) deny "$a" ;;
+    -o|-o*) case "$sub" in log|diff|show) deny "$a" ;; esac ;;
+  esac
+done
+case "$sub" in
+  log|show|diff) hist_git --no-pager -c core.pager=cat "$sub" --no-ext-diff --no-textconv "$@" ;;
+  *) hist_git --no-pager -c core.pager=cat "$sub" "$@" ;;
 esac

@@ -9,8 +9,10 @@
 읽기 전용이 기본이다. 쓰기는 제안 탭의 설치(i, 정확히 yes 입력)와 거절(x, .rejected/ 로 이동)뿐이다.
 네트워크·서버·포트를 쓰지 않는다. 제안 내용은 신뢰할 수 없는 데이터라 표시만 하고 실행하지 않는다.
 """
+import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -37,6 +39,7 @@ class Paths:
         self.logs = os.path.join(data, "logs")
         self.proposals = os.path.join(data, "skill-proposals")
         self.state = os.path.join(data, "state")
+        self.repo_skills = os.path.join(home, ".claude", "skills")   # 저장소 자체 스킬: 이름 사칭 방지용
         self.launchd_label = launchd_label
 
     @classmethod
@@ -324,7 +327,7 @@ def list_proposals(prop_dir):
             "raw": n,
             "path": path,
             "is_dir": is_dir,
-            "valid": bool(NAME_RE.match(n)),
+            "valid": bool(NAME_RE.fullmatch(n)),
             "has_skill": is_dir and os.path.isfile(skill) and not os.path.islink(skill),
         })
     return items
@@ -336,7 +339,7 @@ def install_target(p, name):
 
 def check_proposal(p, name):
     """설치·거절 공통 검증. 문제 없으면 None, 있으면 이유 문자열."""
-    if not NAME_RE.match(name or ""):
+    if not NAME_RE.fullmatch(name or ""):
         return "이름 형식 오류(소문자·숫자·하이픈, 64자 이하)"
     src = os.path.join(p.proposals, name)
     if os.path.islink(src):
@@ -349,22 +352,131 @@ def check_proposal(p, name):
     return None
 
 
-def install_proposal(p, name):
-    """(성공 여부, 메시지). 호출 쪽이 'yes' 확인을 이미 받았다고 가정한다. 덮어쓰기 없음."""
+def read_regular(path, limit):
+    """(bytes|None, 오류|None). 마지막 구성요소가 심볼릭 링크면 거부(O_NOFOLLOW), 일반 파일·링크 수 1 만 허용,
+    limit 초과는 거부(앞 limit 바이트는 data 로 돌려줘 표시에는 쓸 수 있다). 검사와 읽기가 같은 fd 라 바꿔치기 불가."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        return None, "열 수 없음(없거나 심볼릭 링크): %s" % (e.strerror or e)
+    with os.fdopen(fd, "rb") as f:
+        try:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                return None, "일반 파일이 아님"
+            if st.st_nlink != 1:
+                return None, "하드링크(링크 수 %d)" % st.st_nlink
+            data = f.read(limit + 1)
+        except OSError as e:
+            return None, "읽기 실패: %s" % (e.strerror or e)
+    if len(data) > limit:
+        return data[:limit], "%dKB 초과" % (limit // 1024)
+    return data, None
+
+
+HIDDEN_CHARS = {"\u3164", "\u115f", "\u1160", "\uffa0", "\u2800"}
+ALLOWED_KEYS = ("name", "description")
+
+
+def skill_frontmatter(text):
+    """엄격한 단순 파서. (keys dict, 오류). frontmatter 가 없으면 ({}, None). 들여쓰기·목록·중복 키는 파싱 불가로 본다."""
+    lines = text.split("\n")
+    if lines[0] != "---":
+        if lines[0].strip() == "---":
+            return None, "frontmatter 시작줄이 '---' 가 아님"
+        return {}, None
+    keys = {}
+    for line in lines[1:]:
+        if line == "---":
+            return keys, None
+        if line.strip() == "":
+            continue
+        m = re.fullmatch(r"([A-Za-z_][\w-]*):[ ]*(.*)", line)
+        if not m:
+            return None, "frontmatter 파싱 불가: %r" % sanitize(line)[:40]
+        if m.group(1) in keys:
+            return None, "frontmatter 키 중복: %s" % m.group(1)
+        val = m.group(2).strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        keys[m.group(1)] = val
+    return None, "frontmatter 가 닫히지 않음"
+
+
+def content_blockers(p, name, data):
+    """설치 불가 사유 목록(내용 기준). data 는 스냅샷 바이트. 표시는 그대로 가능하다."""
+    why = []
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return ["UTF-8 이 아닌 내용"]
+    bad = sorted({"U+%04X" % ord(c) for c in text
+                  if c in HIDDEN_CHARS or (c not in "\n\t" and unicodedata.category(c) in ("Cc", "Cf"))})
+    if bad:
+        why.append("숨김·제어 문자 포함: " + " ".join(bad))
+    keys, err = skill_frontmatter(text)
+    if err:
+        why.append(err)
+    else:
+        extra = sorted(k for k in keys if k not in ALLOWED_KEYS)
+        if extra:
+            why.append("허용되지 않은 frontmatter 키: " + ", ".join(extra))
+        if "name" in keys and keys["name"] != name:
+            why.append("frontmatter name(%s)이 디렉터리 이름과 다름" % sanitize(keys["name"])[:40])
+    try:
+        taken = [n for n in os.listdir(p.repo_skills) if n.lower() == name.lower()]
+    except OSError:
+        taken = []
+    if taken:
+        why.append("저장소 스킬 이름과 겹침")
+    return why
+
+
+def snapshot_proposal(p, name):
+    """보기를 열 때 한 번 호출: SKILL.md 바이트를 읽어 스냅샷으로 고정한다(표시·설치 모두 이것만 쓴다).
+    항상 dict 를 돌려준다. blockers 가 비어 있지 않으면 설치 불가."""
+    snap = {"name": name, "data": None, "sha": "", "proposal": None, "blockers": [], "truncated": False}
+    why = check_proposal(p, name)
+    if why:
+        snap["blockers"].append(why)
+        return snap
+    src = os.path.join(p.proposals, name)
+    data, err = read_regular(os.path.join(src, "SKILL.md"), MAX_SKILL)
+    if data is not None:
+        snap["data"] = data
+        snap["sha"] = hashlib.sha256(data).hexdigest()
+    if err:
+        snap["blockers"].append("SKILL.md: " + err)
+        snap["truncated"] = data is not None
+    if data is not None and not err:
+        snap["blockers"].extend(content_blockers(p, name, data))
+    pdata, perr = read_regular(os.path.join(src, "PROPOSAL.md"), MAX_READ)
+    if pdata is not None:
+        snap["proposal"] = pdata.decode("utf-8", errors="replace") + ("\n…(이후 생략)" if perr else "")
+    return snap
+
+
+def install_proposal(p, name, snap):
+    """(성공 여부, 메시지). 호출 쪽이 'yes' 확인을 이미 받았다고 가정한다. 덮어쓰기 없음.
+    설치 내용은 snap 의 바이트뿐이다. 설치 직전에 디스크를 다시 읽어 sha256 이 다르면 거부한다."""
     why = check_proposal(p, name)
     if why:
         return False, "설치 거부: " + why
-    src = os.path.join(p.proposals, name)
-    skill = os.path.join(src, "SKILL.md")
-    if os.path.islink(skill) or not os.path.isfile(skill):
-        return False, "설치 거부: SKILL.md 가 없거나 일반 파일이 아님"
-    try:
-        if os.path.getsize(skill) > MAX_SKILL:
-            return False, "설치 거부: SKILL.md 가 100KB 초과"
-        with open(skill, "rb") as f:
-            data = f.read()
-    except OSError as e:
-        return False, "설치 거부: 읽기 실패(%s)" % e.strerror
+    if not snap or snap.get("name") != name:
+        return False, "설치 거부: 검토한 내용(스냅샷)이 없음"
+    if snap["blockers"]:
+        return False, "설치 거부: " + "; ".join(snap["blockers"])
+    if snap.get("data") is None:
+        return False, "설치 거부: 검토한 내용(스냅샷)이 없음"
+    data = snap["data"]
+    cur, err = read_regular(os.path.join(p.proposals, name, "SKILL.md"), MAX_SKILL)
+    if err:
+        return False, "설치 거부: SKILL.md 재확인 실패(%s)" % err
+    if hashlib.sha256(cur).hexdigest() != snap["sha"]:
+        return False, "설치 거부: 검토 중 내용이 바뀌었습니다. 다시 읽어 주세요"
+    blockers = content_blockers(p, name, data)   # 저장소 스킬 이름 등 검토 이후 바뀔 수 있는 조건 재확인
+    if blockers:
+        return False, "설치 거부: " + "; ".join(blockers)
     dest = install_target(p, name)
     if os.path.lexists(dest):
         return False, "설치 거부: 대상이 이미 있음(덮어쓰지 않음)"
@@ -422,15 +534,44 @@ def _move_aside(p, name, bucket):
     return dest
 
 
-def proposal_body(item):
-    """제안 내용 표시용 텍스트(신뢰할 수 없는 데이터: 표시만 한다)."""
-    parts = []
-    if not item["is_dir"]:
-        return "(디렉터리가 아닌 항목: 설치할 수 없음)"
-    for fn in ("PROPOSAL.md", "SKILL.md"):
-        t = read_text(os.path.join(item["path"], fn))
-        parts.append("== %s ==\n%s" % (fn, t if t is not None else "(없음 또는 읽을 수 없음)"))
-    return "\n\n".join(parts)
+READ_FIRST_MSG = "끝까지 읽어야 설치할 수 있습니다"
+
+
+def review_lines(snap, w):
+    """(줄 목록, skill_end). 설치될 SKILL.md 를 먼저, PROPOSAL.md 는 그 뒤에. skill_end 는 SKILL.md 구간의 줄 수."""
+    head = ["== SKILL.md (설치될 내용, sha256 %s) ==" % (snap["sha"][:12] or "-")]
+    if snap["blockers"]:
+        head.append("설치 불가: " + "; ".join(snap["blockers"]))
+    body = snap["data"].decode("utf-8", errors="replace") if snap["data"] is not None else "(없음 또는 읽을 수 없음)"
+    if snap["truncated"]:
+        body += "\n…(이후 생략)"
+    skill = wrap_text("\n".join(head) + "\n" + body + "\n== SKILL.md 끝 ==", w)
+    prop = snap["proposal"] if snap["proposal"] is not None else "(없음 또는 읽을 수 없음)"
+    rest = wrap_text("\n== PROPOSAL.md (설치되지 않음, 참고용) ==\n" + prop, w)
+    return skill + rest, len(skill)
+
+
+def new_review(snap):
+    return {"snap": snap, "scroll": 0, "read_end": False}
+
+
+def note_scroll(rv, top, vis_h, skill_end):
+    """화면 맨 위 줄 top 과 보이는 줄 수로 SKILL.md 끝까지 봤는지 기록한다(한 번 true 가 되면 유지)."""
+    if top + vis_h >= skill_end:
+        rv["read_end"] = True
+    return rv["read_end"]
+
+
+def press_install(p, rv):
+    """i 키의 상태 전이. ('need-read'|'refused'|'confirm', 메시지)."""
+    if not rv["read_end"]:
+        return "need-read", READ_FIRST_MSG
+    snap = rv["snap"]
+    if snap["blockers"] or snap["data"] is None:
+        return "refused", "설치 불가: " + "; ".join(snap["blockers"] or ["SKILL.md 없음"])
+    if os.path.lexists(install_target(p, snap["name"])):
+        return "refused", "설치 불가: 대상이 이미 있음"
+    return "confirm", ""
 
 
 # ---------------------------------------------------------------- 대화형 화면
@@ -457,7 +598,7 @@ def _ui(scr, p, curses):
         "tab": 0, "msg": "", "status": None, "status_at": 0.0,
         "mem": [], "mem_sel": 0, "mem_flt": "", "mem_view": None, "mem_scroll": 0,
         "log_kind": "reflect", "log_lines": None, "log_scroll": None,
-        "props": [], "prop_sel": 0, "prop_view": None, "prop_scroll": 0,
+        "props": [], "prop_sel": 0, "prop_view": None,   # prop_view: new_review() 결과(스냅샷 포함)
         "mode": "",      # '' | 'filter' | 'confirm-install' | 'confirm-reject'
         "input": "",
     }
@@ -518,7 +659,8 @@ def _ui(scr, p, curses):
             label = " %d%s " % (i + 1, t)
             put(0, x, label, curses.A_REVERSE if i == S["tab"] else 0)
             x += swidth(label)
-        body_h = h - 2
+        reserve = 2 if S["mode"] == "confirm-install" else 0   # 확인 문구가 본문을 가리지 않게 본문 줄을 줄인다
+        body_h = h - 2 - reserve
         tab = S["tab"]
         hint = ""
         if tab == 0:
@@ -533,10 +675,13 @@ def _ui(scr, p, curses):
         if S["mode"] == "filter":
             put(h - 1, 0, "필터> " + S["input"] + "_", curses.A_BOLD)
         elif S["mode"] == "confirm-install":
-            it = cur_prop()
-            if it:
-                for j, l in enumerate(wrap("설치: %s -> %s" % (it["name"], install_target(p, it["raw"])), W - 1)[-2:][::-1]):
-                    put(h - 2 - j, 0, l, curses.A_REVERSE)
+            rv = S["prop_view"]
+            if rv:
+                snap = rv["snap"]
+                info = wrap("설치: %s -> %s (sha %s)" % (sanitize(snap["name"]), install_target(p, snap["name"]),
+                                                      snap["sha"][:8]), W - 1)[-2:]
+                for j, l in enumerate(info):
+                    put(h - 3 + j, 0, l, curses.A_REVERSE)
             put(h - 1, 0, "정확히 yes 입력> " + S["input"] + "_", curses.A_BOLD)
         elif S["mode"] == "confirm-reject":
             put(h - 1, 0, "거절(.rejected 로 이동)? y/N", curses.A_BOLD)
@@ -605,10 +750,11 @@ def _ui(scr, p, curses):
 
     def draw_props(y0, h, W):
         if S["prop_view"] is not None:
-            it = S["prop_view"]
-            put(y0, 0, "! 설치 전 내용을 읽어 보세요 (신뢰할 수 없는 데이터)", curses.A_BOLD)
-            lines = wrap_text(proposal_body(it), W - 1)
-            S["prop_scroll"], vis = viewport_lines(lines, S["prop_scroll"], h - 1)
+            rv = S["prop_view"]
+            lines, skill_end = review_lines(rv["snap"], W - 1)
+            rv["scroll"], vis = viewport_lines(lines, rv["scroll"], h - 1)
+            read = note_scroll(rv, rv["scroll"], h - 1, skill_end)
+            put(y0, 0, "! 신뢰할 수 없는 데이터. SKILL.md 끝까지 " + ("읽음" if read else "읽어야 설치"), curses.A_BOLD)
             for i, l in enumerate(vis):
                 put(y0 + 1 + i, 0, l)
             return "j/k 스크롤 i 설치 x 거절 q 목록"
@@ -630,20 +776,24 @@ def _ui(scr, p, curses):
             return S["props"][S["prop_sel"]]
         return None
 
+    def open_review(it):
+        # 보기를 여는 순간 SKILL.md 를 한 번만 읽어 스냅샷으로 고정한다(이후 표시·설치는 이것만 쓴다)
+        S["prop_view"] = new_review(snapshot_proposal(p, it["raw"]))
+
     def start_install():
-        it = cur_prop()
-        if not it:
+        rv = S["prop_view"]
+        if rv is None:
+            it = cur_prop()
+            if it:
+                open_review(it)
+                S["msg"] = READ_FIRST_MSG
             return
-        why = check_proposal(p, it["raw"]) or (
-            None if it["has_skill"] else "SKILL.md 가 없거나 일반 파일이 아님")
-        if why:
-            S["msg"] = "설치 불가: " + why
-        elif os.path.lexists(install_target(p, it["raw"])):
-            S["msg"] = "설치 불가: 대상이 이미 있음"
-        else:
-            S["prop_view"], S["prop_scroll"] = it, 0
+        kind, msg = press_install(p, rv)
+        if kind == "confirm":
             S["msg"] = ""
             S["mode"], S["input"] = "confirm-install", ""
+        else:
+            S["msg"] = msg
 
     def switch(tab):
         S["tab"] = tab % len(TABS)
@@ -681,10 +831,13 @@ def _ui(scr, p, curses):
                 S["mem_sel"] = 0
                 S["msg"] = ""
             else:
-                it = cur_prop()
-                if S["input"] == "yes" and it:
-                    ok, S["msg"] = install_proposal(p, it["raw"])
-                    S["prop_view"] = None
+                rv = S["prop_view"]
+                if S["input"] == "yes" and rv:
+                    ok, S["msg"] = install_proposal(p, rv["snap"]["name"], rv["snap"])
+                    if not ok and "바뀌었" in S["msg"]:
+                        S["prop_view"] = new_review(snapshot_proposal(p, rv["snap"]["name"]))  # 다시 읽게 한다
+                    else:
+                        S["prop_view"] = None
                     S["props"] = list_proposals(p.proposals)
                 else:
                     S["msg"] = "설치 취소(정확히 yes 가 아님)"
@@ -775,8 +928,9 @@ def _ui(scr, p, curses):
                 S["log_scroll"] = scroll_key(kk, cur, total, body_h)
         elif tab == 3:
             if S["prop_view"] is not None:
-                lines = wrap_text(proposal_body(S["prop_view"]), W - 1)
-                S["prop_scroll"] = scroll_key(kk, S["prop_scroll"], len(lines), body_h)
+                rv = S["prop_view"]
+                lines, _ = review_lines(rv["snap"], W - 1)
+                rv["scroll"] = scroll_key(kk, rv["scroll"], len(lines), body_h)
                 if k == "i":
                     start_install()
                 elif k == "x":
@@ -789,7 +943,7 @@ def _ui(scr, p, curses):
                 elif k in ("\n", "\r") or k == curses.KEY_ENTER:
                     it = cur_prop()
                     if it:
-                        S["prop_view"], S["prop_scroll"] = it, 0
+                        open_review(it)
                 elif k == "i":
                     start_install()
                 elif k == "x" and cur_prop():
@@ -895,7 +1049,10 @@ def selftest():
         txt = "\n".join(status_lines(st))
         check("연속 실패: 회고 3회" in txt and "대기 중 스킬 제안: 7개" in txt, "status text")
 
-        ok, msg = install_proposal(p, "good-skill")
+        def inst(name):
+            return install_proposal(p, name, snapshot_proposal(p, name))
+
+        ok, msg = inst("good-skill")
         check(ok and os.path.isfile(os.path.join(skills, "good-skill", "SKILL.md")), "install ok: " + msg)
         check(not os.path.exists(os.path.join(pr, "good-skill"))
               and os.path.isdir(os.path.join(pr, ".installed")), "installed proposal moved aside")
@@ -904,7 +1061,7 @@ def selftest():
         for bad, why in (("existing", "exists"), ("no-skill", "no SKILL.md"), ("Bad_Name", "name regex"),
                          ("../mem", "traversal"), ("linked-skill", "symlinked SKILL.md"),
                          ("dirlink", "symlink dir"), ("", "empty"), ("a" * 65, "too long")):
-            ok, msg = install_proposal(p, bad)
+            ok, msg = inst(bad)
             check(not ok, "install must refuse %s (%s)" % (why, msg))
         check(open(os.path.join(skills, "existing", "SKILL.md")).read() == "ORIGINAL", "no overwrite")
         check(sorted(os.listdir(skills)) == ["existing", "good-skill"], "nothing else installed")
@@ -915,6 +1072,118 @@ def selftest():
               and os.path.isfile(os.path.join(pr, ".rejected", rej[0], "SKILL.md")), "reject moved: " + msg)
         check(not reject_proposal(p, "../x")[0] and not reject_proposal(p, "dirlink")[0], "reject refuses bad")
         check(os.path.isdir(os.path.join(tmp, "mem")), "symlink target untouched")
+
+        # --- 설치 안전장치 회귀 시험
+        good_md = "---\nname: %s\ndescription: d\n---\n본문\n"
+
+        def mk2(name, content, raw=None):
+            d = os.path.join(pr, name)
+            os.makedirs(d)
+            with open(os.path.join(d, "SKILL.md"), "wb") as fh:
+                fh.write(raw if raw is not None else content.encode("utf-8"))
+            return d
+
+        def refused(name, why, frag=None):
+            snap = snapshot_proposal(p, name)
+            ok, msg = install_proposal(p, name, snap)
+            check(not ok and not os.path.lexists(os.path.join(skills, name)),
+                  "must refuse %s: %s" % (why, msg))
+            if frag:
+                check(frag in msg, "%s reason has %r: %s" % (why, frag, msg))
+
+        check(NAME_RE.fullmatch("abc\n") is None, "NAME_RE rejects trailing newline")
+        check(check_proposal(p, "x-skill\n") is not None, "check_proposal rejects trailing newline")
+        mk2("nl-name", good_md % "nl-name")
+        refused("nl-name\n", "trailing newline name")
+
+        # 심볼릭 링크로 바뀐 SKILL.md(스냅샷 뒤·검사 뒤)
+        d = mk2("swap-link", good_md % "swap-link")
+        snap = snapshot_proposal(p, "swap-link")
+        os.remove(os.path.join(d, "SKILL.md"))
+        os.symlink(os.path.join(mem, "a.md"), os.path.join(d, "SKILL.md"))
+        ok, msg = install_proposal(p, "swap-link", snap)
+        check(not ok and not os.path.lexists(os.path.join(skills, "swap-link")), "symlink swap refused: " + msg)
+        check(read_regular(os.path.join(d, "SKILL.md"), 1000)[0] is None, "read_regular refuses symlink")
+
+        # 하드링크
+        d = mk2("hard-link", good_md % "hard-link")
+        os.link(os.path.join(d, "SKILL.md"), os.path.join(tmp, "hl-other"))
+        refused("hard-link", "hardlink", "하드링크")
+
+        # 스냅샷 뒤 파일 변경
+        d = mk2("changed", good_md % "changed")
+        snap = snapshot_proposal(p, "changed")
+        check(not snap["blockers"], "changed: clean snapshot")
+        w(os.path.join(d, "SKILL.md"), (good_md % "changed") + "EVIL\n")
+        ok, msg = install_proposal(p, "changed", snap)
+        check(not ok and "바뀌었" in msg and not os.path.lexists(os.path.join(skills, "changed")),
+              "changed after snapshot refused: " + msg)
+        ok, msg = install_proposal(p, "changed", snapshot_proposal(p, "changed"))
+        check(ok and "EVIL" in open(os.path.join(skills, "changed", "SKILL.md"), encoding="utf-8").read(),
+              "re-read snapshot installs what was shown: " + msg)
+
+        # frontmatter
+        mk2("name-diff", good_md % "other-name")
+        refused("name-diff", "name mismatch", "name")
+        for key in ("allowed-tools", "hooks", "model"):
+            mk2("extra-" + key, "---\nname: extra-%s\ndescription: d\n%s: x\n---\nb\n" % (key, key))
+            refused("extra-" + key, "extra key " + key, key)
+        mk2("bad-fm", "---\nname: bad-fm\n  - nested\n---\nb\n")
+        refused("bad-fm", "unparsable frontmatter", "파싱")
+        mk2("open-fm", "---\nname: open-fm\nbody\n")
+        refused("open-fm", "unclosed frontmatter")
+        mk2("no-fm-ok", "그냥 본문\n")
+        check(not snapshot_proposal(p, "no-fm-ok")["blockers"], "no frontmatter is not a blocker")
+
+        # 저장소 스킬 이름 충돌
+        os.makedirs(os.path.join(p.repo_skills, "mac-control"))
+        mk2("mac-control", good_md % "mac-control")
+        refused("mac-control", "repo skill collision", "저장소")
+
+        # 숨김 문자·잘못된 UTF-8(표시는 가능, 설치만 거부)
+        for i, ch in enumerate(("\u3164", "\u115f", "\u1160", "\uffa0", "\u2800", "\u202e", "\x1b", "\r", "\u200b")):
+            nm = "hid-%d" % i
+            mk2(nm, (good_md % nm) + "a%sb\n" % ch)
+            refused(nm, "hidden char U+%04X" % ord(ch), "숨김")
+            check(snapshot_proposal(p, nm)["data"] is not None, "hidden still displayable")
+        mk2("bad-utf8", "", raw=(good_md % "bad-utf8").encode() + b"\xff\xfe\n")
+        refused("bad-utf8", "invalid utf-8", "UTF-8")
+        mk2("tab-nl-ok", (good_md % "tab-nl-ok") + "a\tb\n")
+        check(not snapshot_proposal(p, "tab-nl-ok")["blockers"], "tab/newline allowed")
+
+        # 상한
+        mk2("too-big", "", raw=(good_md % "too-big").encode() + b"a" * MAX_SKILL)
+        sn = snapshot_proposal(p, "too-big")
+        check(sn["blockers"] and len(sn["data"]) == MAX_SKILL, "oversize flagged, truncated display")
+        refused("too-big", "oversize", "초과")
+        hd = b"---\nname: exact-max\n---\n"
+        d = mk2("exact-max", "", raw=hd + b"a" * (MAX_SKILL - len(hd)))
+        check(os.path.getsize(os.path.join(d, "SKILL.md")) == MAX_SKILL
+              and not snapshot_proposal(p, "exact-max")["blockers"], "exactly MAX_SKILL allowed")
+
+        # H1 상태 전이: 끝까지 스크롤해야 i 가 동작
+        long_md = (good_md % "long-one") + "\n".join("줄 %d" % i for i in range(100)) + "\n"
+        mk2("long-one", long_md)
+        sn = snapshot_proposal(p, "long-one")
+        lines, skill_end = review_lines(sn, 40)
+        check(skill_end > 30 and skill_end < len(lines) and "SKILL.md" in lines[0], "SKILL.md shown first")
+        check("PROPOSAL.md" not in "\n".join(lines[:skill_end]), "PROPOSAL.md after SKILL.md")
+        rv = new_review(sn)
+        check(press_install(p, rv) == ("need-read", READ_FIRST_MSG), "i before reading -> notice")
+        note_scroll(rv, 0, 10, skill_end)
+        check(press_install(p, rv)[0] == "need-read", "partial scroll still blocked")
+        note_scroll(rv, skill_end - 10, 10, skill_end)
+        check(press_install(p, rv)[0] == "confirm", "end of SKILL.md reached -> confirm")
+        rv2 = new_review(snapshot_proposal(p, "name-diff"))
+        note_scroll(rv2, 0, 1000, 5)
+        check(press_install(p, rv2)[0] == "refused", "read but blocked -> refused")
+        rv3 = new_review(snapshot_proposal(p, "long-one"))
+        note_scroll(rv3, 0, 10 ** 6, skill_end)
+        os.makedirs(os.path.join(skills, "long-one"))
+        check(press_install(p, rv3)[0] == "refused", "existing user skill -> refused")
+        os.rmdir(os.path.join(skills, "long-one"))
+        ok, msg = install_proposal(p, "long-one", snapshot_proposal(p, "long-one"))
+        check(ok, "normal proposal installs: " + msg)
 
         # 빈 환경
         empty = Paths(tmp, os.path.join(tmp, "x"), os.path.join(tmp, "x1"), os.path.join(tmp, "x2"))

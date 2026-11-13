@@ -90,7 +90,7 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 ## maru 명령과 cmux Dock
 - `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru ui`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 아무것도 설치·수정하지 않으므로 PATH 등록은 직접 합니다: `ln -s "$PWD/bin/maru" ~/.local/bin/maru` (심볼릭 링크를 따라 저장소 위치를 계산합니다).
 - `maru ui`(`scripts/maru_ui.py`, 파이썬 표준 라이브러리 curses, 네트워크·포트 없음): 40~60열 좁은 폭용 상황판. 탭 1 상태(30초 자동 갱신, `r`) / 2 기억(Enter 본문, `/` 필터) / 3 로그(`l` reflect·dream 전환) / 4 제안. `--once`는 상태를 평문으로 출력하고 `--selftest`는 임시 디렉터리에서 로직을 검증합니다.
-- 제안 설치는 제안 탭에서 `i` 후 정확히 `yes` 를 입력해야만 진행됩니다. 이름 정규식·심볼릭 링크 거부·기존 스킬 덮어쓰기 거부를 거치며 `SKILL.md` 만 복사합니다. `x` 는 삭제 없이 `data/skill-proposals/.rejected/` 로 옮깁니다. 제안 내용은 신뢰할 수 없는 데이터로 표시만 합니다.
+- 제안 설치는 제안 탭에서 보기를 열고 설치될 `SKILL.md`(PROPOSAL.md 보다 먼저 표시)를 끝까지 스크롤한 뒤 `i`, 정확히 `yes` 를 입력해야만 진행됩니다. 보기를 열 때 `SKILL.md` 를 한 번 읽어 스냅샷으로 고정하고 표시·설치는 그 바이트만 쓰며, 설치 직전 디스크의 sha256 이 다르면 거부합니다. 읽기는 `O_NOFOLLOW`+일반 파일·링크 수 1·100KB 이하만 허용합니다. 이름 정규식(전체 일치)·frontmatter `name` 이 디렉터리 이름과 같을 것·`name`/`description` 외 frontmatter 키 거부(파싱 불가도 거부)·저장소 `.claude/skills` 이름 충돌 거부·기존 스킬 덮어쓰기 거부·숨김/제어 문자·잘못된 UTF-8 거부를 거치며 `SKILL.md` 만 복사합니다. `maru hist` 는 `--output`·`--ext-diff`·`--textconv`·`-c`·`-C`·`--git-dir`·`--work-tree`·`--exec-path` 인자를 거부합니다. `x` 는 삭제 없이 `data/skill-proposals/.rejected/` 로 옮깁니다. 제안 내용은 신뢰할 수 없는 데이터로 표시만 합니다.
 - cmux Dock: `cmux/dock.json` 을 `~/.config/cmux/dock.json` 에 복사하면 우측 Dock 에서 `maru ui` 가 실행됩니다(복사 방식·cmux 에서의 실제 표시는 미검증). Dock 의 PATH 에 `maru` 가 없어도 되도록 저장소의 `bin/maru` 경로를 직접 부릅니다(저장소가 `~/maru` 라고 가정).
 - 미검증: 실제 cmux Dock 안에서의 동작, 제안 설치·거절의 화면 조작(로직은 `--selftest` 로만 검증), `maru hist`(Xcode 라이선스 미동의 환경에서는 git 이 실패할 수 있음).
 
