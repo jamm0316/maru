@@ -11,6 +11,8 @@ Claude Code 위에서 도는 **개인 총괄 에이전트**입니다. 이 폴더
 ## 요구사항
 macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인), `jq`, `python3`, `git`, `perl`.
 
+`python3`/`git` 은 존재만이 아니라 실제로 실행해 확인합니다. Xcode 라이선스 미동의 등으로 `/usr/bin` 의 것이 실패하면 `/Library/Developer/CommandLineTools/usr/bin`, `/opt/homebrew/bin`, `/usr/local/bin` 에서 동작하는 것을 찾아 PATH 앞에 둡니다(`maru doctor` 가 "폴백 사용 중(원인)" 으로 알려 줌). 어느 것도 없으면 즉시 실패하고, 라이선스 문제로 보이면 `sudo xcodebuild -license` 를 안내합니다. 도구·기억 폴더 문제로 회고/정리가 실패하면 처음 한 번 macOS 알림을 보내고, 그 세션은 처리 완료로 표시하지 않아 다음 실행에서 재시도합니다. 놓친 세션을 한 번 보충하려면 `MARU_SWEEP_HOURS=96 scripts/dream.sh`(sweep 시간 창, 기본 36시간, 1~720 정수).
+
 ## 설치 / 제거
 ```
 ./install.sh --dry-run   # 할 일만 출력
@@ -112,7 +114,7 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 ## 구조
 ```
 CLAUDE.md          에이전트 정체성과 규칙 (개인 정보 없음)
-scripts/           reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정 블록) digest.py hist maru_config.py maru-status.sh maru_ui.py
+scripts/           reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정·도구 해석) launchd.sh test-env.sh digest.py hist maru_config.py maru-status.sh maru_ui.py
 bin/maru           런처(ui status log hist doctor)
 cmux/              dock.json 등 cmux 연동
 prompts/           회고·정리 프롬프트 템플릿 ({{MEMORY_DIR}} 등 자리표시자)

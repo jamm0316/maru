@@ -1,35 +1,55 @@
 #!/bin/bash
 # 세션 종료 후 회고(학습 루프). 훅 모드(stdin JSON) / 실행 모드(--run <transcript> <session_id>)
-# 실행 모드 종료 코드: 0 성공 / 10 의도적 건너뜀(새 내용 없음·턴 부족·입력 부적합) / 11 실패(되돌림 포함) / 12 잠금 시간 초과
+# 실행 모드 종료 코드: 0 성공 / 10 의도적 건너뜀(새 내용 없음·턴 부족·입력 부적합) / 11 실패(되돌림·환경 오류 포함) / 12 잠금 시간 초과
+# 환경 오류(도구 실행 불가·기억 폴더 계산 실패)는 반드시 11 로 끝나고 연속 실패 알림에 센다(dream 이 처리 완료로 표시하지 않고 재시도).
 MODEL="${REFLECT_MODEL:-haiku}"          # 회고에 쓸 모델
 CLAUDE_TIMEOUT="${REFLECT_TIMEOUT:-300}" # claude -p 하드 제한(초)
 MIN_TURNS=2                               # 새 사용자 턴이 이보다 적으면 건너뜀
 SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-. "$SCRIPTS/lib.sh"   # MARU_HOME/MARU_DATA/MEM/STAGE 등 설정
+# lib.sh 가 도구·기억 폴더 검증에 실패해도 여기서 직접 처리한다(훅 모드는 절대 실패하지 않아야 하므로 exit 0)
+MARU_LIB_SOFT=1 . "$SCRIPTS/lib.sh"; lib_rc=$?   # MARU_HOME/MARU_DATA/MEM/STAGE 등 설정
+unset MARU_LIB_SOFT
 LOG=$LOGS/reflect.log
-mkdir -p "$LOGS" "$DIGESTS" "$STATE" "$PROPOSALS" "$MARU_DATA/backups"
+mkdir -p "$LOGS" "$STATE" 2>/dev/null
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+# 환경 오류: 로그 + 실패 횟수(첫 번째에 알림). 호출 쪽이 종료 코드를 정한다.
+env_fail() { log "환경 오류: $*"; fail_bump reflect env; }
+envreason=""
+if [ "$lib_rc" -ne 0 ]; then envreason=${MARU_ENV_ERR:-도구/기억 폴더 확인 실패}
+elif [ -z "${MEM_SETTINGS:-}" ]; then envreason="jq 로 설정 JSON 을 만들지 못함(jq 실행 불가?)"
+elif [ ! -d "$MEM" ]; then envreason="기억 폴더가 없음: $MEM"
+fi
+if [ -n "$envreason" ]; then
+  env_fail "$envreason"
+  [ "${1:-}" = "--run" ] && exit 11
+  exit 0
+fi
+mkdir -p "$DIGESTS" "$PROPOSALS" "$MARU_DATA/backups"
 
 # session_id 형식 검증
 valid_sid() { [[ "$1" =~ ^[0-9a-fA-F-]{36}$ ]]; }
 # transcript: realpath 기준 projects/ 아래의 일반 파일이어야 함. 통과하면 해석된 경로를 출력
+# 반환: 0 통과 / 1 부적합(입력 문제) / 2 환경 오류(python3 실행 실패 — 입력과 무관하므로 재시도 대상)
 resolve_tp() {
   local r root
-  r=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null) || return 1
-  root=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$PROJECTS" 2>/dev/null) || return 1
+  r=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null) || return 2
+  root=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$PROJECTS" 2>/dev/null) || return 2
+  [ -n "$r" ] && [ -n "$root" ] || return 2
   case "$r" in "$root"/*) ;; *) return 1;; esac
   [ -f "$r" ] && [ ! -L "$r" ] || return 1
   printf '%s' "$r"
 }
 
 # ---- 훅 모드: 절대 막거나 실패하지 않는다
-if [ "$1" != "--run" ]; then
-  [ -n "$AGENT_REFLECTING" ] && exit 0
+if [ "${1:-}" != "--run" ]; then
+  [ -n "${AGENT_REFLECTING:-}" ] && exit 0
   input=$(cat 2>/dev/null)
   tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
   sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
   if ! valid_sid "$sid"; then log "[hook] session_id 형식 오류 — 무시"; exit 0; fi
-  if ! rtp=$(resolve_tp "$tp"); then log "[${sid:0:8}] transcript_path 부적합 — 무시"; exit 0; fi
+  rtp=$(resolve_tp "$tp"); rrc=$?
+  if [ $rrc -eq 2 ]; then env_fail "[${sid:0:8}] python3 실행 실패로 transcript 경로를 확인하지 못함"; exit 0; fi
+  if [ $rrc -ne 0 ]; then log "[${sid:0:8}] transcript_path 부적합 — 무시"; exit 0; fi
   nohup bash "$0" --run "$rtp" "$sid" >> "$LOG" 2>&1 </dev/null &
   exit 0
 fi
@@ -38,7 +58,9 @@ fi
 sid="$3"
 valid_sid "$sid" || { log "[run] session_id 형식 오류"; exit 10; }
 short="${sid:0:8}"
-tp=$(resolve_tp "$2") || { log "[$short] transcript 부적합(projects/ 밖이거나 일반 파일 아님)"; exit 10; }
+tp=$(resolve_tp "$2"); rrc=$?
+if [ $rrc -eq 2 ]; then env_fail "[$short] python3 실행 실패로 transcript 경로를 확인하지 못함 — 재시도 대상"; exit 11; fi
+[ $rrc -eq 0 ] || { log "[$short] transcript 부적합(projects/ 밖이거나 일반 파일 아님)"; exit 10; }
 
 # 정리: 다이제스트 7일, 상태 파일 60일, 로그 1MB 초과 시 .1로 회전
 housekeeping() {
@@ -57,7 +79,7 @@ LINES_FILE=$STATE/$sid.lines
 from=$(cat "$LINES_FILE" 2>/dev/null); [[ "$from" =~ ^[0-9]+$ ]] || from=0
 dg=$DIGESTS/$sid.txt
 read -r turns total < <(python3 "$SCRIPTS/digest.py" "$tp" "$dg" --from-line "$from" 2>>"$LOG")
-if ! [[ "$turns" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]]; then log "[$short] digest 실패"; exit 11; fi
+if ! [[ "$turns" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]]; then log "[$short] digest 실패"; fail_bump reflect env; exit 11; fi
 if [ "$total" -lt "$from" ]; then   # transcript가 줄어듦 → 처음부터
   from=0
   read -r turns total < <(python3 "$SCRIPTS/digest.py" "$tp" "$dg" --from-line 0 2>>"$LOG")
@@ -77,7 +99,7 @@ prompt="$(render_template "$MARU_HOME/prompts/reflect-prompt.md" MEMORY_DIR="$ME
 # 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
 TXN=$STATE/txn.reflect
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
-txn_begin "$MEM" "$TXN" || { log "[$short] 스냅샷 실패 — 건너뜀"; txn_end "$TXN"; rm -rf "$STAGE"; exit 11; }
+txn_begin "$MEM" "$TXN" || { env_fail "[$short] 기억 폴더 스냅샷 실패 — 건너뜀(MEM 경로·권한 확인)"; txn_end "$TXN"; rm -rf "$STAGE"; exit 11; }
 before=$(mem_snap "$MEM")
 # cwd는 저장소 밖의 빈 전용 폴더(lib.sh 설명 참고): cwd 아래 읽기는 자동 허용되므로 넓은 곳에서 돌리면 읽기 제한이 무력화됨
 mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { txn_end "$TXN"; rm -rf "$STAGE"; exit 11; }

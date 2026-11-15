@@ -13,6 +13,10 @@ export HOME=$T/home XDG_CONFIG_HOME=$T/home/.config MARU_DATA=$T/data MARU_BIN_D
 unset MARU_HOME CLAUDE_CONFIG_DIR
 mkdir -p "$HOME" "$MARU_DATA" "$T/cmux.app"
 ROOT=$REPO; DRY=""; BACKUPS=$MARU_DATA/backups; ORIG_PATH=$PATH
+# python3/git 가 Xcode 라이선스 미동의 등으로 실패하는 맥에서도 시험이 돌도록 lib.sh 의 도구 해석(폴백)만 쓴다.
+# (PATH 앞 접두는 비우고, 기억 폴더는 위에서 강제한 임시 HOME 아래로 계산된다)
+MARU_PATH_PREFIX= MARU_LIB_SOFT=1 . "$REPO/scripts/lib.sh" || { echo "python3/git 를 쓸 수 없어 시험 불가: ${MARU_ENV_ERR:-}" >&2; exit 1; }
+unset MARU_LIB_SOFT
 # shellcheck disable=SC1091
 . "$REPO/scripts/optional.sh"
 

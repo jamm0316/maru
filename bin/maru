@@ -14,14 +14,12 @@ MARU_HOME=$(cd "$(dirname "$src")/.." && pwd -P)
 export MARU_HOME
 LOGDIR=${MARU_LOGS:-${MARU_DATA:-$MARU_HOME/data}/logs}
 
-# python3 가 실패(Xcode 라이선스 미동의 등)하면 Command Line Tools 경로로 폴백한다.
-pick_python() {
-  if python3 -c 'pass' >/dev/null 2>&1; then echo python3; return 0; fi
-  if [ -x /Library/Developer/CommandLineTools/usr/bin/python3 ] \
-     && /Library/Developer/CommandLineTools/usr/bin/python3 -c 'pass' >/dev/null 2>&1; then
-    echo /Library/Developer/CommandLineTools/usr/bin/python3; return 0
-  fi
-  return 1
+# 도구(python3/git) 실행 가능 여부와 기억 폴더 경로는 scripts/lib.sh 가 판정한다(폴백 경로 포함, 실패하면 exit 69).
+# ui/suggest 는 그 검증을 거친 뒤에만 python3 를 실행한다.
+need_env() {
+  # shellcheck disable=SC1091
+  . "$MARU_HOME/scripts/lib.sh" || exit 1
+  export MEM
 }
 
 usage() {
@@ -39,26 +37,31 @@ USAGE
 }
 
 doctor() {
-  local bad=0 py
+  local bad=0 lib_rc out
   ok()   { printf 'OK    %s\n' "$*"; }
   warn() { printf '주의  %s\n' "$*"; bad=$((bad+1)); }
-  xcode_hint() { printf '      -> Xcode 라이선스 미동의로 보임: sudo xcodebuild -license\n'; }
+  xcode_hint() { printf '      -> Xcode 라이선스 미동의로 보임: 터미널에서 sudo xcodebuild -license\n'; }
 
   if command -v claude >/dev/null 2>&1; then ok "claude 명령: $(command -v claude)"; else warn "claude 명령을 찾을 수 없음(PATH 확인)"; fi
 
-  if python3 -c 'pass' >/dev/null 2>&1; then ok "python3 동작"
-  else
-    out=$(python3 -c 'pass' 2>&1 | head -1)
-    warn "python3 실행 실패"
-    case "$out" in *license*|*xcodebuild*) xcode_hint ;; esac
-    if py=$(pick_python); then printf '      CLT 폴백 가능: %s\n' "$py"; fi
+  # lib.sh 를 soft 모드로 불러 도구 판정·기억 폴더 계산 결과를 읽는다(실패해도 doctor 는 계속한다)
+  # shellcheck disable=SC1091
+  MARU_LIB_SOFT=1 . "$MARU_HOME/scripts/lib.sh" 2>/dev/null; lib_rc=$?
+  unset MARU_LIB_SOFT
+  if [ -n "$MARU_PY_FALLBACK" ]; then
+    warn "python3 폴백 사용 중(원인: $MARU_PY_WHY) -> $MARU_PY_FALLBACK"
+    case "$MARU_PY_WHY" in *license*|*xcodebuild*) xcode_hint ;; esac
   fi
-
-  if git --version >/dev/null 2>&1; then ok "git 동작"
+  if [ -n "$MARU_GIT_FALLBACK" ]; then
+    warn "git 폴백 사용 중(원인: $MARU_GIT_WHY) -> $MARU_GIT_FALLBACK"
+    case "$MARU_GIT_WHY" in *license*|*xcodebuild*) xcode_hint ;; esac
+  fi
+  if [ "$lib_rc" -ne 0 ]; then
+    warn "도구/기억 폴더 확인 실패: $MARU_ENV_ERR"
   else
-    out=$(git --version 2>&1 | head -1)
-    warn "git 실행 실패"
-    case "$out" in *license*|*xcodebuild*) xcode_hint ;; esac
+    [ -n "$MARU_PY_FALLBACK" ] || ok "python3 동작"
+    [ -n "$MARU_GIT_FALLBACK" ] || ok "git 동작"
+    if [ -d "$MEM" ]; then ok "기억 폴더 경로 유효: $MEM"; else warn "기억 폴더 경로는 올바르나 폴더가 없음: $MEM"; fi
   fi
 
   local sj=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json
@@ -75,15 +78,34 @@ doctor() {
   if launchctl list com.maru.dream >/dev/null 2>&1; then ok "launchd com.maru.dream 로드됨"
   else warn "launchd com.maru.dream 로드 안 됨(install.sh 참고)"; fi
 
-  local f hit any=0
+  local pl=$HOME/Library/LaunchAgents/com.maru.dream.plist sz
+  if [ -f "$pl" ]; then
+    sz=$(stat -f %z "$pl" 2>/dev/null || echo 0)
+    if [ "$sz" -lt 100 ]; then warn "plist 가 비정상적으로 작음(${sz}바이트): $pl -> ./install.sh 로 다시 설치"
+    elif plutil -lint "$pl" >/dev/null 2>&1; then ok "plist ${sz}바이트, plutil -lint 통과"
+    else warn "plist plutil -lint 실패: $pl"; fi
+  else
+    warn "plist 없음: $pl(install.sh 참고)"
+  fi
+
+  local f hit any=0 streak
   for f in reflect dream; do
     if [ -f "$LOGDIR/$f.log" ]; then
       any=1
-      hit=$(tail -n 200 "$LOGDIR/$f.log" | grep -E 'rc=[1-9][0-9]*|되돌림|연속 실패|거부' | tail -n 1)
+      hit=$(tail -n 200 "$LOGDIR/$f.log" | grep -E 'rc=[1-9][0-9]*|되돌림|연속 실패|거부|환경 오류' | tail -n 1)
       if [ -n "$hit" ]; then warn "$f.log 최근 200줄에 실패 흔적: $hit"; else ok "$f.log 최근 200줄에 실패 흔적 없음"; fi
     fi
   done
   [ "$any" = 1 ] || warn "로그 없음: $LOGDIR"
+  if [ -f "$LOGDIR/dream.log" ]; then
+    # 실행("시작" 줄) 단위로 묶어, 가장 최근 실행부터 연속으로 스냅샷 실패/환경 오류였던 횟수를 센다
+    streak=$(tail -n 400 "$LOGDIR/dream.log" | awk '
+      /\[dream\] 시작/ { n++; bad[n]=0; next }
+      /스냅샷 실패|환경 오류/ { if (n) bad[n]=1 }
+      END { c=0; for (i=n; i>=1; i--) { if (bad[i]) c++; else break } print c+0 }')
+    if [ "${streak:-0}" -ge 1 ]; then warn "dream.log: 최근 새벽 정리 ${streak}회 연속 스냅샷 실패/환경 오류 -> maru doctor 위 항목과 dream.log 확인"
+    else ok "dream.log: 최근 새벽 정리에 스냅샷 실패/환경 오류 연속 없음"; fi
+  fi
 
   [ "$bad" = 0 ] && echo "모두 정상" || echo "주의 ${bad}건"
   return 0
@@ -94,11 +116,11 @@ cmd=${1:-}
 case "$cmd" in
   "") cd "$MARU_HOME" && exec claude ;;
   ui)
-    py=$(pick_python) || { echo "python3 를 쓸 수 없습니다. maru doctor 로 확인하세요." >&2; exit 1; }
-    exec "$py" "$MARU_HOME/scripts/maru_ui.py" "$@" ;;
+    need_env
+    exec python3 "$MARU_HOME/scripts/maru_ui.py" "$@" ;;
   suggest)
-    py=$(pick_python) || { echo "python3 를 쓸 수 없습니다. maru doctor 로 확인하세요." >&2; exit 1; }
-    exec "$py" "$MARU_HOME/scripts/maru_ui.py" --suggest "$@" ;;
+    need_env
+    exec python3 "$MARU_HOME/scripts/maru_ui.py" --suggest "$@" ;;
   status) exec "$MARU_HOME/scripts/maru-status.sh" "$@" ;;
   log)
     kind=${1:-reflect}

@@ -17,15 +17,10 @@ for a in "$@"; do
 done
 
 _here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-# lib.sh 는 python3 로 기억 폴더 슬러그를 구한다. python3 가 Xcode 셔임(라이선스 미동의)이면 실패하므로 stderr 는 버린다.
+# lib.sh 가 python3/git 를 실제로 실행해 보고(폴백 포함) 기억 폴더 경로를 검증한다. 실패하면 원인을 출력하고 종료한다(exit 69).
 # shellcheck disable=SC1091
-. "$_here/lib.sh" 2>/dev/null
+. "$_here/lib.sh" || exit 1
 MARU_HOME=${MARU_HOME:-$(dirname "$_here")}
-# 슬러그 계산이 실패해 기억 폴더가 틀렸으면, 같은 규칙(영숫자 외 전부 '-')을 셸만으로 다시 계산한다.
-if [ ! -d "${MEM:-}" ]; then
-  _slug=$(printf '%s' "$(cd "$MARU_HOME" && pwd -P)" | sed 's/[^A-Za-z0-9]/-/g')
-  MEM=${PROJECTS:-$HOME/.claude/projects}/$_slug/memory
-fi
 LOGS=${LOGS:-$MARU_HOME/data/logs}
 PROPOSALS=${PROPOSALS:-$MARU_HOME/data/skill-proposals}
 
@@ -40,7 +35,7 @@ last_run() {
     NR==1 { ts=substr($0,1,19); next }
     /회고 시작|\[dream\] 시작/ { exit }
     /되돌림/ { rb=1 }
-    /rc=[1-9][0-9]*/ { fail=1 }
+    /rc=[1-9][0-9]*|환경 오류|스냅샷 실패/ { fail=1 }
     /커밋 완료/ { done=1 }
     /변경 없음/ { none=1 }
     END {

@@ -4,28 +4,48 @@
 MODEL="${DREAM_MODEL:-sonnet}"            # 정리에 쓸 모델
 CLAUDE_TIMEOUT="${DREAM_TIMEOUT:-600}"    # claude -p 하드 제한(초)
 MAX_SWEEP="${DREAM_MAX_SWEEP:-8}"         # 한 번에 회고할 최대 세션 수
-SWEEP_HOURS=36                            # 최근 이 시간 안에 수정된 transcript만
+SWEEP_HOURS=${MARU_SWEEP_HOURS:-36}       # 최근 이 시간 안에 수정된 transcript만(기본 36). 놓친 세션 보충용으로 MARU_SWEEP_HOURS=96 처럼 일시 확장(1~720)
 IDLE_MIN=60                               # 이 분 안에 수정된 건 진행 중일 수 있어 제외
 SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-. "$SCRIPTS/lib.sh"   # MARU_HOME/MARU_DATA/MEM/STAGE 등 설정
+# lib.sh 가 도구·기억 폴더 검증에 실패하면 여기서 로그·알림 처리 후 종료한다(조용히 넘어가지 않는다)
+MARU_LIB_SOFT=1 . "$SCRIPTS/lib.sh"; lib_rc=$?   # MARU_HOME/MARU_DATA/MEM/STAGE 등 설정
+unset MARU_LIB_SOFT
 LOG=$LOGS/dream.log
 MARKER=$STATE/dream.marker
-mkdir -p "$LOGS" "$STATE" "$MARU_DATA/backups"
+mkdir -p "$LOGS" "$STATE" "$MARU_DATA/backups" 2>/dev/null
 log() { echo "$(date '+%F %T') [dream] $*" >> "$LOG"; }
 
 # 삭제 가드 apply_deletions 는 lib.sh 에 있다(reflect 와 공용)
 
-if [ "$1" = "--apply-deletions" ]; then apply_deletions "$2" "$3"; exit $?; fi
+if [ "${1:-}" = "--apply-deletions" ]; then apply_deletions "$2" "$3"; exit $?; fi
+
+# 환경 오류: 로그 + 실패 횟수(첫 번째에 알림) 후 종료. 이 경우 어떤 세션도 처리 완료로 표시하지 않는다.
+env_fail() { log "환경 오류: $*"; echo "마루 dream: $*" >&2; fail_bump dream env; }
+envreason=""
+if [ "$lib_rc" -ne 0 ]; then envreason=${MARU_ENV_ERR:-도구/기억 폴더 확인 실패}
+elif [ -z "${MEM_SETTINGS:-}" ]; then envreason="jq 로 설정 JSON 을 만들지 못함(jq 실행 불가?)"
+elif [ ! -d "$MEM" ]; then envreason="기억 폴더가 없음: $MEM"
+fi
+if [ -n "$envreason" ]; then env_fail "$envreason — 정리 중단(sweep 도 하지 않음)"; exit 1; fi
+
+# sweep 시간 창 검증: 1~720 정수만(앞의 0은 10진수로 취급)
+case $SWEEP_HOURS in ''|*[!0-9]*) SWEEP_HOURS=bad ;; esac
+if [ "$SWEEP_HOURS" != bad ] && [ ${#SWEEP_HOURS} -le 4 ]; then SWEEP_HOURS=$((10#$SWEEP_HOURS)); else SWEEP_HOURS=bad; fi
+if [ "$SWEEP_HOURS" = bad ] || [ "$SWEEP_HOURS" -lt 1 ] || [ "$SWEEP_HOURS" -gt 720 ]; then
+  log "MARU_SWEEP_HOURS 값이 올바르지 않음(1~720 정수): ${MARU_SWEEP_HOURS:-} — 종료"
+  echo "MARU_SWEEP_HOURS 는 1~720 사이 정수여야 합니다: ${MARU_SWEEP_HOURS:-}" >&2
+  exit 2
+fi
 
 # 잠금: 동시에 둘째 dream은 즉시 종료
 DLOCK=$STATE/dream.lock.d
 acquire_lock "$DLOCK" 1 || { log "이미 실행 중 — 종료"; exit 0; }
 trap 'rm -rf "$DLOCK"; rotate_log "$LOG"' EXIT
-log "시작 (model=$MODEL, sweep 최대 $MAX_SWEEP)"
+log "시작 (model=$MODEL, sweep 최대 $MAX_SWEEP, 시간 창 ${SWEEP_HOURS}시간)"
 
 # ---- a. Sweep: SessionEnd가 안 울린 세션 회고
 # 일이 필요한 것만 상한에 센다: UUID 이름이 아니거나, 이미 끝까지 처리했거나(state/<sid>.lines),
-# 이미 한 번 시도했거나(state/<sid>.swept) 하면 세지 않고 건너뜀. 오래된 것부터 처리해 36시간 창 밖으로 밀려나지 않게 한다.
+# 이미 한 번 시도했거나(state/<sid>.swept) 하면 세지 않고 건너뜀. 오래된 것부터 처리해 시간 창(기본 36시간) 밖으로 밀려나지 않게 한다.
 cands=$(find "$PROJECTS" -maxdepth 2 -name '*.jsonl' -type f -mmin -$((SWEEP_HOURS*60)) -mmin +$IDLE_MIN \
   -exec stat -f '%m %N' {} + 2>/dev/null | sort -n | cut -d' ' -f2-)
 found=0; cnt=0; skipped=0
@@ -63,9 +83,9 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 TXN=$STATE/txn.dream
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
 prompt="$(render_template "$MARU_HOME/prompts/consolidate-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE")"
-mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || exit 0
+mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { env_fail "작업 폴더를 만들 수 없음: $MARU_WORK"; exit 1; }
 # 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
-txn_begin "$MEM" "$TXN" || { log "스냅샷 실패 — 정리 건너뜀"; txn_end "$TXN"; exit 0; }
+txn_begin "$MEM" "$TXN" || { env_fail "기억 폴더 스냅샷 실패 — 정리 건너뜀(MEM 경로·권한 확인)"; txn_end "$TXN"; exit 1; }
 log "정리 시작"
 # 테스트 훅: DREAM_FAKE_MODEL(스크립트 경로)이 claude 호출을 대신한다. 사고 방지를 위해
 # DREAM_ALLOW_FAKE=yes-i-am-testing 도 함께 있어야만 동작한다. launchd plist·훅 환경에는 둘 다 없다.

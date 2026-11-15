@@ -1,5 +1,9 @@
 #!/bin/bash
 # reflect.sh / dream.sh / hist 공용 설정과 함수 (source 전용). 호출 쪽이 log() 를 정의해 둬야 한다.
+# 끝부분의 "환경 해석"이 python3/git 를 실제로 실행해 보고(필요하면 폴백 경로를 PATH 앞에 둔다) 기억 폴더(MEM)를
+# 계산·검증한다. 실패하면 MEM 을 지우고 즉시 종료(exit 69)한다. 호출 쪽이 직접 처리하려면 source 전에
+# MARU_LIB_SOFT=1 을 두면 종료 대신 return 1 한다(그때 MARU_ENV_ERR 에 원인이 있다).
+# 시험용: MARU_TOOL_DIRS(폴백 후보 디렉터리, ':' 구분)로 후보 목록을 바꿀 수 있다.
 
 # ===== 설정 블록 ==============================================================
 # 우선순위: 환경변수 > $MARU_DATA/maru.conf > 기본값. maru.conf 는 `VAR=${VAR:-값}` 형식으로 쓴다.
@@ -11,14 +15,6 @@ MARU_DATA=${MARU_DATA:-$MARU_HOME/data}                    # 개인 데이터(gi
 CLAUDE_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}             # Claude Code 설정 폴더
 PROJECTS=${PROJECTS:-$CLAUDE_DIR/projects}                 # 대화 기록(transcript) 폴더
 SKILLS=${SKILLS:-$CLAUDE_DIR/skills}                       # 전역 스킬 폴더(읽기 전용으로만 쓴다)
-
-# Claude Code의 프로젝트 슬러그 규칙: 실제 경로에서 영숫자가 아닌 문자를 모두 '-'로 바꾼다.
-maru_slug() { python3 -c 'import os,re,sys;print(re.sub(r"[^A-Za-z0-9]","-",os.path.realpath(sys.argv[1])))' "$1"; }
-MEM=${MEM:-$PROJECTS/$(maru_slug "$MARU_HOME")/memory}    # 자동 기억 폴더(maru 프로젝트용)
-
-# ~/.claude 아래 쓰기는 허용 규칙만으로는 막히므로, 헤드리스 실행에는 이 기억 폴더를 "자동 기억 폴더"로 지정해
-# 쓰기를 허용한다(실측: 이 설정 + cwd가 저장소 밖이면 memory 쓰기만 허용되고 다른 곳은 거부된다).
-MEM_SETTINGS=$(jq -nc --arg m "$MEM" '{autoMemoryDirectory:$m}')
 
 STATE=${MARU_STATE:-$MARU_DATA/state}
 LOGS=${MARU_LOGS:-$MARU_DATA/logs}
@@ -37,7 +33,10 @@ MARU_TELEGRAM_SESSION=${MARU_TELEGRAM_SESSION:-maru-telegram}   # tmux 세션 �
 # 허용 목록: default(매 승인마다 멈춤, 가장 보수적) / acceptEdits / plan / auto. 그 외(빈 값·bypassPermissions·dontAsk 포함)는 거부. 장단점은 README.
 MARU_TELEGRAM_PERMISSION_MODE=${MARU_TELEGRAM_PERMISSION_MODE-default}
 MARU_TELEGRAM_MAX_RESTARTS=${MARU_TELEGRAM_MAX_RESTARTS:-5}      # 1시간 안에 허용하는 자동 재시작 횟수(양의 정수)
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+# PATH 앞에 둘 디렉터리(시험에서는 MARU_PATH_PREFIX= 로 비울 수 있다)
+MARU_PATH_PREFIX=${MARU_PATH_PREFIX-/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin}
+[ -z "$MARU_PATH_PREFIX" ] || PATH="$MARU_PATH_PREFIX:$PATH"
+export PATH
 # ==============================================================================
 
 # 로그 1MB 초과 시 .1로 회전: rotate_log <파일>
@@ -132,14 +131,17 @@ mem_validate() {
   return 0
 }
 
-# ---- 연속 실패 알림: fail_bump <이름> / fail_reset <이름>
-# 2번째 연속 실패에서 딱 한 번 macOS 알림. 성공(fail_reset)이 있기 전에는 다시 알리지 않는다.
+# ---- 연속 실패 알림: fail_bump <이름> [env] / fail_reset <이름>
+# 일반 실패는 2번째 연속 실패에서, 환경 실패(env: 도구 실행 불가·기억 폴더 계산 실패 등 재시도해도 같은 결과)는
+# 첫 실패에서 macOS 알림을 한 번만 낸다. 성공(fail_reset)이 있기 전에는 다시 알리지 않는다.
 # osascript가 없거나 실패·지연돼도 스크립트에는 영향이 없다.
 notify_fail() {
   command -v osascript >/dev/null 2>&1 || return 0
-  perl -e 'alarm 10; exec @ARGV' osascript -e \
-    'display notification "회고/정리가 연속 실패했습니다. 로그인 만료 여부를 확인하세요: claude auth login" with title "마루"' \
-    >/dev/null 2>&1 </dev/null || true
+  local msg="회고/정리가 연속 실패했습니다. 로그인 만료 여부를 확인하세요: claude auth login"
+  [ "${1:-}" = env ] && msg="도구 실행 또는 기억 폴더 문제로 회고/정리가 실패했습니다. 터미널에서 maru doctor 를 실행해 확인하세요."
+  perl -e 'alarm 10; exec @ARGV' osascript -e 'on run argv
+display notification (item 1 of argv) with title "마루"
+end run' "$msg" >/dev/null 2>&1 </dev/null || true
   return 0
 }
 # 임의 문구 macOS 알림: notify_text <문구>. 실패해도 스크립트에는 영향 없음.
@@ -151,13 +153,18 @@ end run' "$1" >/dev/null 2>&1 </dev/null || true
   return 0
 }
 fail_bump() {
-  local f="$STATE/fail.$1" n
+  local f="$STATE/fail.$1" n thr=2
+  [ "${2:-}" = env ] && thr=1
+  mkdir -p "$STATE" 2>/dev/null
   n=$(cat "$f" 2>/dev/null); [[ "$n" =~ ^[0-9]+$ ]] || n=0
   n=$((n+1)); echo "$n" > "$f"
-  if [ "$n" -eq 2 ]; then notify_fail; type log >/dev/null 2>&1 && log "연속 실패 $n회($1) — 알림 시도"; fi
+  if [ "$n" -ge "$thr" ] && [ ! -e "$f.notified" ]; then
+    : > "$f.notified"; notify_fail "${2:-}"
+    type log >/dev/null 2>&1 && log "연속 실패 $n회($1) — 알림 시도"
+  fi
   return 0
 }
-fail_reset() { rm -f "$STATE/fail.$1"; }
+fail_reset() { rm -f "$STATE/fail.$1" "$STATE/fail.$1.notified"; }
 
 # ---- 삭제 가드(reflect·dream 공용): apply_deletions <memdir> <list>. 항목 하나라도 거부되거나 한도를 넘으면
 # 아무것도 지우지 않고 1을 반환한다(호출 쪽이 run 전체를 되돌림). 전부 통과하면 지우고 0.
@@ -290,3 +297,108 @@ if not os.path.exists(out) or open(out).read() != new:
 PY
   git --git-dir="$gd" --work-tree="$CLAUDE_DIR" "$@"
 }
+
+# ============ 환경 해석(파일 맨 끝, source 시 1회 실행) ========================
+# 1) python3/git 를 실제로 실행해 본다(출력은 버리고 종료 코드만). Xcode 라이선스 미동의 등으로 /usr/bin 셔임이
+#    실패하면 후보 디렉터리에서 동작하는 것을 찾아 그 디렉터리를 PATH 앞에 둔다(자식 프로세스도 같이 쓴다).
+# 2) 기억 폴더 MEM 을 $PROJECTS/<slug>/memory 로 계산하고 검증한다. 하나라도 이상하면 진행하지 않는다.
+MARU_TOOL_DIRS=${MARU_TOOL_DIRS-/Library/Developer/CommandLineTools/usr/bin:/opt/homebrew/bin:/usr/local/bin}
+MARU_ENV_ERR=""
+MARU_PY_FALLBACK=""; MARU_PY_WHY=""; MARU_GIT_FALLBACK=""; MARU_GIT_WHY=""
+
+# 도구 하나를 실제로 실행해 성공 여부만 본다: _maru_probe <python3|git> [디렉터리]
+_maru_probe() {
+  local t=$1 d=${2:-} bin
+  if [ -n "$d" ]; then bin=$d/$t; [ -x "$bin" ] || return 1; else bin=$t; fi
+  case $t in
+    python3) "$bin" -c 'pass' >/dev/null 2>&1 </dev/null ;;
+    git)     "$bin" --version >/dev/null 2>&1 </dev/null ;;
+    *)       return 1 ;;
+  esac
+}
+# 실패 원인 한 줄(진단용): _maru_why <도구>
+_maru_why() {
+  local o
+  case $1 in
+    python3) o=$(python3 -c 'pass' 2>&1 </dev/null) ;;
+    git)     o=$(git --version 2>&1 </dev/null) ;;
+  esac
+  o=$(printf '%s' "$o" | head -n 1 | cut -c1-200)
+  printf '%s' "${o:-실행 실패}"
+}
+# _maru_resolve_tool <도구> <처음 실행 실패 원인(비어 있으면 처음부터 동작)>
+# 동작하면 0. 아니면 폴백을 찾아 PATH 앞에 두고, 없으면 MARU_ENV_ERR 를 채우고 1.
+_maru_resolve_tool() {
+  local t=$1 why=$2 d dirs
+  [ -n "$why" ] || return 0
+  IFS=: read -r -a dirs <<< "$MARU_TOOL_DIRS"
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    [ -n "$d" ] || continue
+    if _maru_probe "$t" "$d"; then
+      case ":$PATH:" in ":$d:"*) ;; *) PATH="$d:$PATH"; export PATH ;; esac
+      if _maru_probe "$t"; then   # PATH 앞에 둔 뒤 실제로 이것이 선택되는지 재확인
+        case $t in
+          python3) MARU_PY_FALLBACK=$d; MARU_PY_WHY=$why ;;
+          git)     MARU_GIT_FALLBACK=$d; MARU_GIT_WHY=$why ;;
+        esac
+        return 0
+      fi
+    fi
+  done
+  MARU_ENV_ERR="마루: $t 를 실행할 수 없습니다(원인: $why). 폴백 후보(${MARU_TOOL_DIRS:-없음})에도 동작하는 것이 없습니다."
+  case $why in
+    *license*|*xcodebuild*) MARU_ENV_ERR="$MARU_ENV_ERR Xcode 라이선스 미동의로 보입니다 -> 터미널에서: sudo xcodebuild -license" ;;
+    *) MARU_ENV_ERR="$MARU_ENV_ERR Command Line Tools(xcode-select --install) 또는 Homebrew 로 $t 를 설치하세요." ;;
+  esac
+  return 1
+}
+
+# Claude Code의 프로젝트 슬러그 규칙: 실제 경로에서 영숫자가 아닌 문자를 모두 '-'로 바꾼다. 실패하면 비어 있는 채로 1.
+maru_slug() { python3 -c 'import os,re,sys;print(re.sub(r"[^A-Za-z0-9]","-",os.path.realpath(sys.argv[1])))' "$1" 2>/dev/null; }
+
+# 기억 폴더 경로 검증: maru_mem_check <경로>. 문제면 이유를 한 줄 출력하고 1.
+# 허용 형태는 오직 <PROJECTS>/<slug>/memory (slug 는 비어 있지 않은 한 단계 이름).
+maru_mem_check() {
+  local m=${1:-} p=${PROJECTS:-} rest slug
+  [ -n "$p" ] || { echo "PROJECTS 가 비어 있음"; return 1; }
+  case $p in /*) ;; *) echo "PROJECTS 가 절대 경로가 아님: $p"; return 1;; esac
+  case $p in *//*|*/../*|*/..) echo "PROJECTS 경로가 이상함: $p"; return 1;; esac
+  [ -n "$m" ] || { echo "기억 폴더 경로가 비어 있음"; return 1; }
+  case $m in /*) ;; *) echo "기억 폴더가 절대 경로가 아님: $m"; return 1;; esac
+  case $m in *//*) echo "기억 폴더 경로에 // 가 있음: $m"; return 1;; esac
+  case $m in */../*|*/..) echo "기억 폴더 경로에 .. 가 있음: $m"; return 1;; esac
+  rest=${m#"$p"/}
+  [ "$rest" != "$m" ] || { echo "기억 폴더가 projects/ 아래가 아님: $m"; return 1; }
+  slug=${rest%/memory}
+  { [ "$slug" != "$rest" ] && [ -n "$slug" ]; } || { echo "기억 폴더가 projects/<slug>/memory 형태가 아님: $m"; return 1; }
+  case $slug in */*) echo "기억 폴더가 projects/<slug>/memory 형태가 아님: $m"; return 1;; esac
+  return 0
+}
+
+_maru_resolve_env() {
+  local s why pw="" gw=""
+  PROJECTS=${PROJECTS%/}
+  # 둘 다 PATH 를 건드리기 전에 먼저 실행해 본다(원인을 정확히 남기기 위해)
+  _maru_probe python3 || pw=$(_maru_why python3)
+  _maru_probe git || gw=$(_maru_why git)
+  _maru_resolve_tool python3 "$pw" || return 1
+  _maru_resolve_tool git "$gw" || return 1
+  if [ -z "${MEM:-}" ]; then
+    s=$(maru_slug "$MARU_HOME") || s=""
+    if [ -z "$s" ]; then MARU_ENV_ERR="마루: 기억 폴더 slug 계산 실패(python3 출력이 비어 있음, MARU_HOME=$MARU_HOME)"; return 1; fi
+    MEM=$PROJECTS/$s/memory
+  fi
+  if ! why=$(maru_mem_check "$MEM"); then MARU_ENV_ERR="마루: 기억 폴더 계산 결과가 올바르지 않음 — $why"; return 1; fi
+  return 0
+}
+
+if _maru_resolve_env; then
+  # ~/.claude 아래 쓰기는 허용 규칙만으로는 막히므로, 헤드리스 실행에는 이 기억 폴더를 "자동 기억 폴더"로 지정해
+  # 쓰기를 허용한다(실측: 이 설정 + cwd가 저장소 밖이면 memory 쓰기만 허용되고 다른 곳은 거부된다).
+  MEM_SETTINGS=$(jq -nc --arg m "$MEM" '{autoMemoryDirectory:$m}' 2>/dev/null) || MEM_SETTINGS=""
+else
+  unset MEM MEM_SETTINGS
+  echo "$MARU_ENV_ERR" >&2
+  if [ -n "${MARU_LIB_SOFT:-}" ]; then return 1; fi
+  exit 69
+fi

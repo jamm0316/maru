@@ -15,42 +15,46 @@ for a in "$@"; do
   esac
 done
 ROOT=$(cd "$(dirname "$0")" && pwd -P)
-. "$ROOT/scripts/lib.sh"
+# python3/git 를 실제로 실행해 판정하고(폴백 포함) 기억 폴더를 검증한다. 실패하면 아무것도 건드리기 전에 중단한다.
+MARU_LIB_SOFT=1
+. "$ROOT/scripts/lib.sh" || { echo "필요한 도구/기억 폴더 확인에 실패해 아무것도 변경하지 않고 중단합니다." >&2; exit 1; }
+unset MARU_LIB_SOFT
 CFG=(python3 -I "$MARU_HOME/scripts/maru_config.py")
 DRYARG=(); [ -n "$DRY" ] && DRYARG=(--dry-run)
 LABEL=com.maru.dream
 PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
 say() { printf '\n== %s\n' "$*"; }
+die() { echo "  실패: $*" >&2; echo "  여기서 중단합니다(이후 단계는 실행하지 않음)." >&2; exit 1; }
 
 say "SessionEnd 훅 제거"
-"${CFG[@]}" hook-remove --settings "$CLAUDE_DIR/settings.json" --match "$MARU_HOME/scripts/reflect.sh" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"}
+"${CFG[@]}" hook-remove --settings "$CLAUDE_DIR/settings.json" --match "$MARU_HOME/scripts/reflect.sh" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"} || die "SessionEnd 훅 제거 실패"
 
 say "launchd 작업 $LABEL 제거"
 if [ -n "$DRY" ]; then echo "  (dry-run) launchctl bootout, $PLIST 삭제"
 else
   launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && echo "  bootout 완료" || echo "  로드되어 있지 않음"
-  [ -f "$PLIST" ] && rm -f "$PLIST" && echo "  삭제: $PLIST"
+  if [ -f "$PLIST" ]; then rm -f "$PLIST" && echo "  삭제: $PLIST" || die "$PLIST 삭제 실패"; fi
 fi
 
 say "텔레그램 세션 중지 + launchd 작업 com.maru.telegram 제거(있을 때만)"
 TGPLIST=$HOME/Library/LaunchAgents/com.maru.telegram.plist
 if [ -n "$DRY" ]; then echo "  (dry-run) scripts/telegram.sh stop(실행 중이면 세션과 하위 프로세스 종료), launchctl bootout, $TGPLIST 삭제(있으면)"
 else
-  bash "$MARU_HOME/scripts/telegram.sh" stop
+  bash "$MARU_HOME/scripts/telegram.sh" stop || die "텔레그램 세션 중지 실패"
   launchctl bootout "gui/$(id -u)/com.maru.telegram" >/dev/null 2>&1 && echo "  bootout 완료" || echo "  로드되어 있지 않음"
-  [ -f "$TGPLIST" ] && rm -f "$TGPLIST" && echo "  삭제: $TGPLIST"
+  if [ -f "$TGPLIST" ]; then rm -f "$TGPLIST" && echo "  삭제: $TGPLIST" || die "$TGPLIST 삭제 실패"; fi
 fi
 
 say "~/.claude/CLAUDE.md 의 maru 블록 제거"
-"${CFG[@]}" claude-md-remove --file "$CLAUDE_DIR/CLAUDE.md" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"}
+"${CFG[@]}" claude-md-remove --file "$CLAUDE_DIR/CLAUDE.md" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"} || die "CLAUDE.md 블록 제거 실패"
 
 say "전역 recall 스킬 제거"
 if [ -f "$SKILLS/recall/.maru" ]; then
-  if [ -n "$DRY" ]; then echo "  (dry-run) rm -rf $SKILLS/recall"; else rm -rf "$SKILLS/recall" && echo "  삭제: $SKILLS/recall"; fi
+  if [ -n "$DRY" ]; then echo "  (dry-run) rm -rf $SKILLS/recall"; else rm -rf "$SKILLS/recall" && echo "  삭제: $SKILLS/recall" || die "recall 삭제 실패"; fi
 else echo "  .maru 표식이 없거나 recall 이 없음 — 건드리지 않음"; fi
 
 say "저장소용 홈 접근 허용(.claude/settings.local.json) 제거"
-"${CFG[@]}" local-settings-remove --file "$MARU_HOME/.claude/settings.local.json" --dir "$HOME" ${DRYARG[@]+"${DRYARG[@]}"}
+"${CFG[@]}" local-settings-remove --file "$MARU_HOME/.claude/settings.local.json" --dir "$HOME" ${DRYARG[@]+"${DRYARG[@]}"} || die "settings.local.json 정리 실패"
 
 say "헤드리스 작업 폴더 제거"
 if [ -n "$DRY" ]; then echo "  (dry-run) rmdir $MARU_WORK"
@@ -58,8 +62,8 @@ elif [ -d "$MARU_WORK" ]; then rmdir "$MARU_WORK" 2>/dev/null && echo "  삭제:
 
 if [ -n "$CLI" ] || [ -n "$CMUX" ]; then
   . "$ROOT/scripts/optional.sh"; BACKUPS=$MARU_DATA/backups
-  [ -z "$CLI" ] || { say "maru 명령 링크 제거 (--with-cli)"; uninstall_cli; }
-  [ -z "$CMUX" ] || { say "cmux Dock 설정 제거 (--with-cmux)"; uninstall_cmux; }
+  [ -z "$CLI" ] || { say "maru 명령 링크 제거 (--with-cli)"; uninstall_cli || die "maru 명령 링크 제거 실패"; }
+  [ -z "$CMUX" ] || { say "cmux Dock 설정 제거 (--with-cmux)"; uninstall_cmux || die "cmux Dock 설정 제거 실패"; }
 fi
 
 say "남겨 둔 것"
