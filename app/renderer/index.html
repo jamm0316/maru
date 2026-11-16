@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>마루</title>
+<link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="15" fill="none" stroke="#FF8A2A" stroke-width="2"/><circle cx="17" cy="17" r="9" fill="none" stroke="#FF8A2A" stroke-width="1.5" stroke-dasharray="4 3"/><circle cx="17" cy="17" r="4" fill="#FF8A2A"/></svg>
+      <div class="col"><span class="logo">MARU</span><span class="sub">총괄 매니저 · 온라인</span></div>
+    </div>
+    <div class="growth">
+      <span class="lv" id="lv">LV 1</span>
+      <div class="growth-body">
+        <div class="growth-row"><span id="growth-left">성장도 · 기억 0개</span><span id="growth-right"></span></div>
+        <div class="bar"><div class="bar-fill" id="bar"></div></div>
+      </div>
+    </div>
+    <div class="sys">
+      <span class="sys-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF8A2A" stroke-width="2" aria-hidden="true"><rect x="2" y="7" width="18" height="10" rx="2"/><path d="M22 11v2"/><rect x="4" y="9" width="14" height="6" fill="#FF8A2A" stroke="none"/></svg><span id="batt">배터리 -</span></span>
+      <span class="sys-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF8A2A" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/></svg><span id="disk">여유 -</span></span>
+      <span class="clock" id="clock">--:--</span>
+    </div>
+  </header>
+
+  <div class="cols">
+    <nav class="left" aria-label="작업 공간">
+      <section class="card">
+        <h2 class="eyebrow">작업 공간</h2>
+        <div id="workspaces" class="stack"></div>
+      </section>
+      <section class="card">
+        <h2 class="eyebrow">파티</h2>
+        <div id="party" class="stack gap10"></div>
+      </section>
+    </nav>
+
+    <main class="term-wrap">
+      <div class="term-bar"><span class="accent">●</span><span id="term-name">maru</span><span id="term-cwd">~</span><span class="right">claude</span></div>
+      <div id="terminal"></div>
+    </main>
+
+    <aside class="right-col" aria-label="마루 상태">
+      <section class="card core">
+        <svg width="132" height="132" viewBox="0 0 220 220" role="img" id="core" aria-label="마루 코어: 대기">
+          <circle cx="110" cy="110" r="100" fill="none" stroke="#2B2119" stroke-width="2"/>
+          <g class="ring1"><circle cx="110" cy="110" r="92" fill="none" stroke="#FF8A2A" stroke-width="3" stroke-dasharray="120 40 30 40" stroke-linecap="round"/></g>
+          <g class="ring2"><circle cx="110" cy="110" r="72" fill="none" stroke="#FFB46B" stroke-width="2" stroke-dasharray="8 10"/></g>
+          <circle class="core-dot" cx="110" cy="110" r="44" fill="#2A1A0C" stroke="#FF8A2A" stroke-width="2"/>
+          <circle cx="110" cy="110" r="18" fill="#FF8A2A"/>
+        </svg>
+        <div class="col gap6 min0">
+          <span class="eyebrow">STATUS</span>
+          <span class="status-main" id="status-main">대기</span>
+          <span class="status-sub" id="status-sub"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="head"><h2 class="title">오늘의 퀘스트</h2><span class="hint">회고가 고른 다음 요청</span></div>
+        <div id="quests" class="stack gap10"></div>
+        <div id="quest-note" class="empty" role="status"></div>
+      </section>
+
+      <section class="card">
+        <div class="head"><h2 class="title">획득한 스킬</h2><span class="hint" id="skills-count"></span></div>
+        <div id="skills" class="chips"></div>
+      </section>
+
+      <section class="card">
+        <h2 class="title">밤사이 브리핑</h2>
+        <div id="briefing" class="stack gap8"></div>
+      </section>
+    </aside>
+  </div>
+</div>
+<script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+<script src="../node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>

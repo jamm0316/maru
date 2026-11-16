@@ -1,0 +1,133 @@
+'use strict';
+// 순수 함수 모음(Electron·파일·프로세스 의존 없음). test.js 로 검사한다.
+
+const MEMORIES_PER_LEVEL = 50;
+const QUEST_MAX_CHARS = 120;
+const SUGGESTIONS_MAX_BYTES = 64 * 1024;
+const LOG_TAIL_BYTES = 64 * 1024;
+const BRIEFING_MAX = 4;
+const NAME_MAX = 64;
+
+// 제어문자, bidi, zero-width, 보이지 않는 서식·채움 문자, Tags, 변형 선택자, 한글 채움, 미할당·사설·서로게이트(u 플래그)
+const BAD_SRC = '[' + [
+  '\\u0000-\\u001F', '\\u007F-\\u009F', '\\u00AD', '\\u034F', '\\u061C', '\\u115F', '\\u1160', '\\u180E',
+  '\\u200B-\\u200F', '\\u2028-\\u202E', '\\u2060-\\u206F', '\\u3164', '\\uFE00-\\uFE0F', '\\uFEFF', '\\uFFA0',
+  '\\uFFF9-\\uFFFB', '\\u{E0000}-\\u{E007F}', '\\u{E0100}-\\u{E01EF}', '\\p{Cf}', '\\p{Co}', '\\p{Cn}', '\\p{Cs}',
+].join('') + ']';
+const BAD_CHARS = new RegExp(BAD_SRC, 'u');
+const BAD_CHARS_G = new RegExp(BAD_SRC, 'gu');
+
+function hasBadChars(s) { return BAD_CHARS.test(s); }
+
+function levelInfo(memoryFiles, per = MEMORIES_PER_LEVEL) {
+  const n = Number.isFinite(memoryFiles) && memoryFiles > 0 ? Math.floor(memoryFiles) : 0;
+  const rem = n % per;
+  return { level: Math.floor(n / per) + 1, memories: n, ratio: rem / per, toNext: per - rem };
+}
+
+// suggestions.txt 본문 -> 퀘스트 문장 배열
+function parseSuggestions(text, truncated = false) {
+  if (typeof text !== 'string') return [];
+  const out = [];
+  const rows = text.split(/\r?\n/);
+  if (truncated) rows.pop(); // 64KB 에서 잘렸으면 마지막(불완전) 줄 버림
+  for (const raw of rows) {
+    const line = raw.trim();
+    if (!line) continue;
+    if ([...line].length > QUEST_MAX_CHARS) continue;
+    if (hasBadChars(line)) continue;
+    out.push(line);
+  }
+  return out;
+}
+
+// pty 에 써 넣을 문장 정리: 개행·\r·제어문자·보이지 않는 문자 제거
+function cleanQuestText(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(BAD_CHARS_G, '').trim();
+}
+
+// 스킬 디렉터리 이름 필터(내용은 읽지 않는다)
+// 숫자·!·/ 로 시작하면 선택 프롬프트/명령으로 오해될 수 있어 써 넣지 않는다
+function isSafeQuestStart(s) { return typeof s === 'string' && s.length > 0 && !/^[0-9!\/]/.test(s); }
+
+function validSkillName(name) {
+  return typeof name === 'string' && name.length > 0 && name.length <= NAME_MAX &&
+    !name.startsWith('.') && !hasBadChars(name) && !/[\/\\]/.test(name);
+}
+
+function mergeSkillNames(...lists) {
+  const set = new Set();
+  for (const l of lists) for (const n of l || []) if (validSkillName(n)) set.add(n);
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+// pmset -g batt
+function parseBattery(out) {
+  if (typeof out !== 'string') return null;
+  const src = /Now drawing from '([^']+)'/.exec(out);
+  const m = /(\d{1,3})%;\s*([^;]+);/.exec(out);
+  if (!m) return null;
+  return {
+    percent: Math.min(100, Number(m[1])),
+    state: m[2].trim(),
+    onAC: src ? /AC/i.test(src[1]) : null,
+  };
+}
+
+// df -k /
+function parseDiskFree(out) {
+  if (typeof out !== 'string') return null;
+  const lines = out.trim().split(/\r?\n/);
+  if (lines.length < 2) return null;
+  const f = lines[lines.length - 1].trim().split(/\s+/);
+  const kb = Number(f[3]);
+  if (!Number.isFinite(kb) || kb < 0) return null;
+  return { freeGB: Math.round(kb / 1024 / 1024) };
+}
+
+// dream.log / reflect.log 꼬리 -> 이벤트 [{at, text}]
+// 줄 형식: "YYYY-MM-DD HH:MM:SS [dream|해시8] 메시지" 또는 "YYYY-MM-DD HH:MM:SS 추천 목록 갱신: ok N줄 ..."
+const LOG_LINE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.*)$/;
+
+function parseLogEvents(text, kind, truncated = false) {
+  if (typeof text !== 'string') return [];
+  let lines = text.split(/\r?\n/);
+  if (truncated) lines = lines.slice(1); // 잘린 첫 줄 버림
+  const events = [];
+  for (const line of lines) {
+    const m = LOG_LINE.exec(line);
+    if (!m) continue;
+    const at = m[1];
+    const body = m[2].replace(/^\[[^\]]*\]\s*/, '');
+    let t = null;
+    if (kind === 'dream') {
+      let x;
+      if (/스냅샷 실패/.test(body)) t = '새벽 정리 건너뜀 · 스냅샷 실패';
+      else if (/기억 변경 없음/.test(body)) t = '새벽 정리 · 기억 변경 없음';
+      else if (/커밋 완료/.test(body)) t = '새벽 정리 완료 · 기억 갱신';
+      else if (/되돌림/.test(body)) t = '새벽 정리 되돌림';
+      else if ((x = /sweep 끝:.*처리 (\d+)개/.exec(body)) && Number(x[1]) > 0) t = `놓친 대화 ${x[1]}개 회고`;
+    } else {
+      let x;
+      if (/^커밋 완료/.test(body)) t = '회고 완료 · 기억 갱신';
+      else if (/^변경 없음\(커밋/.test(body)) t = '회고 · 변경 없음';
+      else if (/^되돌림/.test(body)) t = '회고 되돌림(변경 폐기)';
+      else if ((x = /^추천 목록 갱신: ok (\d+)줄/.exec(m[2])) && Number(x[1]) > 0) t = `새 퀘스트 ${x[1]}개 도착`;
+    }
+    if (t) events.push({ at, text: t });
+  }
+  return events;
+}
+
+function mergeBriefing(eventLists, max = BRIEFING_MAX) {
+  const all = [].concat(...eventLists);
+  all.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // 최신순(안정 아님 허용)
+  return all.slice(0, max);
+}
+
+module.exports = {
+  MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
+  hasBadChars, isSafeQuestStart, levelInfo, parseSuggestions, cleanQuestText, validSkillName, mergeSkillNames,
+  parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
+};
