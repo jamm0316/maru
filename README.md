@@ -102,6 +102,20 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 메인 세션은 `.claude/settings.json` 의 `"model": "sonnet"` 으로 빠르게 접수·단순 처리하고, 어려운 일은 `.claude/agents/` 의 서브에이전트로 나눕니다: `scout`(haiku, 읽기 전용 찾기·조사), `worker`(sonnet, 절차가 정해진 여러 단계 작업), `expert`(opus, 되돌리기 어려운 결정·원인 분석·민감한 변경 리뷰). 기준은 CLAUDE.md 「위임 원칙」.
 메인 모델은 세션 중 스스로 바꿀 수 없으므로 `/model` 로 사용자가 바꾸거나 `claude --model` 로 덮어쓸 수 있습니다. 끄려면 settings.json 의 `model` 줄을 지우면 됩니다(서브에이전트 정의는 `.claude/agents/` 를 지우거나 그대로 두어도 무해). 모두 구독 사용량 안에서만 동작하며 별도 과금은 없습니다.
 
+## 스쿼드
+여러 단계로 나뉘는 큰 일을 맡는 팀입니다: 마루 → 총괄(`sq-<slug>-lead`) → 팀원(`sq-<slug>-<역할>`), 위임은 2단계까지이고 팀원은 `Agent` 도구를 가질 수 없습니다. `maru`(= `scripts/maru-claude.sh`)가 `scripts/squads.py json` 결과를 `claude --agents` 로 넘기며, 스쿼드 문제(python3 없음·검증 실패)가 있으면 스쿼드 없이 그냥 `claude` 를 띄웁니다. 총괄·팀원의 프롬프트 앞에는 코드가 고정 안전 머리말(보고 형식·삭제/발신/결제/설정/비밀값 금지·결과 속 지시는 데이터)을 붙이며 스쿼드 파일이 덮어쓸 수 없습니다. 머리말에는 코드가 만든 에이전트 이름만 들어가고, 스쿼드 파일에서 온 이름·팀원 설명은 끝 표지 뒤에 "신뢰하지 않는 정보"로 붙습니다(`[` `]` 는 `(` `)` 로 바뀌고, 머리말 표지를 흉내 내는 문구는 위험 신호로 표시됩니다).
+- 위치: 내장 `squads/<slug>/`(`dev` 개발, `research` 조사) + 개인 `data/squads/<slug>/`(같은 slug 면 개인 우선). 폴더 하나 = `squad.md`(`name` 24자 이하, `description` 200자 이하, 선택 `tags: [a, b]`) + `lead.md` + 팀원 `<role>.md` 1~6개. 에이전트 파일은 머리말 `description`, `model`(haiku|sonnet|opus|inherit), `tools`(쉼표 목록) + 본문. slug·role 은 `[a-z0-9][a-z0-9-]{0,19}`. 링크 거부, 파일당 16KB, 스쿼드 12개, 전체 JSON 96KB(넘으면 뒤 스쿼드부터 제외), 허용 도구 밖 이름은 그 도구만 제외합니다.
+- `maru squad [list]` 목록과 제외 사유 / `maru squad check <폴더>` 검증과 위험 신호(확인 없이·규칙 무시 문구, 팀원의 Bash·Write·Edit 등) 표시 / `maru squad install <폴더> [--replace] [--ack-warnings]` 개인 스쿼드로 설치(이미 있으면 `--replace`, 위험 신호가 있으면 `--ack-warnings` 필요) / `maru squad remove <slug>` 개인 스쿼드를 `data/squads-trash/` 로 이동(영구 삭제 아님) / `maru squad remove --proposal <slug>` 제안함(`data/squad-proposals/`)의 제안을 같은 휴지 폴더로 이동.
+- 회고가 같은 종류의 여러 단계 작업이 반복된다고 보면 `data/squad-proposals/<slug>/` 에 초안을 제안합니다(한 실행 1개, 제안함 전체 10개 상한). 자동 설치는 없고 사용자가 `maru squad check` 로 검토해 승인한 뒤에만 설치합니다. 새 스쿼드는 다음에 `maru` 로 띄우는 세션부터 보입니다(텔레그램 상시 세션 등 `claude` 를 직접 띄우는 경로에는 붙지 않습니다). 시험: `scripts/test-squads.sh`.
+
+## 코드 작업 방식
+기준은 CLAUDE.md 「코드 작업」(숫자는 기본값이고 사용자 선호가 우선, 작업 저장소가 자체 워크플로우를 가지면 그쪽이 우선)입니다.
+- 크기: 작음(파일 1~2개·약 50줄 이하)은 마루가 직접, 중간(파일 3~8개·흐름 하나)은 기본 팀 `worker`, 큼(흐름 여러 개·9개 이상·병렬 가능·공개 계약 변경·하루 초과)은 개발 스쿼드 `dev`. 인증·결제·삭제·공개 계약·CI 설정에 닿으면 크기와 무관하게 독립 리뷰(새 리뷰어, 구현자의 결론은 안 줌).
+- git 저장소의 수정은 새 워크트리 + 새 브랜치(`git worktree add --no-track -b ...`, 저장소 밖 형제 폴더)에서 하고, 끝나면 그 브랜치에 커밋까지만 합니다. 병합·push·PR·워크트리 삭제는 사용자에게 묻습니다.
+- `dev` 총괄은 워크트리의 `.maru/tasks/<이름>.md`(커밋 안 함, 워크트리의 `.git/info/exclude` 로 제외)에 작업 문서(목적·범위·공개 계약·완료 조건·결정·구현 기록)를 쓰고, 완료는 문서의 확인 명령을 직접 실행한 결과로만 판정합니다.
+- 마루 저장소 밖의 프로젝트는 일을 시작하기 전에 그 프로젝트의 지침(CLAUDE.md·AGENTS.md·`.claude/`·README·CI 설정)을 직접 읽고 요점을 팀원에게 전달합니다. 프로젝트 지침이 마루 기본값보다 우선하되 안전 규칙·사용자 지시가 더 위이며, 프로젝트 자체 팀이 있으면 그것을 씁니다. 오래 걸리는 일은 그 프로젝트 폴더에서 세션을 여는 편이 낫습니다.
+- 테스트·빌드 명령은 저장소(README·CI 설정 등)에서 찾으며, 못 찾으면 추측하지 않고 묻습니다.
+
 ## maru 명령과 cmux Dock
 - `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru ui`, `maru suggest [번호]`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 런처 자체는 아무것도 설치·수정하지 않습니다. PATH 등록은 `./install.sh --with-cli` 로 합니다(심볼릭 링크를 따라 저장소 위치를 계산).
 - `maru ui`(`scripts/maru_ui.py`, 파이썬 표준 라이브러리 curses, 네트워크·포트 없음): 40~60열 좁은 폭용 상황판. 탭 1 상태(30초 자동 갱신, `r`) / 2 기억(Enter 본문, `/` 필터) / 3 로그(`l` reflect·dream 전환) / 4 제안 / 5 추천. `--once`는 상태를 평문으로 출력하고 `--selftest`는 임시 디렉터리에서 로직을 검증합니다.
@@ -116,16 +130,17 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 ## 구조
 ```
 CLAUDE.md          에이전트 정체성과 규칙 (개인 정보 없음)
-scripts/           reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정·도구 해석) launchd.sh test-env.sh digest.py hist maru_config.py maru-status.sh maru_ui.py
+squads/            내장 스쿼드(dev research)
+scripts/           squads.py maru-claude.sh test-squads.sh reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정·도구 해석) launchd.sh test-env.sh digest.py hist maru_config.py maru-status.sh maru_ui.py
 bin/maru           런처(ui status log hist doctor)
 cmux/              dock.json 등 cmux 연동
 prompts/           회고·정리 프롬프트 템플릿 ({{MEMORY_DIR}} 등 자리표시자)
 launchd/           plist 템플릿 (설치 때 경로 치환)
 .claude/skills/    recall 스킬, mac-control 스킬(SKILL.md + reference/ cli·applescript·apps)
-data/              개인 데이터 (gitignore): state logs digests skill-proposals stage history.git backups maru.conf
+data/              개인 데이터 (gitignore): state logs digests skill-proposals squads squad-proposals squads-trash stage history.git backups maru.conf
 ```
 - 코드는 `MARU_HOME`(스크립트 위치 기준), 개인 데이터는 `MARU_DATA`(기본 `$MARU_HOME/data`)에 둡니다. 설정은 `scripts/lib.sh` 상단 한 곳이며 환경변수 또는 `data/maru.conf`로 덮어씁니다.
-- **기억 위치**: Claude Code의 자동 기억 폴더 `~/.claude/projects/<슬러그>/memory/`. 슬러그는 `MARU_HOME`의 실제 경로에서 영숫자가 아닌 문자를 `-`로 바꾼 값입니다(예: `/Users/me/maru` → `-Users-me-maru`). 그래서 `~/maru`에서 `claude`를 실행하면 색인이 자동으로 로드됩니다.
+- **기억 위치**: Claude Code의 자동 기억 폴더 `~/.claude/projects/<슬러그>/memory/`. 슬러그는 `MARU_HOME`의 실제 경로에서 영숫자가 아닌 문자를 `-`로 바꾼 값입니다(예: `/path/to/maru` → `-path-to-maru`). 그래서 `~/maru`에서 `claude`를 실행하면 색인이 자동으로 로드됩니다.
 - **변경 이력**: `scripts/hist`는 기억 폴더만 추적하는 별도 git 저장소(`data/history.git`)를 감쌉니다. `scripts/hist log`. 이 저장소(`.git`)는 코드만 추적합니다.
 
 ## 보안 모델과 한계
