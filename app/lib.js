@@ -83,6 +83,12 @@ function resolveTodos(todosRes, sugRes) {
 }
 
 // 렌더러가 보여 준 항목의 비교 키: 제목과 프롬프트(정리된 문자열에는 \n 이 없으므로 모호하지 않다)
+// 중요도(1~10) -> 채운 별 개수(1~3). 8 이상 3개, 5~7 2개, 그 밖은 1개
+function todoStars(importance) {
+  const n = Number(importance);
+  return n >= 8 ? 3 : n >= 5 ? 2 : 1;
+}
+
 function todoKey(item) { return item ? item.title + '\n' + item.prompt : ''; }
 
 // main 이 가진 목록의 index 항목이 렌더러가 본 shown(todoKey)과 같을 때만 그 항목을 돌려준다
@@ -689,7 +695,7 @@ function parseCalendarOutput(text, now = new Date()) {
 
 const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStars, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,

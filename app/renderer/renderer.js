@@ -306,7 +306,11 @@
       if (canFill) b.type = 'button';
       const body = el('span', 'body'); body.append(el('span', 't', it.title));
       if (canFill) { const pe = el('span', 'p', it.prompt); pe.title = it.prompt; body.append(pe); }
-      b.append(el('span', 'imp' + (it.importance >= 8 ? ' hi' : ''), String(it.importance)), body);
+      const stars = Lib.todoStars(it.importance);
+      const imp = el('span', 'imp');
+      imp.title = T('todo.imp.' + stars); imp.setAttribute('aria-label', imp.title);
+      for (let n = 1; n <= 3; n++) imp.append(el('span', n <= stars ? 'on' : 'off', '★'));
+      b.append(imp, body);
       if (!canFill) b.append(el('span', 'own', T('todo.own')));
       if (canFill) b.addEventListener('click', async () => {
         let res = null;
