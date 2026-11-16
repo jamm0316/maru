@@ -819,7 +819,7 @@ function buildProjects({ registry, entries, state, todos, today }) {
 }
 
 // 요약 배열 -> 화면용 묶음 { open: [{tag, items}], done: [{tag, items}], doneCount }. 카테고리는 최근 기록순, 묶음 안은 최근 기록순(분류 안 됨은 맨 뒤).
-function groupProjects(list) {
+function groupProjects(list, ui) {
   const mk = (items) => {
     const by = new Map();
     for (const it of items) { if (!by.has(it.tag)) by.set(it.tag, []); by.get(it.tag).push(it); }
@@ -833,7 +833,127 @@ function groupProjects(list) {
   };
   const l = Array.isArray(list) ? list : [];
   const done = l.filter((x) => x.status === 'done');
-  return { open: mk(l.filter((x) => x.status !== 'done')), done: mk(done), doneCount: done.length };
+  const open = mk(l.filter((x) => x.status !== 'done'));
+  return { open: ui ? applyProjectUi(open, ui) : open, done: mk(done), doneCount: done.length }; // 사용자 순서는 진행 중 목록에만
+}
+
+// ---- 화면 상태(data/project-ui.json): { catOrder: [태그...], projOrder: { "<태그>": ["<태그/슬러그>", ...] }, collapsed: [태그...] } ----
+// 앱이 쓰는 표시 전용 상태(순서·접힘). 모르는 필드는 버리고, 형식이 틀린 원소는 걸러 내며, 배열·객체 길이 상한을 넘으면 파일 전체를 손상으로 본다.
+const PROJ_UI_MAX_BYTES = 128 * 1024;
+const PROJ_UI_MAX_TAGS = 200; // catOrder·collapsed·projOrder 키 수 상한
+const PROJ_UI_MAX_PER_TAG = 200; // 한 카테고리의 프로젝트 순서 길이 상한
+const PROJ_UI_MAX_KEYS = 1000; // projOrder 전체 키 수 상한
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+function defaultProjectUi() { return { catOrder: [], projOrder: {}, collapsed: [] }; }
+function cleanTagList(a) { // 태그 배열 -> 형식 맞고 겹치지 않는 태그만(길이 상한 초과는 null)
+  if (a === undefined) return [];
+  if (!Array.isArray(a) || a.length > PROJ_UI_MAX_TAGS) return null;
+  const seen = new Set(); const out = [];
+  for (const t of a) if (typeof t === 'string' && TODO_TAG_RE.test(t) && !seen.has(t)) { seen.add(t); out.push(t); }
+  return out;
+}
+function validateProjectUi(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  const catOrder = cleanTagList(o.catOrder); const collapsed = cleanTagList(o.collapsed);
+  if (!catOrder || !collapsed) return null;
+  const projOrder = {};
+  const po = o.projOrder;
+  if (po !== undefined) {
+    if (!po || typeof po !== 'object' || Array.isArray(po)) return null;
+    const tags = Object.keys(po);
+    if (tags.length > PROJ_UI_MAX_TAGS) return null;
+    let total = 0;
+    for (const tag of tags) {
+      const arr = po[tag];
+      if (!Array.isArray(arr) || arr.length > PROJ_UI_MAX_PER_TAG) return null;
+      total += arr.length;
+      if (total > PROJ_UI_MAX_KEYS) return null;
+      if (!TODO_TAG_RE.test(tag)) continue; // __proto__ 같은 키는 버린다
+      const seen = new Set(); const keys = [];
+      for (const k of arr) if (isProjectKey(k) && k.startsWith(tag + '/') && !seen.has(k)) { seen.add(k); keys.push(k); }
+      projOrder[tag] = keys;
+    }
+  }
+  return { catOrder, projOrder, collapsed };
+}
+function parseProjectUi(res) {
+  if (!res || res.truncated || typeof res.text !== 'string') return null;
+  try { return validateProjectUi(JSON.parse(res.text)); } catch { return null; }
+}
+// { status: 'missing'|'corrupt'|'ok', data } (없거나 손상이면 data 는 기본값)
+function readProjectUiFile(file) {
+  const fs = require('fs');
+  let present = true;
+  try { fs.lstatSync(file); } catch { present = false; }
+  if (!present) return { status: 'missing', data: defaultProjectUi() };
+  const data = parseProjectUi(readRegular(file, PROJ_UI_MAX_BYTES, false));
+  return data ? { status: 'ok', data } : { status: 'corrupt', data: defaultProjectUi() };
+}
+function projectUiFits(ui) { return Buffer.byteLength(JSON.stringify(ui, null, 2) + '\n', 'utf8') <= PROJ_UI_MAX_BYTES; }
+// 요약 목록(buildProjects 결과)에 없는 태그·키를 걸러 낸다. 빈 순서 목록은 지운다.
+function pruneProjectUi(ui, list) {
+  const v = validateProjectUi(ui) || defaultProjectUi();
+  const l = Array.isArray(list) ? list : [];
+  const tags = new Set(l.map((x) => x.tag)); const keys = new Set(l.filter((x) => x.kind === 'project').map((x) => x.key));
+  const projOrder = {};
+  for (const tag of Object.keys(v.projOrder)) {
+    const ks = v.projOrder[tag].filter((k) => keys.has(k));
+    if (tags.has(tag) && ks.length) projOrder[tag] = ks;
+  }
+  return { catOrder: v.catOrder.filter((t) => tags.has(t)), projOrder, collapsed: v.collapsed.filter((t) => tags.has(t)) };
+}
+// 검증을 통과한 값과 완전히 같을 때만 쓴다(고쳐진 값이 있으면 거부). data 폴더가 링크면 writeJsonAtomic 이 거부한다.
+function saveProjectUi(file, ui) {
+  const v = validateProjectUi(ui);
+  if (!v || Object.keys(ui).length !== 3 || JSON.stringify(v) !== JSON.stringify({ catOrder: ui.catOrder, projOrder: ui.projOrder, collapsed: ui.collapsed })) return false;
+  if (!projectUiFits(v)) return false;
+  return writeJsonAtomic(file, v, 'project-ui');
+}
+// 순서 적용: order 에 있는 알려진 id(중복 무시)를 그 순서대로 앞에, 나머지는 원래 순서로 뒤에
+function applyOrder(items, order, keyOf) {
+  const by = new Map(items.map((it) => [keyOf(it), it]));
+  const out = []; const used = new Set();
+  for (const k of Array.isArray(order) ? order : []) if (typeof k === 'string' && by.has(k) && !used.has(k)) { used.add(k); out.push(by.get(k)); }
+  for (const it of items) if (!used.has(keyOf(it))) out.push(it);
+  return out;
+}
+// 묶음(카테고리 배열)에 사용자 순서를 적용: 카테고리 순서, 카테고리 안 프로젝트 순서. "분류 안 됨" 줄은 항상 맨 아래.
+function applyProjectUi(groups, ui) {
+  const u = ui && typeof ui === 'object' ? ui : defaultProjectUi();
+  const po = u.projOrder && typeof u.projOrder === 'object' ? u.projOrder : {};
+  return applyOrder(groups, u.catOrder, (g) => g.tag).map((g) => {
+    const proj = g.items.filter((it) => it.kind === 'project'); const unc = g.items.filter((it) => it.kind !== 'project');
+    return { tag: g.tag, items: [...applyOrder(proj, hasOwn(po, g.tag) ? po[g.tag] : [], (it) => it.key), ...unc] };
+  });
+}
+// ids 에서 id 를 beforeId 앞(null 이면 맨 끝)으로 옮긴 새 배열. id 가 없거나 beforeId 가 없거나(null 아님) 자기 자신이면 null.
+function moveInOrder(ids, id, beforeId) {
+  if (!Array.isArray(ids) || !ids.includes(id)) return null;
+  if (beforeId !== null && (beforeId === id || !ids.includes(beforeId))) return null;
+  const rest = ids.filter((x) => x !== id);
+  const at = beforeId === null ? rest.length : rest.indexOf(beforeId);
+  rest.splice(at, 0, id);
+  return rest;
+}
+
+// ---- ⌘숫자: 왼쪽 패널에 보이는 순서(작업 공간 먼저, 이어서 보이는 프로젝트 줄) ----
+const GOTO_MAX = 9;
+// 접히지 않은 카테고리 안 줄의 키(화면 순서). openGroups: groupProjects().open, collapsed: 접힌 태그 배열
+function visibleProjectKeys(openGroups, collapsed) {
+  const closed = new Set(Array.isArray(collapsed) ? collapsed : []);
+  const out = [];
+  for (const g of Array.isArray(openGroups) ? openGroups : []) {
+    if (!g || closed.has(g.tag)) continue;
+    for (const it of Array.isArray(g.items) ? g.items : []) if (it && typeof it.key === 'string') out.push(it.key);
+  }
+  return out;
+}
+// -> 번호(0 부터; ⌘1 = 0)별 { kind: 'workspace'|'project', id }, 최대 9개. main(메뉴)과 렌더러(힌트)가 같은 함수를 쓴다.
+function numberTargets(wsIds, projectKeys, max = GOTO_MAX) {
+  const out = [];
+  for (const id of Array.isArray(wsIds) ? wsIds : []) { if (out.length >= max) break; if (typeof id === 'string') out.push({ kind: 'workspace', id }); }
+  for (const id of Array.isArray(projectKeys) ? projectKeys : []) { if (out.length >= max) break; if (typeof id === 'string') out.push({ kind: 'project', id }); }
+  return out;
 }
 
 // 합치기 가능 여부(렌더러가 보낸 키는 main 의 요약 목록과 대조한 뒤 이 함수로 한 번 더 본다)
@@ -1176,7 +1296,8 @@ const api = {
   traySummary, trayTitle, trayTodoTitles, trayMenuModel, trayIconPath,
   splitProjectField, projectKey, isProjectKey, neutralizeBody, looksSecret, cleanProjectTitle, parseProjectRegistry, parseJournalText, readJournalEntries,
   validateProjectState, projectStateFits, parseProjectState, readProjectStateFile, saveProjectState, projectRoot, daysBetween, buildProjects, groupProjects, canMerge,
-  stateWithStatus, stateWithTitle, stateWithMerge, parseMemoryMeta, relatedMemories, readMemoryMetas, buildProjectDetail,
+  stateWithStatus, stateWithTitle, stateWithMerge,
+  PROJ_UI_MAX_BYTES, PROJ_UI_MAX_TAGS, PROJ_UI_MAX_PER_TAG, GOTO_MAX, defaultProjectUi, validateProjectUi, parseProjectUi, readProjectUiFile, projectUiFits, pruneProjectUi, saveProjectUi, applyOrder, applyProjectUi, moveInOrder, visibleProjectKeys, numberTargets, parseMemoryMeta, relatedMemories, readMemoryMetas, buildProjectDetail,
   PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

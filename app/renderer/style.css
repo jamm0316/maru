@@ -219,12 +219,28 @@ html[lang="en"] .card,html[lang="en"] .quest,html[lang="en"] .todo,html[lang="en
 .app[inert]{filter:saturate(.7)}
 
 /* 프로젝트(왼쪽 패널·가운데 상세) */
-.proj-cat{align-self:flex-start;margin-top:6px;font-size:11px;font-weight:600;color:var(--or2);border:1px solid #4A3A2C;border-radius:999px;padding:2px 9px;word-break:keep-all}
+.proj-group{display:flex;flex-direction:column;gap:4px;border-radius:8px}
+.proj-cat{display:inline-flex;align-items:center;gap:5px;align-self:flex-start;max-width:100%;margin-top:6px;font:inherit;font-size:11px;font-weight:600;color:var(--or2);background:transparent;border:1px solid #4A3A2C;border-radius:999px;padding:2px 9px;word-break:keep-all;cursor:pointer}
+.proj-cat::before{content:'\25BE';display:inline-block;width:10px;font-size:10px;text-align:center;transition:transform .15s}
+.proj-cat[aria-expanded=false]::before{transform:rotate(-90deg)}
+.proj-cat .ct{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj-cat .cn{flex:none;font-weight:400;color:var(--mute)}
+.proj-cat:hover,.proj-cat:focus-visible{border-color:var(--or);color:var(--or);outline:none}
+.proj-cat:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
+.proj .pr{flex:none;display:flex;align-items:center;gap:6px}
+.kbd{flex:none;font-size:10px;line-height:15px;color:var(--mute);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap;overflow-wrap:normal}
+.ws .l2{display:flex;align-items:baseline;justify-content:space-between;gap:6px;min-width:0}
+.ws .l2 .s{min-width:0}
+.dragging{opacity:.45}
+.drop-before{box-shadow:0 -3px 0 0 var(--or)}
+.drop-after{box-shadow:0 3px 0 0 var(--or)}
+.proj-note{min-height:0}
+.proj-note:empty{display:none}
 .proj{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:34px;padding:6px 10px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--ink);font:inherit;font-size:13px;text-align:left;cursor:pointer}
 .proj:hover:not(.on),.proj:focus-visible{border-color:var(--or);background:var(--sel);outline:none}
 .proj.on{background:var(--sel);border-color:var(--or)}
 .proj .pt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.proj .cnt{flex:none;font-size:11px;color:var(--mute);white-space:nowrap;overflow-wrap:normal}
+.proj .cnt{font-size:11px;color:var(--mute);white-space:nowrap;overflow-wrap:normal}
 .proj .cnt.check{color:var(--or2);border:1px solid #5A4630;border-style:dashed;border-radius:999px;padding:1px 8px}
 .proj.unc .pt{color:var(--soft);font-style:italic}
 .proj-toggle{align-self:flex-start;font:inherit;font-size:12px;color:var(--soft);background:transparent;border:0;border-top:1px solid var(--line);width:100%;text-align:left;padding:8px 2px 0;cursor:pointer}

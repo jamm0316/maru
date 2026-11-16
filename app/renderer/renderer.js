@@ -192,15 +192,18 @@
     const fr = f && box.contains(f) ? f.closest('.ws') : null;
     const refocus = fr ? { id: fr.dataset.id, x: f.classList.contains('ws-x') } : null;
     box.replaceChildren();
+    const nums = numberMap();
     for (const w of wsList) {
       const on = w.id === activeId; const k = stateKey(w.state);
       const row = el('div', 'ws' + (on ? ' active' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
       const main = el('button', 'ws-main'); main.type = 'button';
       if (on) main.setAttribute('aria-current', 'true');
       main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }));
-      const c = el('span', 'col');
+      const c = el('span', 'col'); const num = nums.get('workspace:' + w.id);
       const l1 = el('span', 'l1'); l1.append(el('span', 'n', w.title), el('span', 'st ' + k, T('agent.' + k)));
-      c.append(l1, el('span', 's', w.path));
+      const l2 = el('span', 'l2'); l2.append(el('span', 's', w.path)); if (num) l2.append(kbdHint(num));
+      c.append(l1, l2);
+      if (num) main.setAttribute('aria-keyshortcuts', 'Meta+' + num);
       main.append(el('span', 'dot ' + k), c);
       main.title = w.path;
       main.addEventListener('click', async () => { closeDetail(true); try { await window.maru.activateWorkspace(w.id); } catch (x) { /* 무시 */ } syncWs(); });
@@ -219,6 +222,7 @@
     $('term-name').textContent = a ? a.title : T('app.title');
     $('term-cwd').textContent = a ? a.path : '';
     renderBusy(a ? a.state : 'none');
+    if (projHintWs !== wsList.length) renderProjects(projView); // 작업 공간 수가 바뀌면 프로젝트 줄의 번호도 바뀐다
   }
   async function newWs() { try { await window.maru.newWorkspace(); } catch (x) { /* 무시 */ } syncWs(); }
   $('ws-add').addEventListener('click', newWs);
@@ -364,46 +368,175 @@
 
   // ---- 프로젝트: 왼쪽 목록(카테고리 > 프로젝트)과 가운데 상세 ----
   // 모든 문구는 textContent 로만 넣는다. 키는 main 의 목록에서 온 값이고, 상태 변경·이어서 하기는 main 이 키를 다시 대조한다.
-  let projView = { open: [], done: [], doneCount: 0 };
-  let doneOpen = false; // 접힘 상태는 저장하지 않는다
+  let projView = { open: [], done: [], doneCount: 0, collapsed: [] };
+  let doneOpen = false; // "완료" 목록 펼침은 저장하지 않는다(카테고리 접힘은 main 이 data/project-ui.json 에 저장)
+  let dragState = null; let pendingPv = null; let projHintWs = -1; let projNoteTimer = null;
+  const DRAG_TYPE = 'application/x-maru-reorder'; // 파일 drop('Files')과 섞이지 않게 자체 타입만 쓴다
   const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
   function projTitle(it) { return it.kind === 'unclassified' ? T('proj.unclassified') : it.title; }
-  function projRow(it) {
-    const b = el('button', 'proj' + (it.kind === 'unclassified' ? ' unc' : '') + (it.key === detailKey ? ' on' : '')); b.type = 'button'; b.dataset.key = it.key;
+  // ⌘숫자 힌트: main 메뉴와 같은 Lib.numberTargets 로 센다(작업 공간 먼저, 이어서 접히지 않은 진행 중 프로젝트 줄). 'kind:id' -> 번호
+  function numberMap() {
+    const m = new Map();
+    Lib.numberTargets(wsList.map((w) => w.id), Lib.visibleProjectKeys(projView.open, projView.collapsed)).forEach((t, i) => m.set(t.kind + ':' + t.id, i + 1));
+    return m;
+  }
+  function kbdHint(n) { const k = el('span', 'kbd', '⌘' + n); k.setAttribute('aria-hidden', 'true'); return k; }
+  function projNote(msg) {
+    const n = $('proj-note'); n.textContent = msg;
+    clearTimeout(projNoteTimer); projNoteTimer = setTimeout(() => { n.textContent = ''; }, 4000);
+  }
+  function projRow(it, num, canDrag) {
+    const b = el('button', 'proj' + (it.kind === 'unclassified' ? ' unc' : '') + (it.key === detailKey ? ' on' : '')); b.type = 'button'; b.dataset.key = it.key; b.dataset.tag = it.tag;
     const name = projTitle(it);
     let cnt;
     if (it.status === 'done') cnt = el('span', 'cnt', it.doneAt || '');
     else if (it.needsCheck) cnt = el('span', 'cnt check', T('proj.check'));
     else cnt = el('span', 'cnt', T('proj.todos', { n: it.openTodos }));
-    b.append(el('span', 'pt', name), cnt);
-    b.title = name;
+    const pr = el('span', 'pr'); pr.append(cnt); if (num) pr.append(kbdHint(num));
+    b.append(el('span', 'pt', name), pr);
+    b.title = canDrag && it.kind === 'project' ? name + '\n' + T('proj.row.tip') : name;
     if (it.key === detailKey) b.setAttribute('aria-current', 'true');
     b.setAttribute('aria-label', T('proj.row.aria', { title: name, state: cnt.textContent }));
+    if (num) b.setAttribute('aria-keyshortcuts', 'Meta+' + num);
+    if (canDrag && it.kind === 'project') { b.draggable = true; b.dataset.drag = 'proj'; } // "분류 안 됨" 줄은 맨 아래 고정
     b.addEventListener('click', () => openDetail(it.key));
     return b;
   }
-  function fillGroups(box, groups) {
-    for (const g of groups) { box.append(el('div', 'proj-cat', g.tag)); for (const it of g.items) box.append(projRow(it)); }
+  // 카테고리 소제목 = 접기·펼치기 버튼(aria-expanded). 접히면 (줄 수)를 붙인다
+  function catHead(g, sec, closed) {
+    const b = el('button', 'proj-cat'); b.type = 'button'; b.dataset.cat = g.tag; b.dataset.sec = sec;
+    b.setAttribute('aria-expanded', String(!closed));
+    b.setAttribute('aria-label', T('proj.cat.aria', { tag: g.tag, n: g.items.length }));
+    b.append(el('span', 'ct', g.tag));
+    if (closed) b.append(el('span', 'cn', '(' + g.items.length + ')'));
+    if (sec === 'open') { b.draggable = true; b.dataset.drag = 'cat'; b.title = T('proj.cat.tip'); }
+    b.addEventListener('click', () => toggleCat(g.tag, !closed));
+    return b;
+  }
+  async function toggleCat(tag, closed) {
+    let res = null; try { res = await window.maru.setCategoryCollapsed(tag, closed); } catch (x) { res = null; }
+    if (!res || !res.ok) projNote(projErr(res));
+    await poll();
+  }
+  function fillGroups(box, groups, sec, nums) {
+    const closedSet = new Set(Array.isArray(projView.collapsed) ? projView.collapsed : []);
+    for (const g of groups) {
+      const closed = closedSet.has(g.tag);
+      const grp = el('div', 'proj-group'); grp.dataset.tag = g.tag;
+      grp.append(catHead(g, sec, closed));
+      if (!closed) for (const it of g.items) grp.append(projRow(it, sec === 'open' ? nums.get('project:' + it.key) : 0, sec === 'open'));
+      box.append(grp);
+    }
   }
   function renderProjects(pv) {
-    projView = pv && Array.isArray(pv.open) && Array.isArray(pv.done) ? pv : { open: [], done: [], doneCount: 0 };
+    if (dragState) { pendingPv = pv; return; } // 끄는 동안 DOM 을 바꾸면 dragend 가 오지 않을 수 있다. 끝난 뒤 그린다
+    pendingPv = null;
+    projView = pv && Array.isArray(pv.open) && Array.isArray(pv.done) ? pv : { open: [], done: [], doneCount: 0, collapsed: [] };
+    projHintWs = wsList.length;
     const card = $('proj-card'); const f = document.activeElement;
-    const refocus = f && card.contains(f) ? (f.dataset.key ? 'k:' + f.dataset.key : f.id === 'proj-done-toggle' ? 't' : null) : null;
+    const refocus = f && card.contains(f) ? (f.dataset.cat ? 'c:' + f.dataset.sec + ':' + f.dataset.cat : f.dataset.key ? 'k:' + f.dataset.key : f.id === 'proj-done-toggle' ? 't' : null) : null;
+    const nums = numberMap();
     const box = $('projects'); box.replaceChildren();
     if (!projView.open.length) box.append(el('div', 'empty', T('proj.empty')));
-    fillGroups(box, projView.open);
+    fillGroups(box, projView.open, 'open', nums);
     const n = projView.doneCount | 0;
     const tg = $('proj-done-toggle'); tg.hidden = n === 0; tg.textContent = T('proj.done.toggle', { n });
     tg.setAttribute('aria-label', T('proj.done.toggle', { n }) + ' — ' + T('proj.done.aria'));
     tg.setAttribute('aria-expanded', String(doneOpen && n > 0));
     const done = $('projects-done'); done.replaceChildren(); done.hidden = !doneOpen || n === 0;
-    if (!done.hidden) fillGroups(done, projView.done);
+    if (!done.hidden) fillGroups(done, projView.done, 'done', nums);
     if (refocus) {
-      const t = refocus === 't' ? tg : [...card.querySelectorAll('.proj')].find((x) => 'k:' + x.dataset.key === refocus);
+      let t = null;
+      if (refocus === 't') t = tg;
+      else if (refocus.startsWith('c:')) t = [...card.querySelectorAll('.proj-cat')].find((x) => 'c:' + x.dataset.sec + ':' + x.dataset.cat === refocus);
+      else t = [...card.querySelectorAll('.proj')].find((x) => 'k:' + x.dataset.key === refocus);
       if (t && !t.hidden) t.focus();
     }
   }
   $('proj-done-toggle').addEventListener('click', () => { doneOpen = !doneOpen; if (lastPanels) renderProjects(lastPanels.projects); $('proj-done-toggle').focus(); });
+
+  // ---- 순서 바꾸기: 끌어서 놓기(같은 종류끼리만) + ⌥↑/⌥↓. 검증은 main 이 한다 ----
+  async function doReorder(kind, id, before) {
+    let res = null; try { res = await window.maru.reorderProject(kind, id, before); } catch (x) { res = null; }
+    if (!res || !res.ok) { projNote(res && res.reason === 'invalid' ? T('proj.err.move') : projErr(res)); await poll(); return; }
+    await poll();
+    let pos = 0; let total = 0; let title = id;
+    if (kind === 'cat') { total = projView.open.length; pos = projView.open.findIndex((g) => g.tag === id) + 1; }
+    else {
+      const g = projView.open.find((x) => x.items.some((it) => it.key === id));
+      const ps = g ? g.items.filter((it) => it.kind === 'project') : [];
+      total = ps.length; pos = ps.findIndex((it) => it.key === id) + 1; title = (ps[pos - 1] && ps[pos - 1].title) || id;
+    }
+    if (pos > 0) projNote(T('proj.moved', { title, pos, total }));
+  }
+  const clearDrop = () => { for (const n of $('projects').querySelectorAll('.drop-before, .drop-after')) n.classList.remove('drop-before', 'drop-after'); };
+  // 끄는 중인 것을 놓을 자리: { el, after, beforeId }. 같은 종류 밖이면 null
+  function dropInfo(e) {
+    if (!dragState || !e.dataTransfer || Array.prototype.indexOf.call(e.dataTransfer.types || [], DRAG_TYPE) < 0) return null;
+    const t = e.target && e.target.closest ? e.target : null; if (!t) return null;
+    if (dragState.kind === 'cat') {
+      const g = t.closest('.proj-group'); if (!g || !$('projects').contains(g) || g.dataset.tag === dragState.id) return null;
+      const r = g.getBoundingClientRect(); const after = e.clientY >= r.top + r.height / 2;
+      let beforeId = g.dataset.tag;
+      if (after) { let s = g.nextElementSibling; while (s && s.dataset.tag === dragState.id) s = s.nextElementSibling; beforeId = s ? s.dataset.tag : null; }
+      return { el: g, after, beforeId };
+    }
+    const row = t.closest('.proj'); if (!row || !$('projects').contains(row) || row.dataset.tag !== dragState.tag || row.dataset.key === dragState.id) return null; // 다른 카테고리로는 못 옮긴다
+    if (row.classList.contains('unc')) return { el: row, after: false, beforeId: null }; // "분류 안 됨" 위 = 프로젝트 줄 맨 끝
+    const r = row.getBoundingClientRect(); const after = e.clientY >= r.top + r.height / 2;
+    let beforeId = row.dataset.key;
+    if (after) { let s = row.nextElementSibling; while (s && s.dataset.key === dragState.id) s = s.nextElementSibling; beforeId = s && !s.classList.contains('unc') ? s.dataset.key : null; }
+    return { el: row, after, beforeId };
+  }
+  const projBox = $('projects');
+  projBox.addEventListener('dragstart', (e) => {
+    const t = e.target && e.target.closest ? e.target.closest('[data-drag]') : null;
+    if (!t || !e.dataTransfer) return;
+    dragState = t.dataset.drag === 'cat' ? { kind: 'cat', id: t.dataset.cat, tag: t.dataset.cat } : { kind: 'proj', id: t.dataset.key, tag: t.dataset.tag };
+    e.dataTransfer.setData(DRAG_TYPE, dragState.kind + ':' + dragState.id); e.dataTransfer.effectAllowed = 'move';
+    t.classList.add('dragging');
+  });
+  projBox.addEventListener('dragover', (e) => {
+    const d = dropInfo(e);
+    clearDrop();
+    if (!d) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+    d.el.classList.add(d.after ? 'drop-after' : 'drop-before');
+  });
+  projBox.addEventListener('dragleave', (e) => { if (!e.relatedTarget || !projBox.contains(e.relatedTarget)) clearDrop(); });
+  projBox.addEventListener('drop', (e) => {
+    const d = dropInfo(e);
+    clearDrop();
+    if (!d) return;
+    e.preventDefault(); e.stopPropagation();
+    const s = dragState; dragState = null;
+    for (const n of projBox.querySelectorAll('.dragging')) n.classList.remove('dragging');
+    doReorder(s.kind, s.id, d.beforeId).then(() => { if (pendingPv) renderProjects(pendingPv); });
+  });
+  document.addEventListener('dragend', () => {
+    dragState = null; clearDrop();
+    for (const n of projBox.querySelectorAll('.dragging')) n.classList.remove('dragging');
+    if (pendingPv) renderProjects(pendingPv);
+  });
+  // 키보드 대안: 포커스된 카테고리·프로젝트 줄에서 ⌥↑/⌥↓ 로 한 칸 이동("분류 안 됨" 줄은 고정)
+  projBox.addEventListener('keydown', (e) => {
+    if ((e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+    const t = e.target && e.target.closest ? e.target.closest('[data-drag]') : null;
+    if (!t || !projBox.contains(t)) return;
+    e.preventDefault();
+    let ids; let id; let kind;
+    if (t.dataset.drag === 'cat') { kind = 'cat'; id = t.dataset.cat; ids = projView.open.map((g) => g.tag); }
+    else {
+      kind = 'proj'; id = t.dataset.key;
+      const g = projView.open.find((x) => x.items.some((it) => it.key === id));
+      ids = g ? g.items.filter((it) => it.kind === 'project').map((it) => it.key) : [];
+    }
+    const i = ids.indexOf(id); if (i < 0) return;
+    const up = e.key === 'ArrowUp';
+    if (up ? i === 0 : i === ids.length - 1) return;
+    const before = up ? ids[i - 1] : (ids[i + 2] === undefined ? null : ids[i + 2]);
+    doReorder(kind, id, before);
+  });
 
   function openDetail(key) {
     detailKey = key; detailOpen = true; detail = null; detailSig = '';
@@ -953,6 +1086,17 @@
     focusTerm();
   });
   document.addEventListener('dragend', () => dropZone.classList.remove('drop'));
+
+  // ---- ⌘숫자(main 메뉴 accelerator 가 번호를 대상으로 바꿔 보낸다) ----
+  // 작업 공간은 main 이 이미 전환했고 여기서는 열려 있던 프로젝트 상세만 닫는다. 프로젝트는 지금 목록에 있는 키만 열고, 모달(설정·온보딩 등)이 열려 있으면 무시한다.
+  window.maru.onGoto((kind, id) => {
+    if (kind === 'workspace') { if (!modalOpen()) closeDetail(true); return; }
+    if (kind !== 'project' || modalOpen()) return;
+    if (!projView.open.some((g) => g.items.some((it) => it.key === id))) return;
+    closeMenu(false); closeUpdate(false);
+    if (detailOpen && detailKey === id) return; // 이미 열려 있으면 그대로
+    openDetail(id);
+  });
 
   // ---- 전역 키·바깥 클릭 ----
   document.addEventListener('keydown', (e) => {

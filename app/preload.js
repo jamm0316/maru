@@ -36,6 +36,11 @@ contextBridge.exposeInMainWorld('maru', {
   renameProject: (key, title) => ipcRenderer.invoke('projects:rename', String(key).slice(0, 40), String(title).slice(0, 400)),
   mergeProject: (key, into) => ipcRenderer.invoke('projects:merge', String(key).slice(0, 40), String(into).slice(0, 40)),
   continueProject: (id, key, shown) => ipcRenderer.invoke('projects:continue', String(id), String(key).slice(0, 40), String(shown).slice(0, 200)),
+  // 순서·접힘: 종류·키·태그·불리언만 싣는다. main 이 자기 목록과 대조하고 다른 카테고리로의 이동은 거부한다.
+  setCategoryCollapsed: (tag, on) => ipcRenderer.invoke('projects:set-collapsed', String(tag).slice(0, 12), on === true),
+  reorderProject: (kind, id, before) => ipcRenderer.invoke('projects:reorder', String(kind).slice(0, 8), String(id).slice(0, 40), before === null || before === undefined ? null : String(before).slice(0, 40)),
+  // ⌘숫자(main 메뉴): 'workspace'|'project' 와 id 문자열만 받는다
+  onGoto: (cb) => { ipcRenderer.on('ui:goto', (_e, kind, id) => cb(String(kind), String(id))); },
   notifyRendered: () => ipcRenderer.send('app:rendered'),
   // 프로필·설정·업그레이드: URL·경로는 받지 않는다(키·불리언·짧은 문자열만)
   getProfile: () => ipcRenderer.invoke('profile:get'),

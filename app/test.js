@@ -1137,7 +1137,7 @@ t('프로젝트 화면·IPC 정적 검사: textContent 만, preload 좁은 API, 
   for (const ch of ['projects:detail', 'projects:set-status', 'projects:rename', 'projects:merge', 'projects:continue']) assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch);
   assert.ok(/'projects:continue', String\(id\)/.test(pre));
   const handlers = main.split("ipcMain.handle('projects:").slice(1);
-  assert.strictEqual(handlers.length, 5);
+  assert.strictEqual(handlers.length, 7); // + set-collapsed, reorder
   for (const h of handlers) assert.ok(/fromMain\(e\)|wsFrom\(e, id\)/.test(h.slice(0, 220)), 'sender 검사: ' + h.slice(0, 30));
   assert.ok(/projects:continue[\s\S]*findProject\(key\)[\s\S]*writePrompt\(w, tr\('project\.continue'/.test(main)); // 제목은 main 의 요약에서, 문장은 i18n 템플릿
   assert.ok(!/continueProject\([^)]*log|journal/.test(rd.split('async function doContinue')[1].split('\n  }\n')[0])); // 일지 문장을 지시문에 섞지 않는다
@@ -1147,6 +1147,117 @@ t('프로젝트 화면·IPC 정적 검사: textContent 만, preload 좁은 API, 
   assert.ok(html.indexOf('id="proj-card"') > html.indexOf('id="workspaces"') && html.indexOf('id="proj-card"') < html.indexOf('id="user-chip"'), '프로젝트는 작업 공간 아래');
   assert.ok(/#terminal\[hidden\]\{display:none\}/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8')));
   assert.ok(/detailOpen \|\| !e \|\| !e\.opened/.test(rd)); // 상세가 터미널을 가리는 동안 pty 크기를 줄이지 않는다
+});
+// ---- ⌘숫자 매핑 · 순서 적용 · 화면 상태 파일 ----
+const UI_LIST = L.buildProjects({ registry: L.parseProjectRegistry('maru|a|가\nmaru|b|나\nmaru|c|다\n블로그|x|엑스\n블로그|y|와이\n책|z|지\n'),
+  entries: [{ day: '2026-11-10', tag: 'maru', slug: null, time: '10:00', kind: 'done', importance: 5, text: 't', seq: 0 }, { day: '2026-11-01', tag: '블로그', slug: 'x', time: '10:00', kind: 'done', importance: 5, text: 't', seq: 1 }],
+  state: {}, todos: [], today: '2026-11-16' });
+const flat = (v) => v.open.map((g) => g.tag + ':' + g.items.map((x) => x.key).join(','));
+t('numberTargets: 작업 공간 먼저, 이어서 프로젝트, 최대 9', () => {
+  const ws = ['w1', 'w2']; const pk = ['maru/a', 'maru/b', '블로그/x'];
+  assert.deepStrictEqual(L.numberTargets(ws, pk), [{ kind: 'workspace', id: 'w1' }, { kind: 'workspace', id: 'w2' }, { kind: 'project', id: 'maru/a' }, { kind: 'project', id: 'maru/b' }, { kind: 'project', id: '블로그/x' }]);
+  assert.deepStrictEqual(L.numberTargets([], ['maru/a']), [{ kind: 'project', id: 'maru/a' }]); // 작업 공간 0개: ⌘1 이 프로젝트
+  assert.deepStrictEqual(L.numberTargets([], []), []);
+  const six = ['a', 'b', 'c', 'd', 'e', 'f']; const many = Array.from({ length: 20 }, (_, i) => 'p/' + i);
+  const r = L.numberTargets(six, many);
+  assert.strictEqual(r.length, 9); assert.strictEqual(r.filter((x) => x.kind === 'workspace').length, 6); assert.deepStrictEqual(r[8], { kind: 'project', id: 'p/2' });
+  assert.strictEqual(L.numberTargets([], many).length, 9); assert.strictEqual(L.numberTargets(Array.from({ length: 12 }, (_, i) => 'w' + i), many).filter((x) => x.kind === 'project').length, 0);
+  assert.deepStrictEqual(L.numberTargets(['w', 5, null], ['p/1', {}, 'p/2']).map((x) => x.id), ['w', 'p/1', 'p/2']); // 이상한 값은 건너뜀
+  assert.deepStrictEqual(L.numberTargets('x', null), []);
+});
+t('visibleProjectKeys: 접힌 카테고리 제외, 화면 순서, 분류 안 됨 포함', () => {
+  const v = L.groupProjects(UI_LIST);
+  const all = L.visibleProjectKeys(v.open, []);
+  assert.deepStrictEqual(all, v.open.flatMap((g) => g.items.map((x) => x.key)));
+  assert.ok(all.includes('maru') && all.includes('maru/a')); // 분류 안 됨(키 = 태그)도 번호를 받는다
+  const noMaru = L.visibleProjectKeys(v.open, ['maru']);
+  assert.ok(!noMaru.some((k) => k === 'maru' || k.startsWith('maru/')) && noMaru.length === all.length - 4);
+  assert.deepStrictEqual(L.visibleProjectKeys(v.open, ['없는태그', 5]), all);
+  assert.deepStrictEqual(L.visibleProjectKeys(null, null), []);
+  const done = L.groupProjects(L.buildProjects({ registry: L.parseProjectRegistry('maru|a|가\n'), entries: [], state: { 'maru/a': { status: 'done', doneAt: '2026-11-15' } }, todos: [], today: '2026-11-16' }));
+  assert.deepStrictEqual(L.visibleProjectKeys(done.open, []), []); // 완료 목록은 번호를 받지 않는다
+});
+t('moveInOrder', () => {
+  assert.deepStrictEqual(L.moveInOrder(['a', 'b', 'c'], 'c', 'a'), ['c', 'a', 'b']);
+  assert.deepStrictEqual(L.moveInOrder(['a', 'b', 'c'], 'a', null), ['b', 'c', 'a']);
+  assert.deepStrictEqual(L.moveInOrder(['a', 'b', 'c'], 'a', 'c'), ['b', 'a', 'c']);
+  for (const [id, b] of [['x', 'a'], ['a', 'x'], ['a', 'a'], ['a', undefined]]) assert.strictEqual(L.moveInOrder(['a', 'b'], id, b), null);
+  assert.strictEqual(L.moveInOrder(null, 'a', null), null);
+});
+t('applyProjectUi: 모르는 키·중복·다른 카테고리 키 무시, 새 항목은 뒤에, 분류 안 됨은 맨 아래', () => {
+  const base = L.groupProjects(UI_LIST);
+  assert.deepStrictEqual(flat(L.groupProjects(UI_LIST, L.defaultProjectUi())), flat(base)); // 기본값이면 기본 순서
+  assert.deepStrictEqual(flat(L.groupProjects(UI_LIST, null)), flat(base));
+  const ui = { catOrder: ['책', 'ghost', '책', '블로그'], projOrder: { maru: ['maru/c', 'maru/zzz', '블로그/x', 'maru/c', 'maru/a'], 없는: ['x/y'] }, collapsed: [] };
+  const g = L.groupProjects(UI_LIST, ui);
+  assert.deepStrictEqual(g.open.map((x) => x.tag), ['책', '블로그', 'maru']); // 정한 순서 먼저
+  const maru = g.open.find((x) => x.tag === 'maru').items.map((x) => x.key);
+  assert.deepStrictEqual(maru, ['maru/c', 'maru/a', 'maru/b', 'maru']); // c,a 는 정한 순서, b(새 항목)는 뒤, 분류 안 됨은 맨 아래
+  assert.ok(!g.open.find((x) => x.tag === '블로그').items.some((x) => x.key.startsWith('maru'))); // 다른 카테고리 키는 옮겨지지 않는다
+  assert.deepStrictEqual(g.done, base.done);
+  assert.strictEqual(g.open.reduce((n, x) => n + x.items.length, 0), base.open.reduce((n, x) => n + x.items.length, 0)); // 항목이 늘거나 줄지 않는다
+  // 분류 안 됨을 projOrder 에 적어도 맨 아래 고정
+  assert.strictEqual(L.groupProjects(UI_LIST, { catOrder: [], projOrder: { maru: ['maru', 'maru/b'] }, collapsed: [] }).open.find((x) => x.tag === 'maru').items.at(-1).key, 'maru');
+  // 프로토타입 키 이름의 태그도 안전하다
+  assert.doesNotThrow(() => L.applyProjectUi(base.open, { catOrder: ['constructor', '__proto__'], projOrder: { constructor: ['constructor/a'] }, collapsed: [] }));
+});
+t('validateProjectUi: 형식·상한·__proto__·모르는 필드', () => {
+  assert.deepStrictEqual(L.validateProjectUi({}), L.defaultProjectUi());
+  const v = L.validateProjectUi({ catOrder: ['maru', 'maru', '$bad', 5, '책'], projOrder: { maru: ['maru/a', 'maru/a', '책/z', '../x', 'maru/B'], 'bad tag': ['a/b'] }, collapsed: ['책', '책', 'x y'], extra: 1, evil: { a: 1 } });
+  assert.deepStrictEqual(v, { catOrder: ['maru', '책'], projOrder: { maru: ['maru/a'] }, collapsed: ['책'] });
+  assert.deepStrictEqual(Object.keys(v).sort(), ['catOrder', 'collapsed', 'projOrder']);
+  const p = L.validateProjectUi(JSON.parse('{"catOrder":["__proto__"],"projOrder":{"__proto__":["a/b"],"constructor":["constructor/x"]},"collapsed":["__proto__"]}'));
+  assert.deepStrictEqual(p, { catOrder: [], projOrder: { constructor: ['constructor/x'] }, collapsed: [] });
+  assert.strictEqual(Object.getPrototypeOf(p.projOrder), Object.prototype); assert.strictEqual({}.a, undefined); assert.ok(!('polluted' in {}));
+  for (const bad of [null, [], 'x', 5, { catOrder: 'x' }, { collapsed: {} }, { projOrder: [] }, { projOrder: { maru: 'x' } }, { catOrder: Array(201).fill('a') }, { collapsed: Array(201).fill('a') },
+    { projOrder: { maru: Array(201).fill('maru/a') } }, { projOrder: Object.fromEntries(Array.from({ length: 201 }, (_, i) => ['t' + i, []])) }]) assert.strictEqual(L.validateProjectUi(bad), null, JSON.stringify(bad).slice(0, 40));
+  const wide = {}; for (let i = 0; i < 6; i++) wide['t' + i] = Array.from({ length: 200 }, (_, j) => 't' + i + '/p' + j);
+  assert.strictEqual(L.validateProjectUi({ projOrder: wide }), null); // 전체 키 수 상한(1000)
+});
+t('프로젝트 화면 상태 파일: 원자적 저장·손상·과대·링크', () => {
+  const dir = fs.mkdtempSync(path.join(tmp, 'pu-')); const f = path.join(dir, 'project-ui.json');
+  assert.deepStrictEqual(L.readProjectUiFile(f), { status: 'missing', data: L.defaultProjectUi() });
+  const ui = { catOrder: ['책', 'maru'], projOrder: { maru: ['maru/b', 'maru/a'] }, collapsed: ['책'] };
+  assert.ok(L.saveProjectUi(f, ui));
+  assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  assert.deepStrictEqual(fs.readdirSync(dir), ['project-ui.json']);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(f, 'utf8')), ui);
+  assert.deepStrictEqual(L.readProjectUiFile(f), { status: 'ok', data: ui });
+  assert.strictEqual(L.saveProjectUi(f, { ...ui, extra: 1 }), false); // 모르는 필드·고쳐질 값이 섞이면 쓰지 않는다
+  assert.strictEqual(L.saveProjectUi(f, { catOrder: ['a', 'a'], projOrder: {}, collapsed: [] }), false);
+  assert.strictEqual(L.saveProjectUi(f, { catOrder: [], projOrder: { __proto__x: [] }, collapsed: [] }), false);
+  assert.deepStrictEqual(L.readProjectUiFile(f).data, ui); // 실패한 저장은 기존 파일을 건드리지 않는다
+  fs.writeFileSync(f, JSON.stringify({ ...ui, junk: [1], 'x': { y: 1 } })); assert.deepStrictEqual(L.readProjectUiFile(f).data, ui); // 모르는 필드 무시
+  for (const bad of ['{', '[]', '"x"', 'null', JSON.stringify({ catOrder: 5 })]) { fs.writeFileSync(f, bad); assert.strictEqual(L.readProjectUiFile(f).status, 'corrupt', bad); }
+  fs.writeFileSync(f, JSON.stringify({ catOrder: [], collapsed: [], pad: ' '.repeat(L.PROJ_UI_MAX_BYTES) })); assert.strictEqual(L.readProjectUiFile(f).status, 'corrupt'); // 크기 상한
+  assert.ok(L.backupCorruptFile(f) && fs.existsSync(f + '.bak') && !fs.existsSync(f));
+  const x = path.join(dir, 'x'); fs.writeFileSync(x, JSON.stringify(ui)); const link = path.join(dir, 'link.json'); fs.symlinkSync(x, link);
+  assert.strictEqual(L.readProjectUiFile(link).status, 'corrupt'); // 심볼릭 링크는 읽지 않는다
+  const ldir = path.join(tmp, 'pu-link'); fs.symlinkSync(dir, ldir);
+  assert.strictEqual(L.saveProjectUi(path.join(ldir, 'project-ui.json'), ui), false); // 폴더가 링크면 쓰지 않는다
+});
+t('pruneProjectUi: 없는 태그·키는 걸러 낸다', () => {
+  const ui = { catOrder: ['책', 'ghost', 'maru'], projOrder: { maru: ['maru/b', 'maru/gone', 'maru'], ghost: ['ghost/a'], 책: ['책/z'] }, collapsed: ['ghost', '블로그'] };
+  assert.deepStrictEqual(L.pruneProjectUi(ui, UI_LIST), { catOrder: ['책', 'maru'], projOrder: { maru: ['maru/b'], 책: ['책/z'] }, collapsed: ['블로그'] });
+  assert.deepStrictEqual(L.pruneProjectUi(ui, []), L.defaultProjectUi());
+  assert.deepStrictEqual(L.pruneProjectUi('x', UI_LIST), L.defaultProjectUi());
+  const big = { catOrder: [], projOrder: {}, collapsed: [] }; assert.ok(L.projectUiFits(big));
+});
+t('메뉴·화면 연결 정적 검사: ⌘1~9 는 numberTargets, 번호 힌트·토글·드래그는 자체 타입', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8');
+  assert.ok(/L\.numberTargets\(wsOrder\(\)[\s\S]*L\.visibleProjectKeys\(proj\.view\.open, proj\.view\.collapsed\)/.test(main) && /Lib\.numberTargets\(wsList[\s\S]*Lib\.visibleProjectKeys\(projView\.open, projView\.collapsed\)/.test(rd)); // 같은 순수 함수
+  assert.ok(/L\.GOTO_MAX/.test(main) && /'CmdOrCtrl\+' \+ \(i \+ 1\)/.test(main));
+  for (const ch of ['projects:set-collapsed', 'projects:reorder']) { assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch); assert.ok(new RegExp("ipcMain\\.handle\\('" + ch + "', \\(e,[^)]*\\) => \\{\\n  if \\(!fromMain\\(e\\)").test(main), 'sender 검사 ' + ch); }
+  assert.ok(/projects:reorder[\s\S]*L\.moveInOrder\(g\.items\.filter/.test(main)); // 다른 카테고리 키는 moveInOrder 가 거부
+  assert.ok(/ui:goto/.test(main) && /ui:goto/.test(pre));
+  assert.ok(/PERSIST && \(!ROOT \|\| !L\.saveProjectUi/.test(main) && /r\.status === 'corrupt' && PERSIST/.test(main)); // 스모크·시험에서는 저장·.bak 이동을 하지 않는다
+  assert.ok(/DRAG_TYPE = 'application\/x-maru-reorder'/.test(rd) && !/setData\('text/.test(rd));
+  assert.ok(/DRAG_TYPE\) < 0/.test(rd) &&/'Files'\) >= 0/.test(rd)); // 터미널 drop 은 Files 타입만 받는다(그대로)
+  assert.ok(/aria-expanded/.test(rd) && /e\.altKey/.test(rd));
+  assert.ok(/prefers-reduced-motion:reduce\)\{\*,\*::before,\*::after\{animation:none!important;transition:none!important/.test(css));
+  for (const k of ['menu.gotoProj', 'menu.gotoNone', 'proj.cat.aria', 'proj.cat.tip', 'proj.row.tip', 'proj.moved', 'proj.err.move']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
+  for (const lg of I.LANGS) { assert.ok(I.t(lg, 'proj.moved', { title: 'x', pos: 2, total: 3 }).includes('2')); assert.ok(I.t(lg, 'menu.gotoNone', { n: 4 }).includes('4')); }
 });
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

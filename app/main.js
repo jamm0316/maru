@@ -181,6 +181,9 @@ const memMetasCache = L.ttlCache(20000, () => { const md = memDir(); return md ?
 const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 const projStateFile = () => path.join(ROOT, 'data', 'project-state.json');
 let projState = {};
+const projUiFile = () => path.join(ROOT, 'data', 'project-ui.json');
+let projUi = L.defaultProjectUi(); // 카테고리·프로젝트 순서, 접힘(data/project-ui.json). PERSIST 가 아니면 메모리에만 둔다
+let projUiLoaded = false;
 function memDir() {
   if (!ROOT) return null;
   let real; try { real = fs.realpathSync(ROOT); } catch { return null; }
@@ -191,9 +194,17 @@ function loadProjState() {
   if (r.status === 'corrupt') L.backupCorruptFile(projStateFile()); // 망가진 파일은 .bak 으로 옮기고 새로 시작(workspaces.json 과 같다)
   projState = r.data;
 }
+function loadProjUi() {
+  if (!ROOT) return;
+  const r = L.readProjectUiFile(projUiFile());
+  if (r.status === 'corrupt' && PERSIST) L.backupCorruptFile(projUiFile()); // 시험·스모크 실행은 실제 data 를 건드리지 않는다
+  projUi = r.data; // 없는 태그·키는 적용 때 무시되고(applyProjectUi), 다음 저장 때 사라진다(pruneProjectUi)
+  projUiLoaded = true;
+}
 function recomputeProjects() {
   proj.list = L.buildProjects({ registry: proj.raw.registry, entries: proj.raw.entries, state: projState, todos: cache.todos, today: todayStr() });
-  proj.view = L.groupProjects(proj.list);
+  proj.view = { ...L.groupProjects(proj.list, projUi), collapsed: L.pruneProjectUi(projUi, proj.list).collapsed }; // 접힌 태그는 존재하는 것만 렌더러에 보낸다
+  syncMenu();
 }
 function readProjectsRaw() {
   const md = memDir();
@@ -256,6 +267,7 @@ async function refresh() {
       disk: df ? L.parseDiskFree(df) : null,
     };
     loadProjState();
+    if (PERSIST || !projUiLoaded) loadProjUi(); // 시험·스모크에서는 처음 한 번만 읽는다(메모리 변경을 덮지 않게)
     readProjectsRaw();
     recomputeProjects();
     refreshed = true;
@@ -380,6 +392,7 @@ const saveWs = saveWsNow;
 function wsChanged(structural) {
   if (structural === true) saveWsNow(); else if (structural === 'active') saveWsLater();
   sendToRenderer('ws:changed');
+  syncMenu();
   refreshTray();
 }
 function addWorkspace(cwd, title, fx, unavailable) {
@@ -550,8 +563,31 @@ let profile = null; // 유효한 data/profile.json 이 있을 때만 객체
 const profilePath = () => path.join(ROOT, 'data', 'profile.json');
 const curLang = () => (profile ? profile.lang : L.defaultLang(app.getLocale()));
 const tr = (k, p) => I18N.t(curLang(), k, p);
+// ⌘1~9: 왼쪽 패널 순서(작업 공간들, 이어서 보이는 프로젝트 줄). 렌더러의 번호 힌트와 같은 L.numberTargets 를 쓴다.
+const gotoTargets = () => L.numberTargets(wsOrder().map((w) => w.id), L.visibleProjectKeys(proj.view.open, proj.view.collapsed));
+function gotoLabel(n, t) {
+  if (!t) return tr('menu.gotoNone', { n });
+  if (t.kind === 'workspace') { const w = wsOf(t.id); return w ? tr('menu.gotoWs', { n }) + ' · ' + w.title : tr('menu.gotoNone', { n }); }
+  const s = findProject(t.id);
+  if (!s) return tr('menu.gotoNone', { n });
+  return tr('menu.gotoProj', { n }) + ' · ' + (s.kind === 'unclassified' ? tr('proj.unclassified') + ' (' + s.tag + ')' : s.title);
+}
+function gotoNumber(n) {
+  const t = gotoTargets()[n - 1];
+  if (!t) return;
+  if (t.kind === 'workspace') { if (!wsOf(t.id)) return; activate(t.id); sendToRenderer('ui:goto', 'workspace', t.id); } // 렌더러는 열려 있던 프로젝트 상세를 닫는다
+  else if (findProject(t.id)) sendToRenderer('ui:goto', 'project', t.id); // 모달이 열려 있으면 렌더러가 무시한다
+}
+let menuSig = null; let menuBuilt = false;
+function syncMenu() { // 번호 -> 대상 매핑이나 제목이 바뀌었을 때만 메뉴를 다시 만든다
+  if (!menuBuilt) return;
+  const sig = JSON.stringify([curLang(), gotoTargets().map((t, i) => gotoLabel(i + 1, t))]);
+  if (sig !== menuSig) buildMenu();
+}
 function buildMenu() {
-  const goto = [1, 2, 3, 4, 5, 6].map((n) => ({ label: tr('menu.gotoWs', { n }), accelerator: 'CmdOrCtrl+' + n, click: () => { const w = wsOrder()[n - 1]; if (w) activate(w.id); } }));
+  const targets = gotoTargets();
+  menuSig = JSON.stringify([curLang(), targets.map((t, i) => gotoLabel(i + 1, t))]); menuBuilt = true;
+  const goto = Array.from({ length: L.GOTO_MAX }, (_, i) => ({ label: gotoLabel(i + 1, targets[i]), accelerator: 'CmdOrCtrl+' + (i + 1), click: () => gotoNumber(i + 1) })); // 대상이 없는 번호도 키는 삼킨다(터미널로 새지 않게)
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },
@@ -916,6 +952,36 @@ ipcMain.handle('projects:merge', (e, key, into) => {
   if (!fromMain(e) || !findProject(key) || !findProject(into) || !L.canMerge(proj.list, key, into)) return { ok: false, reason: 'invalid' };
   loadProjState();
   return commitProjState(L.stateWithMerge(projState, key, into));
+});
+// 순서·접힘: 렌더러가 보낸 태그·키는 main 이 가진 목록과 대조하고, 다른 카테고리로의 이동은 거부한다. 저장은 pruneProjectUi 를 거친다.
+function commitProjUi(next) {
+  const v = L.pruneProjectUi(next, proj.list);
+  if (!L.projectUiFits(v)) return { ok: false, reason: 'size' };
+  if (PERSIST && (!ROOT || !L.saveProjectUi(projUiFile(), v))) return { ok: false, reason: 'save' };
+  projUi = v; recomputeProjects();
+  return { ok: true };
+}
+ipcMain.handle('projects:set-collapsed', (e, tag, on) => {
+  if (!fromMain(e) || typeof on !== 'boolean' || typeof tag !== 'string' || !proj.list.some((x) => x.tag === tag)) return { ok: false, reason: 'invalid' };
+  if (PERSIST) loadProjUi(); // 파일을 직접 고친 경우를 반영
+  const set = new Set(projUi.collapsed);
+  if (on) set.add(tag); else set.delete(tag);
+  return commitProjUi({ ...projUi, collapsed: [...set] });
+});
+// kind 'cat': id=태그를 beforeId(태그, null=맨 끝) 앞으로. kind 'proj': id=프로젝트 키를 같은 카테고리의 beforeId(키, null=프로젝트 줄 맨 끝) 앞으로.
+ipcMain.handle('projects:reorder', (e, kind, id, beforeId) => {
+  if (!fromMain(e) || typeof id !== 'string' || (beforeId !== null && typeof beforeId !== 'string')) return { ok: false, reason: 'invalid' };
+  if (PERSIST) loadProjUi();
+  let next = null;
+  if (kind === 'cat') {
+    const order = L.moveInOrder(proj.view.open.map((g) => g.tag), id, beforeId);
+    if (order) next = { ...projUi, catOrder: order };
+  } else if (kind === 'proj') {
+    const g = proj.view.open.find((x) => x.items.some((it) => it.kind === 'project' && it.key === id));
+    const order = g ? L.moveInOrder(g.items.filter((it) => it.kind === 'project').map((it) => it.key), id, beforeId) : null; // beforeId 가 다른 카테고리 키이면 null
+    if (order) next = { ...projUi, projOrder: { ...projUi.projOrder, [g.tag]: order } };
+  }
+  return next ? commitProjUi(next) : { ok: false, reason: 'invalid' };
 });
 // 프로젝트 "이어서 하기": 지시문은 i18n 템플릿 + main 이 가진 제목뿐(모델이 쓴 일지 문장은 섞지 않는다). 대상은 활성 작업 공간뿐.
 ipcMain.handle('projects:continue', (e, id, key, shown) => {
