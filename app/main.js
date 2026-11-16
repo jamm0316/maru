@@ -33,7 +33,7 @@ const ROOT = found ? found.root : null; // null 이면 저장소를 못 찾은 �
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 const PARTY = [
@@ -90,6 +90,36 @@ const INDEX_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).
 let cache = {
   status: null, todos: [], skills: [], briefing: [], battery: null, disk: null,
 };
+// 프로젝트·기억 캐시는 refresh() 가 통째로 바꾸는 cache 와 따로 둔다(예전에 cache = {...} 교체가 memMetasAt 을 지워 관련 기억이 항상 비던 회귀 방지)
+const proj = { raw: { registry: [], entries: [] }, list: [], view: { open: [], done: [], doneCount: 0 } };
+const memMetasCache = L.ttlCache(20000, () => { const md = memDir(); return md ? L.readMemoryMetas(md) : []; });
+
+// ---- 프로젝트 추적(lib.js 의 순수 함수로 계산; 여기서는 파일 읽기·쓰기와 IPC 만) ----
+const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const projStateFile = () => path.join(ROOT, 'data', 'project-state.json');
+let projState = {};
+function memDir() {
+  if (!ROOT) return null;
+  let real; try { real = fs.realpathSync(ROOT); } catch { return null; }
+  return path.join(claudeDir(), 'projects', L.projectSlug(real), 'memory');
+}
+function loadProjState() {
+  const r = L.readProjectStateFile(projStateFile());
+  if (r.status === 'corrupt') L.backupCorruptFile(projStateFile()); // 망가진 파일은 .bak 으로 옮기고 새로 시작(workspaces.json 과 같다)
+  projState = r.data;
+}
+function recomputeProjects() {
+  proj.list = L.buildProjects({ registry: proj.raw.registry, entries: proj.raw.entries, state: projState, todos: cache.todos, today: todayStr() });
+  proj.view = L.groupProjects(proj.list);
+}
+function readProjectsRaw() {
+  const md = memDir();
+  const reg = readHead(path.join(ROOT, 'data', 'projects.txt'), L.PROJ_REG_MAX_BYTES);
+  proj.raw = { registry: reg ? L.parseProjectRegistry(reg.text, reg.truncated) : [], entries: md ? L.readJournalEntries(md) : [] };
+}
+// main 이 가진 요약 목록에 있는 키만 인정한다(렌더러가 보낸 키는 이 목록과 대조)
+const findProject = (key) => (typeof key === 'string' && key.length <= 40 ? proj.list.find((x) => x.key === key) || null : null);
+const projectMetas = () => memMetasCache.get();
 
 // ---- 데이터 수집(고정 경로만) ----
 function run(file, args, opts = {}) {
@@ -142,6 +172,9 @@ async function refresh() {
       battery: batt ? L.parseBattery(batt) : null,
       disk: df ? L.parseDiskFree(df) : null,
     };
+    loadProjState();
+    readProjectsRaw();
+    recomputeProjects();
     refreshed = true;
     refreshTray();
   } finally { refreshing = false; }
@@ -158,6 +191,7 @@ function panels() {
     lastDream: st.lastDream || null,
     pendingSkillProposals: typeof st.pendingSkillProposals === 'number' ? st.pendingSkillProposals : 0,
     todos: cache.todos,
+    projects: proj.view, // 목록은 가볍게(요약만). 상세는 projects:detail 로 요청 시
     skills: cache.skills,
     briefing: cache.briefing,
     battery: cache.battery,
@@ -734,12 +768,56 @@ ipcMain.handle('quest:fill', (e, id, index, shown) => {
   const item = L.matchTodo(cache.todos, index, shown);
   if (!item) return { ok: false, reason: 'stale' };
   if (!item.prompt) return { ok: false, reason: 'no-prompt' }; // 사용자가 직접 할 일
+  return writePrompt(w, item.prompt);
+});
+// 입력줄에 한 줄을 채운다(자동 Enter 없음). 할 일 클릭과 프로젝트 "이어서 하기"가 같은 경로·같은 안전장치를 쓴다.
+function writePrompt(w, raw) {
   if (!w.term) return { ok: false, reason: 'no-term' };
-  const text = L.cleanQuestText(item.prompt);
+  const text = L.cleanQuestText(raw);
   if (!text || !L.isSafeQuestStart(text)) return { ok: false, reason: 'unsafe-start' };
   if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 선택 프롬프트 등에서는 쓰지 않는다
   w.term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만
   return { ok: true };
+}
+// ---- 프로젝트 IPC: 키는 main 의 요약 목록과 대조하고, 문장·이름·상태는 main 이 가진 값으로 다시 만든다 ----
+ipcMain.handle('projects:detail', (e, key) => {
+  if (!fromMain(e)) return null;
+  const s = findProject(key);
+  if (!s) return null;
+  return L.buildProjectDetail({ summary: s, registry: proj.raw.registry, entries: proj.raw.entries, state: projState, todos: cache.todos, memories: projectMetas(), list: proj.list, today: todayStr() });
+});
+function commitProjState(next) {
+  if (!next || !L.projectStateFits(next)) return { ok: false, reason: 'size' }; // 읽기 상한을 넘는 상태는 쓰지 않는다(다음 읽기에서 손상으로 치워지므로)
+  if (!ROOT || !L.saveProjectState(projStateFile(), next)) return { ok: false, reason: 'save' };
+  projState = next; recomputeProjects();
+  return { ok: true };
+}
+ipcMain.handle('projects:set-status', (e, key, status) => {
+  const s = fromMain(e) ? findProject(key) : null;
+  if (!s || s.kind !== 'project' || (status !== 'open' && status !== 'done')) return { ok: false, reason: 'invalid' };
+  loadProjState(); // 파일을 직접 고친 경우를 반영
+  return commitProjState(L.stateWithStatus(projState, s.key, status, todayStr()));
+});
+ipcMain.handle('projects:rename', (e, key, title) => {
+  const s = fromMain(e) ? findProject(key) : null;
+  if (!s || s.kind !== 'project') return { ok: false, reason: 'invalid' };
+  if (!L.cleanProjectTitle(title)) return { ok: false, reason: 'title' }; // 1~40자, 무해화 후에도 비면 거부
+  loadProjState();
+  return commitProjState(L.stateWithTitle(projState, s.key, title));
+});
+ipcMain.handle('projects:merge', (e, key, into) => {
+  if (!fromMain(e) || !findProject(key) || !findProject(into) || !L.canMerge(proj.list, key, into)) return { ok: false, reason: 'invalid' };
+  loadProjState();
+  return commitProjState(L.stateWithMerge(projState, key, into));
+});
+// 프로젝트 "이어서 하기": 지시문은 i18n 템플릿 + main 이 가진 제목뿐(모델이 쓴 일지 문장은 섞지 않는다). 대상은 활성 작업 공간뿐.
+ipcMain.handle('projects:continue', (e, id, key, shown) => {
+  const w = wsFrom(e, id);
+  const s = w ? findProject(key) : null;
+  if (!w || !s || s.kind !== 'project') return { ok: false, reason: 'invalid' };
+  if (w.id !== activeId) return { ok: false, reason: 'inactive' };
+  if (typeof shown !== 'string' || shown !== s.title) return { ok: false, reason: 'stale' };
+  return writePrompt(w, tr('project.continue', { title: s.title }));
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
   profile, defaultLang: L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,

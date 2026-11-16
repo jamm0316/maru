@@ -37,9 +37,11 @@
           <button type="button" class="ws-add" id="ws-add" data-i18n-aria="ws.add.aria" data-i18n-title="ws.add.aria" aria-label="새 작업 공간 열기" title="새 작업 공간 열기">+</button></div>
         <div id="workspaces" class="stack gap4" role="list"></div>
       </section>
-      <section class="card">
-        <h2 class="eyebrow" data-i18n="party.eyebrow">파티</h2>
-        <div id="party" class="stack gap10"></div>
+      <section class="card proj-card" id="proj-card">
+        <h2 class="eyebrow" data-i18n="proj.eyebrow">프로젝트</h2>
+        <div id="projects" class="stack gap4"></div>
+        <button type="button" class="proj-toggle" id="proj-done-toggle" aria-expanded="false" aria-controls="projects-done" hidden></button>
+        <div id="projects-done" class="stack gap4" hidden></div>
       </section>
       <div class="userbar" id="userbar">
         <button type="button" class="chip-user" id="user-chip" aria-haspopup="menu" aria-expanded="false" aria-controls="user-menu" data-i18n-aria="user.chip.aria" aria-label="사용자 메뉴">
@@ -53,6 +55,22 @@
     <main class="term-wrap">
       <div class="term-bar"><span class="accent">●</span><span id="term-name">maru</span><span id="term-cwd">~</span><span class="right">claude</span></div>
       <div id="terminal"></div>
+      <section id="proj-detail" class="proj-detail" role="region" aria-labelledby="pd-title" hidden>
+        <div class="pd-top">
+          <button type="button" class="btn ghost" id="pd-close" data-i18n="proj.close" data-i18n-aria="proj.close.aria" aria-label="프로젝트 상세 닫기">닫기</button>
+          <span class="tag-head" id="pd-tag"></span><span class="pill" id="pd-status"></span>
+        </div>
+        <h2 class="pd-title" id="pd-title" tabindex="-1"></h2>
+        <div class="pd-meta" id="pd-meta"></div>
+        <div class="pd-suggest" id="pd-suggest" role="status" hidden><span id="pd-suggest-text"></span><button type="button" class="btn" id="pd-suggest-btn" data-i18n="proj.act.done">완료로 옮기기</button></div>
+        <div class="pd-note" id="pd-note" role="status"></div>
+        <div class="pd-body">
+          <h3 class="pd-h" data-i18n="proj.sec.todos">남은 일</h3><div id="pd-todos" class="stack gap4"></div>
+          <h3 class="pd-h" data-i18n="proj.sec.log">작업 기록</h3><div id="pd-log" class="pd-log"></div>
+          <h3 class="pd-h" data-i18n="proj.sec.mem">관련 기억</h3><div id="pd-mem" class="chips"></div>
+        </div>
+        <div class="btn-row pd-actions" id="pd-actions"></div>
+      </section>
       <div id="term-empty" class="term-empty" hidden>
         <p data-i18n="ws.empty">열린 작업 공간이 없습니다</p>
         <button type="button" class="btn primary" id="term-empty-new" data-i18n="ws.new">새 작업 공간</button>
@@ -73,6 +91,11 @@
           <span class="status-main" id="status-main">대기</span>
           <span class="status-sub" id="status-sub"></span>
         </div>
+      </section>
+
+      <section class="card">
+        <h2 class="eyebrow" data-i18n="party.eyebrow">파티</h2>
+        <div id="party" class="stack gap10"></div>
       </section>
 
       <section class="card">
@@ -120,6 +143,19 @@
       <div class="seg" id="name-lang" role="radiogroup" aria-labelledby="name-lang-lbl"></div></div>
     <div class="err" id="name-err" role="alert"></div>
     <div class="btn-row"><button type="button" class="btn ghost" id="name-cancel" data-i18n="common.cancel">취소</button><button type="button" class="btn primary" id="name-ok"></button></div>
+  </div>
+</div>
+
+<!-- 모달: 프로젝트 이름 바꾸기 / 합치기 -->
+<div class="backdrop" id="dlg-proj" hidden>
+  <div class="dialog narrow" role="dialog" aria-modal="true" aria-labelledby="pj-title">
+    <h2 class="dlg-title serif" id="pj-title"></h2>
+    <label class="field" id="pj-name-wrap"><span class="lbl" data-i18n="proj.rename.label">이름</span>
+      <input id="pj-input" type="text" autocomplete="off" spellcheck="false" maxlength="60" aria-describedby="pj-hint pj-err"></label>
+    <div class="field" id="pj-pick-wrap"><div class="seg pj-pick" id="pj-pick" role="radiogroup" aria-labelledby="pj-title"></div></div>
+    <div class="hint" id="pj-hint"></div>
+    <div class="err" id="pj-err" role="alert"></div>
+    <div class="btn-row"><button type="button" class="btn ghost" id="pj-cancel" data-i18n="common.cancel">취소</button><button type="button" class="btn primary" id="pj-ok"></button></div>
   </div>
 </div>
 

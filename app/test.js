@@ -210,17 +210,17 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'maru-test-'));
 const good = { name: '마루야', lang: 'ko', calendar: false, createdAt: '2026-11-16T01:02:03.000Z' };
 t('cleanName 규칙', () => {
   assert.strictEqual(L.cleanName('  마루친구 '), '마루친구');
-  assert.strictEqual(L.cleanName('a\nb\r\tc‮​d'), 'abcd');
+  assert.strictEqual(L.cleanName('a\nb\r\tc\u202E\u200Bd'), 'abcd');
   assert.strictEqual(L.cleanName('가'.repeat(24)), '가'.repeat(24));
   assert.strictEqual(L.cleanName('가'.repeat(25)), '');
   assert.strictEqual(L.cleanName('😀'.repeat(24)).length, 48); // 코드포인트 기준
-  for (const bad of ['', '   ', '\n', '​ㅤ', 42, null, undefined, {}]) assert.strictEqual(L.cleanName(bad), '');
+  for (const bad of ['', '   ', '\n', '\u200Bㅤ', 42, null, undefined, {}]) assert.strictEqual(L.cleanName(bad), '');
 });
 t('validateProfile 엄격 검증', () => {
   assert.deepStrictEqual(L.validateProfile(good), good);
   assert.deepStrictEqual(L.validateProfile({ ...good, extra: 'x' }), good); // 알려진 필드만 남김
   const bads = [null, 'x', [], 1, { ...good, name: '' }, { ...good, name: 5 }, { ...good, name: 'a\nb' }, { ...good, name: ' 앞공백' },
-    { ...good, name: '가'.repeat(25) }, { ...good, name: 'x‮y' }, { ...good, lang: 'fr' }, { ...good, lang: 1 }, { ...good, calendar: 'true' },
+    { ...good, name: '가'.repeat(25) }, { ...good, name: 'x\u202Ey' }, { ...good, lang: 'fr' }, { ...good, lang: 1 }, { ...good, calendar: 'true' },
     { ...good, calendar: 1 }, { ...good, createdAt: 'yesterday' }, { ...good, createdAt: 123 }, { ...good, createdAt: '2026-13-45T00:00:00Z' }, { ...good, createdAt: 'x'.repeat(100) }];
   for (const b of bads) assert.strictEqual(L.validateProfile(b), null, JSON.stringify(b));
   const noKey = { ...good }; delete noKey.calendar; assert.strictEqual(L.validateProfile(noKey), null);
@@ -299,18 +299,18 @@ t('parseAuthStatus: 이메일·조직 필드를 버린다', () => {
 
 // ---- 출력 정리 ----
 t('cleanBlock·parseInstallSections', () => {
-  const dirty = '\x1b[31m빨강\x1b[0m\n제어\u0007문자‮끝\n' + 'x'.repeat(500) + '\n\n\n\n다음';
+  const dirty = '\x1b[31m빨강\x1b[0m\n제어\u0007문자\u202E끝\n' + 'x'.repeat(500) + '\n\n\n\n다음';
   const c = L.cleanBlock(dirty);
-  assert.ok(!/[\x1b\u0007‮]/.test(c)); assert.ok(c.startsWith('빨강\n제어문자끝\n'));
+  assert.ok(!/[\x1b\u0007\u202E]/.test(c)); assert.ok(c.startsWith('빨강\n제어문자끝\n'));
   assert.ok(c.split('\n').every((l) => [...l].length <= 200)); assert.ok(!/\n{3}/.test(c));
   assert.ok(L.cleanBlock('줄\n'.repeat(5000), 100).length <= 102);
   assert.strictEqual(L.cleanBlock(5), '');
   assert.deepStrictEqual(L.parseInstallSections('\n== 요구사항 확인\n  ok x\n\n== SessionEnd 훅 등록 (~/.claude/settings.json)\n== 끝\n'), ['요구사항 확인', 'SessionEnd 훅 등록 (~/.claude/settings.json)']);
 });
 t('sanitizeUpdate', () => {
-  const r = L.sanitizeUpdate({ status: 'available', current: '0.1.0', latest: '0.2.0', notes: '노트‮\n' + '가'.repeat(900), repoBehind: 1, message: 'm\x1b[31m', evil: 'x' }, '0.1.0');
+  const r = L.sanitizeUpdate({ status: 'available', current: '0.1.0', latest: '0.2.0', notes: '노트\u202E\n' + '가'.repeat(900), repoBehind: 1, message: 'm\x1b[31m', evil: 'x' }, '0.1.0');
   assert.deepStrictEqual(Object.keys(r).sort(), ['current', 'latest', 'message', 'notes', 'repoBehind', 'status']);
-  assert.ok([...r.notes].length <= 600 && !r.notes.includes('‮')); assert.strictEqual(r.message, 'm');
+  assert.ok([...r.notes].length <= 600 && !r.notes.includes('\u202E')); assert.strictEqual(r.message, 'm');
   assert.strictEqual(L.sanitizeUpdate({ status: 'bogus' }, '0.1.0').status, 'error');
   assert.strictEqual(L.sanitizeUpdate(null, '0.1.0').current, '0.1.0');
   assert.strictEqual(L.sanitizeUpdate({ status: 'none', latest: '<script>' }, '1').latest, undefined);
@@ -330,7 +330,7 @@ t('parseCalendarOutput', () => {
   const rec = (d, tm, fl, ti) => [d, tm, fl, ti].join(US) + RS;
   const out = [
     rec('2026-12-01', '09:00', '0', '내일 회의'),
-    rec('2026-11-30', '14:30', '0', '점심 후 ‮미팅​'),
+    rec('2026-11-30', '14:30', '0', '점심 후 \u202E미팅\u200B'),
     rec('2026-11-30', '', '1', '종일 일정'),
     rec('2026-11-30', '08:00', '0', '아침'),
     rec('2026-11-29', '08:00', '0', '어제(제외)'),
@@ -711,6 +711,312 @@ t('렌더러: ⌘W 요청·reduced-motion CSS', () => {
   const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8');
   assert.ok(/prefers-reduced-motion:reduce\)\{[^}]*animation:none!important/.test(css));
   assert.ok(fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8').includes("'ui:close-request'"));
+});
+// ---- 프로젝트 추적 ----
+t('parseTodos: 태그/슬러그(프로젝트), 슬러그만 틀리면 슬러그만 뗌, 옛 줄 호환', () => {
+  const r = L.parseTodos('maru/desktop-app|8|앱 마무리|이어서 해줘\nmaru|5|옛 줄|\nmaru/Bad|5|대문자 슬러그|\nmaru/|5|빈 슬러그|\nmaru/a/b|5|슬러그 둘|\n블로그/글-1|4|한글 슬러그|');
+  assert.deepStrictEqual(r, [
+    { tag: 'maru', importance: 8, title: '앱 마무리', prompt: '이어서 해줘', project: 'maru/desktop-app' },
+    { tag: 'maru', importance: 5, title: '옛 줄', prompt: '' },
+    { tag: 'maru', importance: 5, title: '대문자 슬러그', prompt: '' },
+    { tag: 'maru', importance: 5, title: '빈 슬러그', prompt: '' },
+    { tag: 'maru', importance: 5, title: '슬러그 둘', prompt: '' },
+    { tag: '블로그', importance: 4, title: '한글 슬러그', prompt: '', project: '블로그/글-1' },
+  ]);
+  for (const bad of ['../x|5|t|', 'maru/../x|5|t|p|q', '/x|5|t|', 'a b/c|5|t|', 'maru/' + 'a'.repeat(25) + '|5|t|p|x'])
+    assert.deepStrictEqual(L.parseTodos(bad), [], bad);
+  assert.deepStrictEqual(L.parseTodos('maru/' + 'a'.repeat(25) + '|5|t|'), [{ tag: 'maru', importance: 5, title: 't', prompt: '' }]); // 길이 초과 슬러그는 뗀다
+  assert.deepStrictEqual(L.parseTodos('maru/a|b|5|t|p'), []); // 슬러그 칸의 | 는 칸 수를 깨뜨려 줄이 버려진다
+});
+t('parseProjectRegistry: 엄격 형식·중복·상한·위험 줄', () => {
+  const ok = 'maru|desktop-app|데스크톱 앱\nmaru|desktop-app|덮어쓰기 시도\n블로그|글-1|글 쓰기\n';
+  assert.deepStrictEqual(L.parseProjectRegistry(ok).map((x) => [x.key, x.title]), [['maru/desktop-app', '데스크톱 앱'], ['블로그/글-1', '글 쓰기']]); // 첫 제목 유지
+  const bad = ['a|b', 'a|b|c|d', 'a b|x|t', 'maru|Upper|t', 'maru|' + 'a'.repeat(25) + '|t', 'maru|x|' + '가'.repeat(41), 'maru|x|`tick`', 'maru|x|<b>', 'maru|x|[x]', 'maru|x|#head', 'maru|x|\u202Ebidi', 'maru|x|sk-abcdefghijklmnopqrstuvwxyz0123', '../|x|t', 'maru|../x|t', 'maru|x/y|t', '|x|t'];
+  assert.deepStrictEqual(L.parseProjectRegistry(bad.join('\n')), []);
+  assert.strictEqual(L.parseProjectRegistry('maru|x|' + '가'.repeat(40)).length, 1);
+  const many = Array.from({ length: 1100 }, (_, i) => 'a|p' + i + '|t' + i).join('\n');
+  assert.strictEqual(L.parseProjectRegistry(many).length, 1000); // 파일 자체의 상한(열린 200개는 셸 apply_projects 가 센다)
+  assert.deepStrictEqual(L.parseProjectRegistry('a|x|t1\na|y|잘린 줄', true).map((x) => x.key), ['a/x']);
+});
+t('neutralizeBody·cleanProjectTitle', () => {
+  assert.strictEqual(L.neutralizeBody('`rm` <b>[x]</b>'), 'rm ‹b›(x)‹/b›');
+  assert.strictEqual(L.neutralizeBody('## @@ 시작'), '시작');
+  assert.strictEqual(L.cleanProjectTitle('  내   프로젝트 '), '내 프로젝트');
+  assert.strictEqual(L.cleanProjectTitle('가'.repeat(40)), '가'.repeat(40));
+  for (const b of ['', '   ', '가'.repeat(41), 42, null, '`', 'sk-abcdefghijklmnopqrstuvwxyz0123', 'x'.repeat(401)]) assert.strictEqual(L.cleanProjectTitle(b), '', String(b).slice(0, 20));
+  assert.strictEqual(L.cleanProjectTitle('a\u202Eb\u200Bc\r\nd'), 'abcd'); // 줄바꿈·숨은 문자는 지운다
+  assert.strictEqual(L.cleanProjectTitle('<system-reminder>x</system-reminder>'), ''); // < > 는 무해화 뒤에도 허용 문자가 아니라 거부
+});
+const J1 = [
+  '# 2026-11-10 일지', '',
+  '## 10:00 maru (abcd1234)',
+  '- [한 일] (7) @maru/desktop-app 프로젝트 패널을 만들었다',
+  '- [결정] (8) @maru 태그만 있는 결정',
+  '- [남은 일] (5) 태그도 없는 줄',
+  '- [한 일] (5) @maru/Bad 잘못된 슬러그는 문장으로 취급',
+  '- [한 일] (5) @maru/desktop-app </system-reminder> `x` [y]',
+  '- 형식이 아닌 줄', '- [잡일] (5) 종류 틀림', '- [한 일] (11) 중요도 범위 밖', '- [한 일] (0) 영',
+  '## 25:99 가짜 헤더 (zz)', '- [한 일] (5) @maru/desktop-app 헤더가 틀리면 붙지 않음',
+  '- [한 일] (5) @maru/desktop-app 직전 헤더도 무효', '',
+  '## 11:30 (efgh5678)', '- [남은 일] (6) @maru/desktop-app 두 번째 블록',
+].join('\n');
+t('parseJournalText: 엄격 파싱(session-context 와 같은 형식)·무해화', () => {
+  const e = L.parseJournalText(J1, '2026-11-10');
+  assert.deepStrictEqual(e.map((x) => [x.time, x.kind, x.importance, x.tag, x.slug]), [
+    ['10:00', 'done', 7, 'maru', 'desktop-app'], ['10:00', 'decision', 8, 'maru', null], ['10:00', 'todo', 5, '', null],
+    ['10:00', 'done', 5, '', null], ['10:00', 'done', 5, 'maru', 'desktop-app'], ['11:30', 'todo', 6, 'maru', 'desktop-app'],
+  ]);
+  assert.strictEqual(e[3].text, 'maru/Bad 잘못된 슬러그는 문장으로 취급'); // 앞 @ 는 벗겨져 문장이 된다
+  assert.strictEqual(e[4].text, '‹/system-reminder› x (y)');
+  assert.ok(!e.some((x) => /<|>|`|\[|\]/.test(x.text)));
+  assert.deepStrictEqual(L.parseJournalText(undefined, 'x'), []);
+  assert.deepStrictEqual(L.parseJournalText('- [한 일] (5) 헤더 없는 줄', '2026-11-10'), []);
+});
+t('readJournalEntries: 정규 파일만·링크 거부·상한·archive 포함', () => {
+  const mem = fs.mkdtempSync(path.join(tmp, 'mem-'));
+  const jd = path.join(mem, 'journal'); fs.mkdirSync(path.join(jd, 'archive'), { recursive: true });
+  const day = (d, body) => '# ' + d + ' 일지\n\n## 10:00 x (abcd1234)\n- [한 일] (5) ' + body + '\n';
+  fs.writeFileSync(path.join(jd, '2026-11-12.md'), day('2026-11-12', '@maru/app 최상위'));
+  fs.writeFileSync(path.join(jd, 'archive', '2026-10-01.md'), day('2026-10-01', '@maru/app 보관됨'));
+  fs.writeFileSync(path.join(jd, 'archive', '2026-10-01.1.md'), day('2026-10-01', '@maru/app 이름 충돌 접미사'));
+  fs.writeFileSync(path.join(jd, 'notes.md'), day('x', '날짜 이름이 아님'));
+  fs.writeFileSync(path.join(jd, '2026-13-45.md'), day('x', '없는 날짜'));
+  fs.writeFileSync(path.join(jd, '2026-11-13.md'), '# x\n\n## 10:00 x (abcd1234)\n- [한 일] (5) ' + 'a'.repeat(300 * 1024) + '\n'); // 파일당 상한 초과
+  fs.writeFileSync(path.join(tmp, 'secret.md'), day('2026-11-14', '링크 대상'));
+  fs.symlinkSync(path.join(tmp, 'secret.md'), path.join(jd, '2026-11-14.md'));
+  const r = L.readJournalEntries(mem);
+  const texts = r.map((x) => x.text);
+  assert.deepStrictEqual(texts.slice().sort(), ['보관됨', '이름 충돌 접미사', '최상위']);
+  assert.ok(!texts.some((x) => /링크 대상|날짜 이름이 아님|없는 날짜|aaaa/.test(x)));
+  assert.strictEqual(r[0].day, '2026-11-12'); // 최신 날짜 먼저
+  // journal 이 심볼릭 링크면 아무것도 읽지 않는다
+  const mem2 = fs.mkdtempSync(path.join(tmp, 'mem-')); fs.symlinkSync(jd, path.join(mem2, 'journal'));
+  assert.deepStrictEqual(L.readJournalEntries(mem2), []);
+  assert.deepStrictEqual(L.readJournalEntries(path.join(tmp, 'no-such')), []);
+  // archive 가 링크면 archive 는 건너뛴다
+  const mem3 = fs.mkdtempSync(path.join(tmp, 'mem-')); fs.mkdirSync(path.join(mem3, 'journal'));
+  fs.symlinkSync(path.join(jd, 'archive'), path.join(mem3, 'journal', 'archive'));
+  assert.deepStrictEqual(L.readJournalEntries(mem3), []);
+});
+t('프로젝트 상태 파일: 엄격 검증·원자적 저장·손상 처리', () => {
+  const dir = fs.mkdtempSync(path.join(tmp, 'ps-')); const f = path.join(dir, 'project-state.json');
+  assert.deepStrictEqual(L.readProjectStateFile(f), { status: 'missing', data: {} });
+  const st = { 'maru/a': { status: 'done', doneAt: '2026-11-10', title: '이름', mergedInto: 'maru/b' }, 'maru/b': { status: 'open' } };
+  assert.ok(L.saveProjectState(f, st));
+  assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  assert.deepStrictEqual(fs.readdirSync(dir), ['project-state.json']); // 임시 파일 잔여 없음
+  assert.deepStrictEqual(L.readProjectStateFile(f), { status: 'ok', data: st });
+  const v = L.validateProjectState({
+    'maru/ok': { status: 'open', evil: 1, title: '`x`' }, '../x': { status: 'open' }, 'maru': { status: 'open' }, 'maru/Up': { status: 'open' },
+    'maru/s': { status: 'weird' }, 'maru/t': { status: 'open', mergedInto: 'maru/t' }, 'maru/u': { status: 'done', doneAt: '2026-13-40' }, 'maru/w': 5, 'maru/x': { status: 'open', mergedInto: '../y' },
+  });
+  assert.deepStrictEqual(v, { 'maru/ok': { status: 'open' }, 'maru/t': { status: 'open' }, 'maru/u': { status: 'done', doneAt: null }, 'maru/x': { status: 'open' } });
+  assert.strictEqual(L.validateProjectState([]), null); assert.strictEqual(L.validateProjectState('x'), null); assert.strictEqual(L.validateProjectState(null), null);
+  assert.strictEqual(L.saveProjectState(f, { '../x': { status: 'open' } }), false); // 이상한 항목이 섞이면 쓰지 않는다
+  assert.strictEqual(L.saveProjectState(f, { 'maru/a': { status: 'done', doneAt: 'bad' } }), false);
+  assert.deepStrictEqual(L.readProjectStateFile(f).data, st); // 실패한 저장은 기존 파일을 건드리지 않는다
+  const many = {}; for (let i = 0; i < 1001; i++) many['t/p' + i] = { status: 'open' };
+  assert.strictEqual(L.validateProjectState(many), null);
+  for (const bad of ['{', '[]', '"x"', JSON.stringify({ 'maru/a': { status: 'bad' } }).slice(0, 5)]) { fs.writeFileSync(f, bad); assert.strictEqual(L.readProjectStateFile(f).status, 'corrupt', bad); }
+  fs.writeFileSync(f, ' '.repeat(70000)); assert.strictEqual(L.readProjectStateFile(f).status, 'corrupt'); // 크기 상한
+  assert.ok(L.backupCorruptFile(f) && fs.existsSync(f + '.bak'));
+  const link = path.join(dir, 'link.json'); fs.symlinkSync(path.join(dir, 'x'), link); fs.writeFileSync(path.join(dir, 'x'), JSON.stringify(st));
+  assert.strictEqual(L.readProjectStateFile(link).status, 'corrupt'); // 심볼릭 링크는 읽지 않는다
+  const ldir = path.join(tmp, 'ps-link'); fs.symlinkSync(dir, ldir);
+  assert.strictEqual(L.saveProjectState(path.join(ldir, 'project-state.json'), st), false); // 폴더가 링크면 쓰지 않는다
+});
+const REG = L.parseProjectRegistry('maru|desktop-app|데스크톱 앱\nmaru|old|옛 일\nmaru|other|다른 일\n블로그|글-1|글 쓰기\n');
+const ENT = [
+  ...L.parseJournalText(J1, '2026-11-10'),
+  ...L.parseJournalText('## 09:00 (aaaa1111)\n- [한 일] (5) @maru/old 옛 일 끝냈다\n- [남은 일] (5) @maru/zzz 등록 안 된 슬러그\n', '2026-11-01'),
+  ...L.parseJournalText('## 09:00 (bbbb2222)\n- [결정] (8) @블로그/글-1 방향을 정했다\n', '2026-11-12'),
+];
+t('buildProjects: 요약·확인 필요·분류 안 됨·합치기', () => {
+  const todos = L.parseTodos('maru/desktop-app|8|앱 마무리|p\nmaru/desktop-app|3|테스트|\nmaru|5|프로젝트 없는 할 일|\n블로그/글-1|4|초안|');
+  const list = L.buildProjects({ registry: REG, entries: ENT, state: {}, todos, today: '2026-11-16' });
+  const byKey = Object.fromEntries(list.map((x) => [x.key, x]));
+  assert.deepStrictEqual(byKey['maru/desktop-app'], { key: 'maru/desktop-app', kind: 'project', tag: 'maru', title: '데스크톱 앱', status: 'open', doneAt: null, lastDay: '2026-11-10', records: 3, openTodos: 2, needsCheck: false });
+  assert.strictEqual(byKey['maru/old'].openTodos, 0); assert.strictEqual(byKey['maru/old'].needsCheck, true); // 남은 일 0, 마지막 기록 15일 전
+  assert.strictEqual(byKey['maru/other'].needsCheck, false); assert.strictEqual(byKey['maru/other'].lastDay, null); // 기록이 없으면 판단하지 않는다
+  assert.strictEqual(byKey['블로그/글-1'].needsCheck, false); assert.strictEqual(byKey['블로그/글-1'].openTodos, 1); // 남은 일이 있으면 확인 필요 아님
+  assert.deepStrictEqual(byKey.maru, { key: 'maru', kind: 'unclassified', tag: 'maru', title: '', status: 'open', doneAt: null, lastDay: '2026-11-10', records: 2, openTodos: 1, needsCheck: false }); // 태그만 있는 줄·미등록 슬러그·할 일(태그 없는 줄은 어느 카테고리에도 안 든다)
+  // 3일 경계
+  const edge = (d) => L.buildProjects({ registry: REG, entries: [{ day: d, tag: 'maru', slug: 'old', time: '10:00', kind: 'done', importance: 5, text: 'x', seq: 0 }], state: {}, todos: [], today: '2026-11-16' }).find((x) => x.key === 'maru/old').needsCheck;
+  assert.strictEqual(edge('2026-11-13'), true); assert.strictEqual(edge('2026-11-14'), false);
+  // 상태: 완료·이름·합침
+  const st = { 'maru/old': { status: 'done', doneAt: '2026-11-15' }, 'maru/other': { status: 'open', mergedInto: 'maru/desktop-app' }, 'maru/desktop-app': { status: 'open', title: '새 이름' } };
+  const l2 = L.buildProjects({ registry: REG, entries: ENT, state: st, todos, today: '2026-11-16' });
+  assert.ok(!l2.some((x) => x.key === 'maru/other')); // 합쳐진 프로젝트는 목록에서 숨김
+  const d2 = l2.find((x) => x.key === 'maru/desktop-app'); assert.strictEqual(d2.title, '새 이름');
+  assert.deepStrictEqual([l2.find((x) => x.key === 'maru/old').status, l2.find((x) => x.key === 'maru/old').doneAt, l2.find((x) => x.key === 'maru/old').needsCheck], ['done', '2026-11-15', false]);
+  // 합쳐진 쪽의 기록·할 일은 대표 프로젝트로 모인다
+  const e3 = [...ENT, { day: '2026-11-15', tag: 'maru', slug: 'other', time: '10:00', kind: 'done', importance: 5, text: '합쳐진 기록', seq: 0 }];
+  const l3 = L.buildProjects({ registry: REG, entries: e3, state: st, todos: L.parseTodos('maru/other|5|합쳐진 할 일|'), today: '2026-11-16' });
+  const d3 = l3.find((x) => x.key === 'maru/desktop-app'); assert.deepStrictEqual([d3.records, d3.lastDay, d3.openTodos], [4, '2026-11-15', 1]);
+  // 레지스트리에 없는 키의 할 일·기록은 분류 안 됨으로
+  assert.ok(!list.some((x) => x.key === 'maru/zzz'));
+  assert.deepStrictEqual(L.buildProjects({ registry: [], entries: [], state: {}, todos: [], today: '2026-11-16' }), []);
+});
+t('groupProjects: 카테고리별·최근순·완료 접기', () => {
+  const list = L.buildProjects({ registry: REG, entries: ENT, state: { 'maru/old': { status: 'done', doneAt: '2026-11-15' } }, todos: [], today: '2026-11-16' });
+  const g = L.groupProjects(list);
+  assert.deepStrictEqual(g.open.map((x) => x.tag), ['블로그', 'maru']); // 최근 기록이 있는 카테고리 먼저
+  assert.deepStrictEqual(g.open[1].items.map((x) => x.key), ['maru/desktop-app', 'maru/other', 'maru']); // 분류 안 됨은 맨 뒤
+  assert.strictEqual(g.doneCount, 1); assert.deepStrictEqual(g.done.map((x) => [x.tag, x.items.map((i) => i.key)]), [['maru', ['maru/old']]]);
+  assert.deepStrictEqual(L.groupProjects(null), { open: [], done: [], doneCount: 0 });
+});
+t('상태 갱신 순수 함수: 완료·다시 열기·이름·합치기·검증', () => {
+  const list = L.buildProjects({ registry: REG, entries: ENT, state: {}, todos: [], today: '2026-11-16' });
+  assert.ok(L.canMerge(list, 'maru/old', 'maru/desktop-app'));
+  for (const [a, b] of [['maru/old', 'maru/old'], ['maru/old', '블로그/글-1'], ['maru', 'maru/old'], ['maru/old', 'maru'], ['x/y', 'maru/old'], ['maru/old', 'nope']]) assert.strictEqual(L.canMerge(list, a, b), false, a + '>' + b);
+  const done = L.stateWithStatus({}, 'maru/old', 'done', '2026-11-16'); assert.deepStrictEqual(done, { 'maru/old': { status: 'done', doneAt: '2026-11-16' } });
+  assert.deepStrictEqual(L.stateWithStatus(done, 'maru/old', 'open', '2026-11-17'), { 'maru/old': { status: 'open' } });
+  const l2 = L.buildProjects({ registry: REG, entries: ENT, state: done, todos: [], today: '2026-11-16' });
+  assert.strictEqual(L.canMerge(l2, 'maru/old', 'maru/desktop-app'), false); // 완료된 것은 합치지 않는다
+  assert.deepStrictEqual(L.stateWithTitle({}, 'maru/old', ' 새  이름 '), { 'maru/old': { status: 'open', title: '새 이름' } });
+  assert.strictEqual(L.stateWithTitle({}, 'maru/old', '   '), null); assert.strictEqual(L.stateWithTitle({}, 'maru/old', '가'.repeat(41)), null);
+  const m = L.stateWithMerge({ 'maru/other': { status: 'open', mergedInto: 'maru/old' } }, 'maru/old', 'maru/desktop-app');
+  assert.deepStrictEqual(m, { 'maru/other': { status: 'open', mergedInto: 'maru/desktop-app' }, 'maru/old': { status: 'open', mergedInto: 'maru/desktop-app' } }); // 사슬은 한 단계로 편다
+  assert.ok(L.validateProjectState(m) && Object.keys(L.validateProjectState(m)).length === 2);
+  assert.strictEqual(L.projectRoot({ 'a/x': { status: 'open', mergedInto: 'a/y' }, 'a/y': { status: 'open', mergedInto: 'a/x' } }, 'a/x'), 'a/x'); // 순환이면 처음 키
+});
+t('기억 메타: frontmatter 파싱·같은 태그 최대 12개', () => {
+  const m = L.parseMemoryMeta('---\nname: pref-x\ndescription: 선호 `x` <b>\nmetadata:\n  type: user\n  tags: [maru, "Desktop-App", bad tag, 가나다라마바사아자차카타카]\n---\n본문 tags: [zzz]');
+  assert.deepStrictEqual(m, { name: 'pref-x', description: '선호 x ‹b›', tags: ['maru', 'Desktop-App'] });
+  for (const bad of ['', 'name: x', '---\ndescription: 이름 없음\n---', '---\nname: ' + '\u200B\n---', null]) assert.strictEqual(L.parseMemoryMeta(bad), null);
+  const metas = Array.from({ length: 20 }, (_, i) => ({ name: 'm' + String(i).padStart(2, '0'), description: 'd', tags: i % 2 ? ['maru'] : ['life', 'MARU'] }));
+  assert.strictEqual(L.relatedMemories(metas, 'maru').length, 12); assert.strictEqual(L.relatedMemories(metas, 'maru')[0].name, 'm00');
+  assert.deepStrictEqual(L.relatedMemories(metas, 'none'), []); assert.deepStrictEqual(L.relatedMemories(null, 'maru'), []); assert.deepStrictEqual(L.relatedMemories(metas, ''), []);
+  const dir = fs.mkdtempSync(path.join(tmp, 'mm-'));
+  fs.writeFileSync(path.join(dir, 'MEMORY.md'), '---\nname: index\nmetadata:\n  tags: [maru]\n---\n'); fs.writeFileSync(path.join(dir, 'a-note.md'), '---\nname: a-note\ndescription: 설명\nmetadata:\n  tags: [maru, life]\n---\n');
+  fs.writeFileSync(path.join(tmp, 'o.md'), '---\nname: outside\nmetadata:\n  tags: [maru]\n---\n'); fs.symlinkSync(path.join(tmp, 'o.md'), path.join(dir, 'linked.md'));
+  fs.writeFileSync(path.join(dir, 'Bad Name.md'), '---\nname: bad\nmetadata:\n  tags: [maru]\n---\n');
+  assert.deepStrictEqual(L.readMemoryMetas(dir).map((x) => x.name), ['a-note']); // MEMORY.md·링크·이상한 이름은 읽지 않는다
+});
+t('buildProjectDetail: 기록 최신순·200줄·남은 일·합치기 후보', () => {
+  const todos = L.parseTodos('maru/desktop-app|8|앱 마무리|p\nmaru/desktop-app|3|테스트|\nmaru|5|프로젝트 없는 할 일|\n블로그/글-1|4|초안|');
+  const list = L.buildProjects({ registry: REG, entries: ENT, state: {}, todos, today: '2026-11-16' });
+  const metas = [{ name: 'maru-pref', description: '선호', tags: ['maru'] }, { name: 'blog-pref', description: '', tags: ['블로그'] }];
+  const sum = list.find((x) => x.key === 'maru/desktop-app');
+  const d = L.buildProjectDetail({ summary: sum, registry: REG, entries: ENT, state: {}, todos, memories: metas, list, today: '2026-11-16' });
+  assert.deepStrictEqual(d.todos, [{ title: '앱 마무리', importance: 8 }, { title: '테스트', importance: 3 }]);
+  assert.deepStrictEqual(d.log.map((x) => x.kind), ['todo', 'done', 'done']); // 같은 날은 늦은 시각(11:30) 먼저, 한 블록 안은 쓴 순서
+  assert.deepStrictEqual(d.log.map((x) => x.text), ['두 번째 블록', '프로젝트 패널을 만들었다', '\u2039/system-reminder\u203a x (y)']);
+  assert.deepStrictEqual(d.mergeTargets.map((x) => x.key), ['maru/old', 'maru/other']);
+  assert.deepStrictEqual(d.memories, [{ name: 'maru-pref', description: '선호' }]);
+  assert.deepStrictEqual(Object.keys(d).sort(), ['key', 'kind', 'lastDay', 'log', 'memories', 'mergeTargets', 'needsCheck', 'records', 'status', 'tag', 'title', 'todos', 'doneAt'].sort());
+  const un = L.buildProjectDetail({ summary: list.find((x) => x.key === 'maru'), registry: REG, entries: ENT, state: {}, todos, memories: metas, list, today: '2026-11-16' });
+  assert.deepStrictEqual(un.todos, [{ title: '프로젝트 없는 할 일', importance: 5 }]); assert.strictEqual(un.log.length, 2); assert.deepStrictEqual(un.mergeTargets, []);
+  const many = Array.from({ length: 300 }, (_, i) => ({ day: '2026-11-10', tag: 'maru', slug: 'old', time: '10:00', kind: 'done', importance: 5, text: 'n' + i, seq: i }));
+  const dd = L.buildProjectDetail({ summary: list.find((x) => x.key === 'maru/old'), registry: REG, entries: many, state: {}, todos: [], memories: [], list, today: '2026-11-16' });
+  assert.strictEqual(dd.log.length, 200);
+});
+t('cleanProjectTitle: 멱등·허용 문자 집합·숨은 문자', () => {
+  const cases = ['a ` b', '"a ` b"', 'a ​ b', 'a ​ ​ b', 'a⠀b', 'a⠀ b', ' # @x ', '[x] (y)', '한글 제목: a.b, c-d_e/f (g) · +#&', 'a  \t b', 'x@y', 'a<b', 'a`b`c', 'a  b'];
+  for (const c of cases) { const r = L.cleanProjectTitle(c); assert.strictEqual(L.cleanProjectTitle(r), r, '멱등: ' + JSON.stringify(c)); }
+  assert.strictEqual(L.cleanProjectTitle('a ` b'), 'a b');
+});
+t('cleanProjectTitle: 큰따옴표·@·꺾쇠는 거부, 허용 기호는 통과', () => {
+  assert.strictEqual(L.cleanProjectTitle('"a ` b"'), '');
+  for (const bad of ['a@b', 'a<b>', "a'b", 'a"b', 'a*b', 'a|b', 'a\\b', 'a=b', 'a;b', 'a!b', 'a?b', 'a~b', 'a%b', 'a^b', 'a{b}', '‹x›', '😀', 'ㄱㄴ']) assert.strictEqual(L.cleanProjectTitle(bad), '', JSON.stringify(bad));
+  assert.strictEqual(L.cleanProjectTitle('앱 v2.0, 설계/구현 (초안): a-b_c · d+e #1 & f'), '앱 v2.0, 설계/구현 (초안): a-b_c · d+e #1 & f');
+  assert.strictEqual(L.cleanProjectTitle('a​ b'), 'a b'); assert.strictEqual(L.cleanProjectTitle('a⠀b'), 'ab');
+  assert.ok(L.hasBadChars('a⠀b')); // U+2800 점자 빈칸도 셸과 같이 숨은 문자
+});
+t('레지스트리·상태 제목은 같은 정규형만 통과', () => {
+  assert.deepStrictEqual(L.parseProjectRegistry('a|x|a  b\na|y|a b\na|z|a@b\na|w|a<b>').map((x) => x.key), ['a/y']);
+  const v = L.validateProjectState({ 'a/x': { status: 'open', title: 'a  b' }, 'a/y': { status: 'open', title: 'a b' }, 'a/z': { status: 'open', title: 'a@b' } });
+  assert.deepStrictEqual(v, { 'a/x': { status: 'open' }, 'a/y': { status: 'open', title: 'a b' }, 'a/z': { status: 'open' } });
+});
+t('ttlCache: 처음 호출·TTL 안·TTL 밖·reset (cache 교체 회귀 방지의 순수 부분)', () => {
+  let t = 1000; let calls = 0;
+  const c = L.ttlCache(20000, () => ++calls, () => t);
+  assert.strictEqual(c.get(), 1); assert.strictEqual(c.get(), 1); // 처음은 at 이 없으므로 NaN 비교 없이 한 번 읽는다
+  t += 20000; assert.strictEqual(c.get(), 1); t += 1; assert.strictEqual(c.get(), 2);
+  c.reset(); assert.strictEqual(c.get(), 3);
+  const bad = L.ttlCache(10, () => 'x', () => NaN); assert.strictEqual(bad.get(), 'x'); assert.strictEqual(bad.get(), 'x'); // 시계가 이상해도 던지지 않는다
+});
+t('main.js: 프로젝트·기억 캐시는 refresh 가 교체하는 cache 객체 밖에 있다', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const lit = /let cache = \{[\s\S]*?\n\};/.exec(main)[0];
+  assert.ok(!/memMetas|projRaw|projList|projView/.test(lit), 'cache 리터럴에 프로젝트·기억 캐시가 있으면 refresh 의 cache = {...} 가 지운다');
+  assert.ok(/const memMetasCache = L\.ttlCache\(/.test(main) && /const proj = \{/.test(main));
+  assert.ok(!/cache\.(memMetas|projRaw|projList|projView)/.test(main));
+});
+t('관련 기억 흐름: 읽기 → 캐시 → 태그 필터(캐시가 비면 실패하는 통합 경로)', () => {
+  const mem = fs.mkdtempSync(path.join(tmp, 'rm-'));
+  fs.writeFileSync(path.join(mem, 'a-note.md'), '---\nname: a-note\ndescription: 설명\nmetadata:\n  tags: [maru]\n---\n');
+  let reads = 0; let now = 5;
+  const c = L.ttlCache(20000, () => { reads++; return L.readMemoryMetas(mem); }, () => now);
+  for (let i = 0; i < 3; i++) assert.deepStrictEqual(L.relatedMemories(c.get(), 'maru'), [{ name: 'a-note', description: '설명' }]);
+  assert.strictEqual(reads, 1);
+});
+t('프로젝트 상태: 정상 최대치가 읽기 상한 안이고 손상으로 치워지지 않는다', () => {
+  const dir = fs.mkdtempSync(path.join(tmp, 'big-')); const f = path.join(dir, 'project-state.json');
+  const keys = []; for (let i = 0; i < L.PROJ_STATE_MAX_ENTRIES; i++) keys.push('가나다라마바사아자차카타/' + ('가'.repeat(20) + String(1000 + i)).slice(0, 24));
+  const full = {};
+  for (const k of keys) full[k] = { status: 'done', doneAt: '2026-11-10', title: '가'.repeat(40), mergedInto: keys[0] === k ? keys[1] : keys[0] };
+  assert.strictEqual(Object.keys(full).length, L.PROJ_STATE_MAX_ENTRIES);
+  assert.ok(L.projectStateFits(full)); assert.ok(L.saveProjectState(f, full));
+  assert.ok(fs.statSync(f).size < L.PROJ_STATE_MAX_BYTES / 1.2, '정상 최대치는 상한보다 충분히 작다: ' + fs.statSync(f).size);
+  const r = L.readProjectStateFile(f); assert.strictEqual(r.status, 'ok'); assert.strictEqual(Object.keys(r.data).length, 1000);
+  const over = { ...full, 'zz/over': { status: 'open' } };
+  assert.strictEqual(L.validateProjectState(over), null);
+  assert.strictEqual(L.stateWithStatus(full, 'zz/over', 'done', '2026-11-16'), null); // 1001개째는 만들지 않는다
+  assert.strictEqual(L.projectStateFits({ 'a/b': { status: 'open', title: 'x'.repeat(L.PROJ_STATE_MAX_BYTES) } }), false); // 상한을 넘는 직렬화는 쓰기 전에 거부
+  assert.strictEqual(L.saveProjectState(f, { 'a/b': { status: 'open', title: 'x'.repeat(L.PROJ_STATE_MAX_BYTES) } }), false);
+  assert.strictEqual(L.readProjectStateFile(f).status, 'ok'); // 거부된 저장은 기존 정상 파일을 건드리지 않는다
+});
+t('합친 대상이 레지스트리에 없으면 합침을 무시하고 다시 보인다(셸과 같은 규칙)', () => {
+  const st = { 'maru/other': { status: 'open', mergedInto: 'maru/ghost' } };
+  const l = L.buildProjects({ registry: REG, entries: [], state: st, todos: [], today: '2026-11-16' });
+  assert.ok(l.some((x) => x.key === 'maru/other'));
+});
+t('journal·memory 읽기: 기억 폴더가 링크여도 둘 다 읽지 않는다', () => {
+  const real = fs.mkdtempSync(path.join(tmp, 'lk-')); fs.mkdirSync(path.join(real, 'journal'));
+  fs.writeFileSync(path.join(real, 'journal', '2026-11-12.md'), '## 10:00 x (abcd1234)\n- [한 일] (5) @maru/app 기록\n');
+  fs.writeFileSync(path.join(real, 'n.md'), '---\nname: n\nmetadata:\n  tags: [maru]\n---\n');
+  assert.strictEqual(L.readJournalEntries(real).length, 1); assert.strictEqual(L.readMemoryMetas(real).length, 1);
+  const link = path.join(tmp, 'lk-link'); fs.symlinkSync(real, link);
+  assert.deepStrictEqual(L.readJournalEntries(link), []); assert.deepStrictEqual(L.readMemoryMetas(link), []);
+});
+t('화면 시험 모드·상세와 터미널 전환 정적 검사', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  assert.ok(/!app\.isPackaged && \['menu', 'settings', 'update', 'project'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main)); // 패키징 빌드에서는 무시
+  assert.ok(/uiOpen === 'project'\) openFirstProject/.test(rd) && /x\.kind === 'project'\) \|\| all\[0\]/.test(rd));
+  assert.ok(/closeDetail\(false\); showActive\(true\)/.test(rd)); // 작업 공간이 바뀌면 상세를 닫고 나서 그린다
+  assert.ok(/function showActive\(focus\) \{\s*if \(detailOpen\) return;/.test(rd)); // 숨은 컨테이너에서 xterm open 금지
+  assert.ok(/reason === 'size'/.test(rd) && /projectStateFits\(next\)/.test(main));
+  for (const lg of I.LANGS) assert.ok(I.STR[lg]['proj.err.size'], lg);
+});
+t('프로젝트 문구(ko·en): 이어서 하기 템플릿은 안전하게 시작하고 제목만 끼운다', () => {
+  for (const lg of I.LANGS) {
+    const x = I.t(lg, 'project.continue', { title: '데스크톱 앱' });
+    assert.ok(L.isSafeQuestStart(x) && x.includes('"데스크톱 앱"') && [...x].length <= 120 && !L.hasBadChars(x), lg + x);
+    assert.ok([...I.t(lg, 'project.continue', { title: '가'.repeat(40) })].length <= 120, lg);
+  }
+  assert.strictEqual(I.t('ko', 'project.continue', { title: '앱' }), '"앱" 프로젝트를 이어서 하자. 남은 일부터 정리해 줘.');
+  const keys = ['proj.eyebrow', 'proj.empty', 'proj.todos', 'proj.check', 'proj.unclassified', 'proj.done.toggle', 'proj.status.done', 'proj.meta', 'proj.suggest', 'proj.act.continue', 'proj.act.reopen', 'proj.merge.title'];
+  for (const k of keys) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
+});
+t('프로젝트 화면·IPC 정적 검사: textContent 만, preload 좁은 API, main 이 키 대조', () => {
+  const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(rd + html.replace(/<script[\s\S]*?<\/script>/g, '')), 'HTML 주입 금지');
+  for (const ch of ['projects:detail', 'projects:set-status', 'projects:rename', 'projects:merge', 'projects:continue']) assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch);
+  assert.ok(/'projects:continue', String\(id\)/.test(pre));
+  const handlers = main.split("ipcMain.handle('projects:").slice(1);
+  assert.strictEqual(handlers.length, 5);
+  for (const h of handlers) assert.ok(/fromMain\(e\)|wsFrom\(e, id\)/.test(h.slice(0, 220)), 'sender 검사: ' + h.slice(0, 30));
+  assert.ok(/projects:continue[\s\S]*findProject\(key\)[\s\S]*writePrompt\(w, tr\('project\.continue'/.test(main)); // 제목은 main 의 요약에서, 문장은 i18n 템플릿
+  assert.ok(!/continueProject\([^)]*log|journal/.test(rd.split('async function doContinue')[1].split('\n  }\n')[0])); // 일지 문장을 지시문에 섞지 않는다
+  assert.ok(/function writePrompt[\s\S]*cleanQuestText[\s\S]*isSafeQuestStart[\s\S]*bracketed[\s\S]*\\x1b\[200~/.test(main)); // 할 일과 같은 안전장치(붙여넣기 모드, Enter 없음)
+  assert.ok(main.indexOf("return writePrompt(w, item.prompt)") > 0);
+  assert.ok(html.indexOf('id="party"') > html.indexOf('id="core"') && html.indexOf('id="party"') < html.indexOf('id="quests"'), '파티는 오른쪽 상태 링 아래');
+  assert.ok(html.indexOf('id="proj-card"') > html.indexOf('id="workspaces"') && html.indexOf('id="proj-card"') < html.indexOf('id="user-chip"'), '프로젝트는 작업 공간 아래');
+  assert.ok(/#terminal\[hidden\]\{display:none\}/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8')));
+  assert.ok(/detailOpen \|\| !e \|\| !e\.opened/.test(rd)); // 상세가 터미널을 가리는 동안 pty 크기를 줄이지 않는다
 });
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

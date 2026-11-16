@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""maru todo [번호]: data/todos.txt(`태그|중요도|제목|프롬프트`)를 태그별로 번호와 함께 출력한다.
+"""maru todo [번호]: data/todos.txt(`태그|중요도|제목|프롬프트`)를 태그별로 번호와 함께(태그 칸은 `태그/슬러그` 도 받아 태그로 묶는다) 출력한다.
 번호를 주면 그 항목의 프롬프트를 클립보드에 복사한다(전송하지 않는다). 프롬프트가 빈 항목은 사용자가 직접 할 일이다.
 파일은 신뢰할 수 없는 표시 데이터로 읽는다(일반 파일·64KB 이하·UTF-8·줄 형식 검사, 제어 문자 줄은 버림). 표준 라이브러리만 쓴다."""
 import os
@@ -9,7 +9,7 @@ import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
-from textclean import has_bad, valid_tag, safe_start   # noqa: E402
+from textclean import has_bad, valid_tag, safe_start, split_project   # noqa: E402
 from maru_ui import copy_suggestion        # noqa: E402
 
 MAX_BYTES, MAX_ITEMS = 64 * 1024, 7
@@ -32,6 +32,7 @@ def load_todos(path):
         if len(parts) != 4 or has_bad(line):
             continue
         tag, imp, title, prompt = parts
+        tag, _slug = split_project(tag)   # `태그/슬러그` 도 받는다(묶음은 태그 기준, 슬러그는 CLI 에서 안 씀)
         if not valid_tag(tag) or not re.fullmatch(r"[0-9]{1,2}", imp) or not 1 <= int(imp) <= 10:
             continue
         if not title or len(title) > 60 or len(prompt) > 120:

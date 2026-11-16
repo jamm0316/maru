@@ -11,7 +11,7 @@ const NAME_MAX = 64;
 // 제어문자, bidi, zero-width, 보이지 않는 서식·채움 문자, Tags, 변형 선택자, 한글 채움, 미할당·사설·서로게이트(u 플래그)
 const BAD_SRC = '[' + [
   '\\u0000-\\u001F', '\\u007F-\\u009F', '\\u00AD', '\\u034F', '\\u061C', '\\u115F', '\\u1160', '\\u180E',
-  '\\u200B-\\u200F', '\\u2028-\\u202E', '\\u2060-\\u206F', '\\u3164', '\\uFE00-\\uFE0F', '\\uFEFF', '\\uFFA0',
+  '\\u200B-\\u200F', '\\u2028-\\u202E', '\\u2060-\\u206F', '\\u2800', '\\u3164', '\\uFE00-\\uFE0F', '\\uFEFF', '\\uFFA0',
   '\\uFFF9-\\uFFFB', '\\u{E0000}-\\u{E007F}', '\\u{E0100}-\\u{E01EF}', '\\p{Cf}', '\\p{Co}', '\\p{Cn}', '\\p{Cs}',
 ].join('') + ']';
 const BAD_CHARS = new RegExp(BAD_SRC, 'u');
@@ -49,6 +49,14 @@ const TODO_TITLE_MAX = 60;
 const TODO_PROMPT_MAX = 120;
 const TODO_TAG_RE = /^[0-9A-Za-z가-힣-]{1,12}$/;
 const TODO_IMP_RE = /^(10|[1-9])$/;
+const PROJ_SLUG_RE = /^[0-9a-z가-힣-]{1,24}$/;
+// 태그 칸 -> { tag, slug }. 슬러그 형식이 틀리면 줄을 버리지 않고 slug 만 null(셸 textclean.split_project 와 같은 규칙). 태그 검증은 호출 쪽.
+function splitProjectField(field) {
+  const i = typeof field === 'string' ? field.indexOf('/') : -1;
+  if (i < 0) return { tag: field, slug: null };
+  const slug = field.slice(i + 1);
+  return { tag: field.slice(0, i), slug: PROJ_SLUG_RE.test(slug) ? slug : null };
+}
 function parseTodos(text, truncated = false) {
   if (typeof text !== 'string') return [];
   const rows = text.split(/\r?\n/);
@@ -59,13 +67,16 @@ function parseTodos(text, truncated = false) {
     if (!raw.trim() || [...raw].length > TODO_LINE_MAX_CHARS) continue;
     const f = raw.split('|');
     if (f.length !== 4) continue;
-    const [tag, imp, rawTitle, rawPrompt] = f;
+    const [tagField, imp, rawTitle, rawPrompt] = f;
+    const { tag, slug } = splitProjectField(tagField); // `태그` 또는 `태그/슬러그`(슬러그가 틀리면 슬러그만 뗀다)
     if (!TODO_TAG_RE.test(tag) || !TODO_IMP_RE.test(imp)) continue;
     const title = cleanQuestText(rawTitle);
     let prompt = cleanQuestText(rawPrompt);
     if (prompt && !isSafeQuestStart(prompt)) prompt = ''; // 붙여넣어도 거부될 프롬프트: 직접 할 일로 취급
     if (!title || [...title].length > TODO_TITLE_MAX || [...prompt].length > TODO_PROMPT_MAX) continue;
-    out.push({ tag, importance: Number(imp), title, prompt });
+    const item = { tag, importance: Number(imp), title, prompt };
+    if (slug) item.project = tag + '/' + slug; // 프로젝트를 가리킬 때만 붙는다
+    out.push(item);
   }
   return out;
 }
@@ -470,6 +481,355 @@ function ringView(st) {
   };
 }
 
+
+// ---- 프로젝트 추적(카테고리(태그) > 프로젝트 > 작업 기록) ----
+// 원천: 일지 날짜 파일(@태그/슬러그), data/projects.txt(셸이 쓰는 레지스트리), data/project-state.json(앱이 쓰는 사용자 상태),
+// todos(프로젝트를 가리키는 남은 일), 기억 frontmatter 의 tags. 파일은 모두 신뢰할 수 없는 표시 데이터로 엄격 파싱한다.
+const PROJ_TITLE_MAX = 40;
+// 셸 textclean.py 와 같은 값: 파일 자체는 1000줄·256KB(완료·합침이 쌓일 여유), 열린 프로젝트 200개는 apply_projects 가 센다
+const PROJ_MAX = 1000;
+const PROJ_REG_MAX_BYTES = 256 * 1024;
+const PROJ_STATE_MAX_BYTES = 512 * 1024; // 정상 최대치(1000개 × 약 400바이트)보다 넉넉하게. 읽기·쓰기 같은 값
+const PROJ_STATE_MAX_ENTRIES = 1000;
+const PROJ_KEY_RE = /^([0-9A-Za-z가-힣-]{1,12})\/([0-9a-z가-힣-]{1,24})$/;
+const PROJ_LOG_MAX = 200;
+const PROJ_MEM_MAX = 12;
+const CHECK_DAYS = 3; // 남은 일이 없고 마지막 기록이 이만큼 지났으면 '확인 필요'
+const JOURNAL_FILE_MAX_BYTES = 256 * 1024; // session-context.sh 의 MAX_FILE 과 같다
+const JOURNAL_TOTAL_MAX_BYTES = 4 * 1024 * 1024;
+const JOURNAL_FILES_MAX = 400;
+const MEM_HEAD_BYTES = 8192;
+const MEM_FILES_MAX = 500;
+const MEM_NAME_MAX = 64;
+const MEM_DESC_MAX = 120;
+
+function projectKey(tag, slug) { return slug ? tag + '/' + slug : tag; }
+function isProjectKey(k) { return typeof k === 'string' && PROJ_KEY_RE.test(k); }
+const cpLen = (s) => [...s].length;
+
+// 일지 문장 하나를 무해화(셸 textclean.neutralize_body 와 같은 규칙): 백틱 제거, < > -> ‹ ›, [ ] -> ( ), 앞쪽 # @ 와 공백 제거
+function neutralizeBody(s) {
+  let t = cleanQuestText(s).replace(/`/g, '').replace(/</g, '‹').replace(/>/g, '›').replace(/\[/g, '(').replace(/\]/g, ')').trim();
+  t = t.replace(/^[#@\s]+/, '');
+  return t.trim();
+}
+const SECRET_RE = /sk-[A-Za-z0-9_-]{16,}|[0-9A-Fa-f]{32,}|[A-Za-z0-9+/_=-]{40,}/;
+function looksSecret(s) { return typeof s === 'string' && SECRET_RE.test(s); }
+
+// 프로젝트 이름(사용자 입력·레지스트리·상태 파일): 셸 textclean.clean_title 과 같은 규칙이고 멱등이다.
+// 무해화(neutralizeBody) 뒤 공백 접기를 안정될 때까지 되풀이하고, 한글·영숫자·공백과 `. , - _ / ( ) : · + # &` 만 남은 1~40자일 때만 돌려준다. 아니면 ''.
+const TITLE_OK_RE = /^[0-9A-Za-z가-힣 .,\-_/():\u00b7+#&]+$/;
+function cleanProjectTitle(s) {
+  if (typeof s !== 'string' || s.length > 400) return '';
+  let t = s;
+  for (let i = 0; i < 4; i++) {
+    const n = neutralizeBody(t).replace(/\s+/g, ' ').trim();
+    if (n === t) break;
+    t = n;
+  }
+  const n = cpLen(t);
+  return n >= 1 && n <= PROJ_TITLE_MAX && TITLE_OK_RE.test(t) && !looksSecret(t) ? t : '';
+}
+
+// data/projects.txt 본문 -> [{key, tag, slug, title}] (셸 textclean.read_projects 와 같은 규칙; 파일 순서, 키 중복은 첫 줄)
+function parseProjectRegistry(text, truncated = false) {
+  if (typeof text !== 'string') return [];
+  const rows = text.split('\n');
+  if (truncated) rows.pop();
+  const out = []; const seen = new Set();
+  for (const raw of rows) {
+    if (out.length >= PROJ_MAX) break;
+    const line = raw.replace(/\r$/, '');
+    if (!line || hasBadChars(line)) continue;
+    const f = line.split('|');
+    if (f.length !== 3) continue;
+    const [tag, slug, title] = f;
+    if (!TODO_TAG_RE.test(tag) || !PROJ_SLUG_RE.test(slug) || cleanProjectTitle(title) !== title || looksSecret(title)) continue;
+    const key = tag + '/' + slug;
+    if (seen.has(key)) continue;
+    seen.add(key); out.push({ key, tag, slug, title });
+  }
+  return out;
+}
+
+// 일지 날짜 파일 본문 -> 항목 [{day, time, kind, importance, tag, slug, text, seq}]. session-context.sh 와 같은 엄격 형식만(그 밖의 줄은 버림).
+const JOURNAL_HDR = /^## ([0-9]{2}:[0-9]{2})(?: ([0-9A-Za-z가-힣._-]{1,24}))? \(([0-9A-Za-z-]{8})\)$/;
+const JOURNAL_ITEM = /^- \[(한 일|결정|남은 일)\] \((10|[1-9])\) (?:@([0-9A-Za-z가-힣-]{1,12}(?:\/[0-9a-z가-힣-]{1,24})?) )?(.+)$/;
+const JOURNAL_KINDS = { '한 일': 'done', 결정: 'decision', '남은 일': 'todo' };
+const JOURNAL_ITEM_MAX_CHARS = 200;
+function parseJournalText(text, day) {
+  if (typeof text !== 'string' || typeof day !== 'string') return [];
+  const out = []; let time = null; let seq = 0;
+  for (const raw of text.split('\n')) {
+    const l = raw.replace(/\r$/, '').replace(BAD_CHARS_G, '');
+    const h = JOURNAL_HDR.exec(l);
+    if (h) { time = h[1]; continue; }
+    if (l.startsWith('## ')) { time = null; continue; } // 형식이 틀린 헤더: 그 아래 줄은 어느 블록에도 붙이지 않는다
+    const m = JOURNAL_ITEM.exec(l);
+    if (!m || time === null) continue;
+    const body = [...neutralizeBody(m[4])].slice(0, JOURNAL_ITEM_MAX_CHARS).join('');
+    if (!body) continue;
+    let tag = ''; let slug = null;
+    if (m[3]) { const p = m[3].split('/'); tag = p[0]; slug = p[1] || null; }
+    out.push({ day, time, kind: JOURNAL_KINDS[m[1]], importance: Number(m[2]), tag, slug, text: body, seq: seq++ });
+  }
+  return out;
+}
+
+const JOURNAL_NAME_RE = /^([0-9]{4}-[0-9]{2}-[0-9]{2})(?:\.[0-9]{1,3})?\.md$/;
+function validDay(d) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+  if (!m) return false;
+  const dt = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return dt.getUTCFullYear() === +m[1] && dt.getUTCMonth() === +m[2] - 1 && dt.getUTCDate() === +m[3];
+}
+// <기억 폴더>/journal/*.md 와 journal/archive/*.md 읽기(Node 전용). journal·archive 가 심볼릭 링크이거나 폴더가 아니면 읽지 않고,
+// 파일은 일반 파일만(readRegular: O_NOFOLLOW), 파일당·전체·개수 상한을 넘으면 건너뛴다(최신 날짜 우선).
+function readJournalEntries(memDir) {
+  const fs = require('fs'); const path = require('path');
+  const out = [];
+  const isRealDir = (d) => { try { const st = fs.lstatSync(d); return st.isDirectory() && !st.isSymbolicLink(); } catch { return false; } };
+  const jd = path.join(memDir, 'journal');
+  if (!isRealDir(memDir) || !isRealDir(jd)) return out; // 기억 폴더·journal 이 링크이면 읽지 않는다(readMemoryMetas 와 같다)
+  const files = [];
+  for (const dir of [jd, path.join(jd, 'archive')]) {
+    if (!isRealDir(dir)) continue;
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { names = []; }
+    for (const n of names) { const m = JOURNAL_NAME_RE.exec(n); if (m && validDay(m[1])) files.push({ day: m[1], file: path.join(dir, n), name: n }); }
+  }
+  files.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : (a.name < b.name ? 1 : a.name > b.name ? -1 : 0)));
+  let total = 0;
+  for (const f of files.slice(0, JOURNAL_FILES_MAX)) {
+    const r = readRegular(f.file, JOURNAL_FILE_MAX_BYTES, false);
+    if (!r || r.truncated) continue;
+    total += Buffer.byteLength(r.text, 'utf8');
+    if (total > JOURNAL_TOTAL_MAX_BYTES) break;
+    out.push(...parseJournalText(r.text, f.day));
+  }
+  return out;
+}
+
+// ---- 사용자 상태(data/project-state.json): { "<태그/슬러그>": { status, doneAt?, title?, mergedInto? } } ----
+function validateProjectState(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  const keys = Object.keys(o);
+  if (keys.length > PROJ_STATE_MAX_ENTRIES) return null;
+  const out = {};
+  for (const k of keys) {
+    const e = o[k];
+    if (!isProjectKey(k) || !e || typeof e !== 'object' || Array.isArray(e)) continue;
+    if (e.status !== 'open' && e.status !== 'done') continue;
+    const v = { status: e.status };
+    if (e.status === 'done') v.doneAt = typeof e.doneAt === 'string' && validDay(e.doneAt) ? e.doneAt : null;
+    if (typeof e.title === 'string' && e.title && cleanProjectTitle(e.title) === e.title) v.title = e.title;
+    if (isProjectKey(e.mergedInto) && e.mergedInto !== k) v.mergedInto = e.mergedInto;
+    out[k] = v;
+  }
+  return out;
+}
+// readRegular 결과 -> 상태 맵 | null(파일 없음·잘림·나쁜 JSON·형식 오류)
+function parseProjectState(res) {
+  if (!res || res.truncated || typeof res.text !== 'string') return null;
+  try { return validateProjectState(JSON.parse(res.text)); } catch { return null; }
+}
+// 시작·갱신 때 읽기: { status: 'missing'|'corrupt'|'ok', data }
+function readProjectStateFile(file) {
+  const fs = require('fs');
+  let present = true;
+  try { fs.lstatSync(file); } catch { present = false; }
+  if (!present) return { status: 'missing', data: {} };
+  const data = parseProjectState(readRegular(file, PROJ_STATE_MAX_BYTES, false));
+  return data ? { status: 'ok', data } : { status: 'corrupt', data: {} };
+}
+// 직렬화한 크기가 읽기 상한 안인가(넘는 상태를 쓰면 다음 읽기에서 '손상'으로 치워지므로 쓰기 전에 거부한다)
+function projectStateFits(state) { return Buffer.byteLength(JSON.stringify(state, null, 2) + '\n', 'utf8') <= PROJ_STATE_MAX_BYTES; }
+function saveProjectState(file, state) {
+  const v = validateProjectState(state);
+  if (!v || Object.keys(v).length !== Object.keys(state).length) return false; // 이상한 항목이 섞여 있으면 쓰지 않는다
+  for (const k of Object.keys(v)) { // 필드까지 같아야 한다(알 수 없는 필드·고쳐진 값이 있으면 쓰지 않는다)
+    const a = v[k]; const o = state[k];
+    if (Object.keys(a).length !== Object.keys(o).length || Object.keys(a).some((f) => a[f] !== o[f])) return false;
+  }
+  if (!projectStateFits(v)) return false;
+  return writeJsonAtomic(file, v, 'project-state');
+}
+// 합친 프로젝트를 따라가 대표 키를 찾는다(최대 8단계, 순환이면 처음 키)
+function projectRoot(state, key) {
+  let k = key;
+  for (let i = 0; i < 8; i++) {
+    const e = Object.prototype.hasOwnProperty.call(state, k) ? state[k] : null;
+    if (!e || !e.mergedInto) return k;
+    k = e.mergedInto;
+  }
+  return key;
+}
+
+// 레지스트리 + 일지 + 상태 + todos -> 프로젝트 요약 배열(합쳐진 것은 대표 프로젝트로 모음).
+// 요약: { key, kind: 'project'|'unclassified', tag, title, status, doneAt, lastDay, records, openTodos, needsCheck }
+// kind 'unclassified' 는 프로젝트 없는 줄·할 일의 카테고리별 "분류 안 됨" 묶음(key 는 태그만). today: 'YYYY-MM-DD'
+function daysBetween(today, day) {
+  const p = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
+  return Math.round((p(today) - p(day)) / 86400000);
+}
+function buildProjects({ registry, entries, state, todos, today }) {
+  const reg = Array.isArray(registry) ? registry : [];
+  const st = state && typeof state === 'object' ? state : {};
+  const regMap = new Map(reg.map((r) => [r.key, r]));
+  const ownerOf = (key) => { const r = projectRoot(st, key); return regMap.has(r) ? r : (regMap.has(key) ? key : null); };
+  const acc = new Map(); // key -> {lastDay, records, openTodos}
+  const get = (k) => { let a = acc.get(k); if (!a) { a = { lastDay: null, records: 0, openTodos: 0 }; acc.set(k, a); } return a; };
+  for (const e of Array.isArray(entries) ? entries : []) {
+    const owner = e.slug ? ownerOf(e.tag + '/' + e.slug) : null;
+    if (!e.tag && !owner) continue; // 태그도 프로젝트도 없는 줄은 어느 카테고리에도 속하지 않는다
+    const a = get(owner || e.tag);
+    a.records++;
+    if (!a.lastDay || e.day > a.lastDay) a.lastDay = e.day;
+  }
+  for (const t of Array.isArray(todos) ? todos : []) {
+    const owner = t.project ? ownerOf(t.project) : null;
+    if (!t.tag && !owner) continue;
+    get(owner || t.tag).openTodos++;
+  }
+  const out = [];
+  for (const r of reg) {
+    const e = Object.prototype.hasOwnProperty.call(st, r.key) ? st[r.key] : null;
+    if (e && e.mergedInto && regMap.has(projectRoot(st, r.key)) && projectRoot(st, r.key) !== r.key) continue; // 다른 프로젝트에 합쳐짐
+    const a = acc.get(r.key) || { lastDay: null, records: 0, openTodos: 0 };
+    const status = e && e.status === 'done' ? 'done' : 'open';
+    const needsCheck = status === 'open' && a.openTodos === 0 && !!a.lastDay && daysBetween(today, a.lastDay) >= CHECK_DAYS;
+    out.push({ key: r.key, kind: 'project', tag: r.tag, title: (e && e.title) || r.title, status, doneAt: status === 'done' ? (e && e.doneAt) || null : null, lastDay: a.lastDay, records: a.records, openTodos: a.openTodos, needsCheck });
+  }
+  for (const [k, a] of acc) {
+    if (regMap.has(k) || !TODO_TAG_RE.test(k) || (!a.records && !a.openTodos)) continue; // 태그만 있는 키 = 분류 안 됨
+    out.push({ key: k, kind: 'unclassified', tag: k, title: '', status: 'open', doneAt: null, lastDay: a.lastDay, records: a.records, openTodos: a.openTodos, needsCheck: false });
+  }
+  return out;
+}
+
+// 요약 배열 -> 화면용 묶음 { open: [{tag, items}], done: [{tag, items}], doneCount }. 카테고리는 최근 기록순, 묶음 안은 최근 기록순(분류 안 됨은 맨 뒤).
+function groupProjects(list) {
+  const mk = (items) => {
+    const by = new Map();
+    for (const it of items) { if (!by.has(it.tag)) by.set(it.tag, []); by.get(it.tag).push(it); }
+    const last = (arr) => arr.reduce((m, x) => (x.lastDay && x.lastDay > m ? x.lastDay : m), '');
+    const cmpItem = (a, b) => (a.kind !== b.kind ? (a.kind === 'project' ? -1 : 1)
+      : (a.lastDay || '') < (b.lastDay || '') ? 1 : (a.lastDay || '') > (b.lastDay || '') ? -1 : (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
+    return [...by.entries()]
+      .map(([tag, arr]) => ({ tag, items: arr.sort(cmpItem), last: last(arr) }))
+      .sort((a, b) => (a.last < b.last ? 1 : a.last > b.last ? -1 : (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0)))
+      .map(({ tag, items: its }) => ({ tag, items: its }));
+  };
+  const l = Array.isArray(list) ? list : [];
+  const done = l.filter((x) => x.status === 'done');
+  return { open: mk(l.filter((x) => x.status !== 'done')), done: mk(done), doneCount: done.length };
+}
+
+// 합치기 가능 여부(렌더러가 보낸 키는 main 의 요약 목록과 대조한 뒤 이 함수로 한 번 더 본다)
+function canMerge(list, key, into) {
+  const a = (list || []).find((x) => x.key === key); const b = (list || []).find((x) => x.key === into);
+  return !!a && !!b && a.kind === 'project' && b.kind === 'project' && key !== into && a.status === 'open' && b.status === 'open' && a.tag === b.tag;
+}
+// 상태 갱신(순수): 새 객체를 돌려준다. 항목이 400개를 넘게 되면 null.
+function stateWithStatus(state, key, status, today) {
+  const cur = state[key] || {};
+  const e = { ...cur, status };
+  if (status === 'done') e.doneAt = today; else delete e.doneAt;
+  const next = { ...state, [key]: e };
+  return Object.keys(next).length > PROJ_STATE_MAX_ENTRIES ? null : next;
+}
+function stateWithTitle(state, key, title) {
+  const t = cleanProjectTitle(title);
+  if (!t) return null;
+  const next = { ...state, [key]: { status: 'open', ...(state[key] || {}), title: t } };
+  return Object.keys(next).length > PROJ_STATE_MAX_ENTRIES ? null : next;
+}
+function stateWithMerge(state, key, into) {
+  const next = {};
+  for (const [k, e] of Object.entries(state)) next[k] = e && e.mergedInto === key ? { ...e, mergedInto: into } : e; // key 에 합쳐져 있던 것들도 into 로 옮긴다
+  next[key] = { status: 'open', ...(state[key] || {}), mergedInto: into };
+  delete next[key].doneAt;
+  return Object.keys(next).length > PROJ_STATE_MAX_ENTRIES ? null : next;
+}
+
+// 시간 제한 캐시(순수): get() 은 ttlMs 안이면 저장한 값을, 아니면 load() 를 다시 불러 돌려준다. now: () => ms
+function ttlCache(ttlMs, load, now = Date.now) {
+  let value; let at = null;
+  return {
+    get() { const t = now(); if (at === null || !(t - at <= ttlMs)) { value = load(); at = t; } return value; },
+    reset() { at = null; value = undefined; },
+  };
+}
+
+// 기억 frontmatter(앞부분만) -> { name, description, tags } | null. 이름은 필수.
+function parseMemoryMeta(text) {
+  if (typeof text !== 'string') return null;
+  const lines = text.split(/\r?\n/);
+  if (lines[0] !== '---') return null;
+  let name = ''; let desc = ''; let tags = [];
+  for (let i = 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^---\s*$/.test(l)) break;
+    let m;
+    if ((m = /^name:\s*(.+?)\s*$/.exec(l))) name = m[1];
+    else if ((m = /^description:\s*(.+?)\s*$/.exec(l))) desc = m[1];
+    else if ((m = /^\s+tags:\s*\[(.*)\]\s*$/.exec(l))) {
+      tags = m[1].split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter((x) => TODO_TAG_RE.test(x)).slice(0, 4);
+    }
+  }
+  const clean = (s, max) => [...neutralizeBody(s)].slice(0, max).join('');
+  name = clean(name, MEM_NAME_MAX);
+  if (!name) return null;
+  return { name, description: clean(desc, MEM_DESC_MAX), tags };
+}
+// 같은 태그(대표·보조 모두)를 가진 기억 최대 12개(이름순). 읽기 전용 표시용.
+function relatedMemories(metas, tag, max = PROJ_MEM_MAX) {
+  if (typeof tag !== 'string' || !tag) return [];
+  const t = tag.toLowerCase();
+  return (Array.isArray(metas) ? metas : []).filter((m) => m && m.tags.some((x) => x.toLowerCase() === t))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).slice(0, max)
+    .map((m) => ({ name: m.name, description: m.description }));
+}
+// <기억 폴더>/*.md(MEMORY.md 제외) 의 frontmatter 읽기(Node 전용). 일반 파일만, 앞 8KB 만, 최대 500개.
+function readMemoryMetas(memDir) {
+  const fs = require('fs'); const path = require('path');
+  let names = [];
+  try { const st = fs.lstatSync(memDir); if (!st.isDirectory() || st.isSymbolicLink()) return []; names = fs.readdirSync(memDir); } catch { return []; }
+  const out = [];
+  for (const n of names.sort()) {
+    if (out.length >= MEM_FILES_MAX) break;
+    if (!/^[a-z0-9][a-z0-9-]*\.md$/.test(n) || n === 'MEMORY.md') continue;
+    const r = readRegular(path.join(memDir, n), MEM_HEAD_BYTES, false);
+    const m = r ? parseMemoryMeta(r.text) : null;
+    if (m) out.push(m);
+  }
+  return out;
+}
+
+// 상세(요청 시): 요약 + 남은 일 + 작업 기록(최신 날짜 먼저, 최대 200) + 관련 기억 + 합치기 후보. 모두 원시 값(문자열·숫자)만.
+function buildProjectDetail({ summary, registry, entries, state, todos, memories, list, today }) {
+  const st = state || {};
+  const regKeys = new Set((registry || []).map((r) => r.key));
+  const ownerOf = (key) => { const r = projectRoot(st, key); return regKeys.has(r) ? r : (regKeys.has(key) ? key : null); };
+  const mine = (e) => (summary.kind === 'project'
+    ? !!e.slug && ownerOf(e.tag + '/' + e.slug) === summary.key
+    : e.tag === summary.tag && !(e.slug && ownerOf(e.tag + '/' + e.slug)));
+  const log = (entries || []).filter(mine)
+    .sort((a, b) => (a.day !== b.day ? (a.day < b.day ? 1 : -1) : a.time !== b.time ? (a.time < b.time ? 1 : -1) : a.seq - b.seq))
+    .slice(0, PROJ_LOG_MAX).map((e) => ({ day: e.day, kind: e.kind, text: e.text }));
+  const mineTodo = (t) => (summary.kind === 'project'
+    ? !!t.project && ownerOf(t.project) === summary.key
+    : t.tag === summary.tag && !(t.project && ownerOf(t.project)));
+  const open = (todos || []).filter(mineTodo).map((t) => ({ title: t.title, importance: t.importance })).sort((a, b) => b.importance - a.importance);
+  const mergeTargets = summary.kind === 'project' && summary.status === 'open'
+    ? (list || []).filter((x) => canMerge(list, summary.key, x.key)).map((x) => ({ key: x.key, title: x.title })) : [];
+  return {
+    key: summary.key, kind: summary.kind, tag: summary.tag, title: summary.title, status: summary.status, doneAt: summary.doneAt,
+    lastDay: summary.lastDay, records: summary.records, needsCheck: summary.needsCheck,
+    todos: open, log, memories: relatedMemories(memories, summary.tag), mergeTargets,
+  };
+}
+
 // ---- 작업 공간 동작 결정(순수) ----
 // 세션이 아직 살아 있는(시작 전·종료됨·사용 불가가 아닌) 작업 공간을 닫으면 확인한다
 const confirmClose = (state) => ['busy', 'waiting', 'idle', 'none'].includes(state);
@@ -701,6 +1061,10 @@ const api = {
   WS_MAX, WS_STATES, workspaceTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,
   LOGO, logoShapesSvg, RING, ringInit, stepRing, ringView,
   traySummary, trayTitle, trayTodoTitles, trayMenuModel, trayIconPath,
+  splitProjectField, projectKey, isProjectKey, neutralizeBody, looksSecret, cleanProjectTitle, parseProjectRegistry, parseJournalText, readJournalEntries,
+  validateProjectState, projectStateFits, parseProjectState, readProjectStateFile, saveProjectState, projectRoot, daysBetween, buildProjects, groupProjects, canMerge,
+  stateWithStatus, stateWithTitle, stateWithMerge, parseMemoryMeta, relatedMemories, readMemoryMetas, buildProjectDetail,
+  PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.MaruLib = api; // 렌더러(번들러 없음)에서는 전역으로 노출

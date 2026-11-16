@@ -246,7 +246,8 @@ PY
 # ---- 오늘 할 일: apply_todos <stage의 todos.txt>
 # 모델이 쓴 `<태그>|<중요도>|<제목>|<프롬프트>` 줄을 검증해 $MARU_DATA/todos.txt 로 원자적 교체한다. 항상 0을 반환한다(실패는 로그만, 기존 목록 유지).
 # 파일이 없으면 기존 목록을 그대로 둔다. 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 줄은 정확히 4칸(`|` 3개) /
-# 태그 1~12자 [0-9A-Za-z가-힣-], 중요도 1~10, 제목 1~60자, 프롬프트 0~120자(비면 사용자가 직접 할 일) / 제어·서식 문자 제거,
+# 태그 1~12자 [0-9A-Za-z가-힣-](뒤에 `/슬러그` 를 붙여 프로젝트를 가리킬 수 있다: 슬러그 [0-9a-z가-힣-]{1,24}, 형식이 틀리거나
+# data/projects.txt 에 없으면 줄은 두고 슬러그만 뗀다), 중요도 1~10, 제목 1~60자, 프롬프트 0~120자(비면 사용자가 직접 할 일) / 제어·서식 문자 제거,
 # 제목·프롬프트는 neutralize_body 로 무해화(일지와 같은 함수) / 비밀값처럼 보이는 줄·제목 중복은 버림.
 # 7개를 넘으면 중요도 높은 순(안정)으로 7개만 남기고, 태그 묶음을 묶음 안 최고 중요도 내림차순으로, 묶음 안은 중요도 내림차순(안정)으로 정렬한다.
 # 유효한 줄이 하나도 없으면 기존 목록 유지. 성공하면 비어 있지 않은 프롬프트로 data/suggestions.txt 도 다시 만든다
@@ -257,12 +258,13 @@ apply_todos() {
   mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "할 일 목록: data 폴더 없음 — 건너뜀"; return 0; }
   tmp=$(mktemp "$MARU_DATA/.todos.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
   stg=$(mktemp "$MARU_DATA/.todos-sug.XXXXXX" 2>/dev/null) || { rm -f "$tmp"; type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
-  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" <<'PY' 2>&1
+  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" "$MARU_DATA/projects.txt" <<'PY' 2>&1
 import os, re, stat, sys
-src, tmp, stg, libdir = sys.argv[1:5]
+src, tmp, stg, libdir, regpath = sys.argv[1:6]
 sys.path.insert(0, libdir)
-from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, safe_start
+from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, safe_start, split_project, read_projects
 MAX_BYTES, MAX_ITEMS, MAX_TITLE, MAX_PROMPT = 32768, 7, 60, 120
+registry = {(t, s) for t, s, _ in read_projects(regpath)}   # 등록된 프로젝트만 참조할 수 있다
 try:
     st = os.lstat(src)
     if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
@@ -276,29 +278,32 @@ for line in text.split("\n"):
     line = strip_bad(line.rstrip("\r")).strip(" ")
     if not line: continue
     parts = line.split("|")
-    if len(parts) != 4 or looks_secret(line): dropped += 1; continue
+    if len(parts) != 4: dropped += 1; continue
     tag, imp, title, prompt = [p.strip(" ") for p in parts]
+    tag, slug = split_project(tag)
+    if looks_secret("|".join((tag, imp, title, prompt))): dropped += 1; continue   # 틀린 슬러그(길면 비밀값처럼 보일 수 있다)는 이미 떼었으므로 줄을 버리지 않는다
     if not valid_tag(tag) or not re.fullmatch("[0-9]{1,2}", imp) or not 1 <= int(imp) <= 10: dropped += 1; continue
+    if slug and (tag, slug) not in registry: slug = None
     if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
     title, prompt = neutralize_body(title), neutralize_body(prompt)
     if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
     if prompt and not safe_start(prompt): prompt = ""   # 숫자·!·/ 로 시작하는 프롬프트는 비운다(직접 할 일로 남김)
     key = " ".join(title.split()).casefold()
     if key in seen: continue
-    seen.add(key); items.append((tag, int(imp), title, prompt))
+    seen.add(key); items.append((tag, slug, int(imp), title, prompt))
 if not items: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
 over = max(0, len(items) - MAX_ITEMS)
-keep = sorted(range(len(items)), key=lambda i: (-items[i][1], i))[:MAX_ITEMS]   # 중요도 높은 순(안정)으로 7개
+keep = sorted(range(len(items)), key=lambda i: (-items[i][2], i))[:MAX_ITEMS]   # 중요도 높은 순(안정)으로 7개
 items = [items[i] for i in sorted(keep)]
 groups, order = {}, []
 for it in items:
     if it[0] not in groups: groups[it[0]] = []; order.append(it[0])
     groups[it[0]].append(it)
-order.sort(key=lambda t: -max(x[1] for x in groups[t]))                    # 안정 정렬: 동률이면 먼저 나온 묶음
+order.sort(key=lambda t: -max(x[2] for x in groups[t]))                    # 안정 정렬: 동률이면 먼저 나온 묶음(묶음은 태그 기준)
 out = []
-for t in order: out.extend(sorted(groups[t], key=lambda x: -x[1]))         # 안정 정렬
-with open(tmp, "w", encoding="utf-8") as f: f.write("".join("%s|%d|%s|%s\n" % x for x in out))
-with open(stg, "w", encoding="utf-8") as f: f.write("".join(x[3] + "\n" for x in out if x[3]))
+for t in order: out.extend(sorted(groups[t], key=lambda x: -x[2]))         # 안정 정렬
+with open(tmp, "w", encoding="utf-8") as f: f.write("".join("%s|%d|%s|%s\n" % (x[0] + ("/" + x[1] if x[1] else ""), x[2], x[3], x[4]) for x in out))
+with open(stg, "w", encoding="utf-8") as f: f.write("".join(x[4] + "\n" for x in out if x[4]))
 print("ok %d줄(버린 줄 %d, 상한 초과 %d)" % (len(out), dropped, over))
 PY
   ) && [ -s "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$dst" 2>/dev/null
@@ -312,8 +317,87 @@ PY
   return 0
 }
 
+# ---- 프로젝트 레지스트리: apply_projects <stage의 projects.txt>
+# 모델이 쓴 `<태그>|<슬러그>|<제목>` 줄을 검증해 $MARU_DATA/projects.txt 에 병합한다(셸 소유; 앱은 읽기만, 사용자 상태는 앱 소유의 data/project-state.json).
+# 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 줄은 정확히 3칸 / 태그 1~12자 [0-9A-Za-z가-힣-], 슬러그 1~24자 [0-9a-z가-힣-],
+# 제목 1~40자 — 제어·서식·보이지 않는 문자가 든 줄은 거부(지우지 않는다), 비밀값처럼 보이는 줄은 거부, 제목은 clean_title(textclean.py: 무해화 + 공백 접기 +
+# 한글·영숫자·공백과 `. , - _ / ( ) : · + # &` 만 허용; 앱 cleanProjectTitle 과 같은 규칙)을 거쳐야 하고 통과하지 못하면 줄을 버린다.
+# 같은 `태그/슬러그` 는 처음 등록한 제목을 유지한다(모델이 제목을 덮어쓰지 못한다).
+# 상한: 한 번에 새 등록 최대 3줄 / 열린(완료·합쳐진 것을 뺀) 프로젝트 200개 / 파일 전체 1000줄.
+# 기존 data/projects.txt 가 있는데 읽을 수 없으면(링크·크기 초과·UTF-8 아님) 병합을 거부하고 파일을 그대로 둔다(로그에 이유).
+# 다시 쓰기 전에 기존 파일을 projects.txt.bak 으로 남긴다(형식이 틀린 기존 줄이 조용히 사라지지 않게). 유효한 새 줄이 없으면 기존 파일을 그대로 둔다.
+# 항상 0 을 반환한다(실패는 로그만). 일지·할 일 적용보다 먼저 불러야 같은 실행의 새 슬러그가 인정된다.
+apply_projects() {
+  local src=$1 dst=$MARU_DATA/projects.txt tmp res
+  [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
+  mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "프로젝트 목록: data 폴더 없음 — 건너뜀"; return 0; }
+  tmp=$(mktemp "$MARU_DATA/.projects.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "프로젝트 목록: 임시 파일 실패 — 건너뜀"; return 0; }
+  res=$(python3 -I - "$src" "$tmp" "$dst" "$_maru_lib" "$MARU_DATA/project-state.json" <<'PY' 2>&1
+import os, stat, sys
+src, tmp, dst, libdir, statepath = sys.argv[1:6]
+sys.path.insert(0, libdir)
+from textclean import (has_bad, looks_secret, valid_tag, valid_slug, clean_title, read_projects_checked, load_state, project_inactive,
+                       PROJECT_ACTIVE_MAX, PROJECT_FILE_LINES, PROJECT_NEW_MAX)
+MAX_BYTES = 32768
+try:
+    st = os.lstat(src)
+    if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
+    if st.st_size > MAX_BYTES: print("거부: 크기 초과(%d바이트)" % st.st_size); sys.exit(1)
+    with open(src, "rb") as f: raw = f.read(MAX_BYTES + 1)
+    text = raw.decode("utf-8")
+except (OSError, UnicodeDecodeError) as e:
+    print("거부: 읽기 실패(%s)" % type(e).__name__); sys.exit(1)
+cur, err = read_projects_checked(dst)
+if err: print("거부: 기존 projects.txt 를 읽을 수 없어 병합하지 않음 — %s" % err); sys.exit(1)
+keys = {(t, s) for t, s, _ in cur}
+state = load_state(statepath)
+regkeys = {t + "/" + s for t, s, _ in cur}
+active = sum(1 for t, s, _ in cur if not project_inactive(state, regkeys, t + "/" + s))
+added, dropped, dup, over = [], 0, 0, 0
+for line in text.split("\n"):
+    line = line.rstrip("\r").strip(" ")
+    if not line: continue
+    if has_bad(line) or looks_secret(line): dropped += 1; continue   # 제어·서식 문자나 비밀값 모양은 고쳐 쓰지 않고 거부
+    parts = line.split("|")
+    if len(parts) != 3: dropped += 1; continue
+    tag, slug, title = [p.strip(" ") for p in parts]
+    if not valid_tag(tag) or not valid_slug(slug): dropped += 1; continue
+    title = clean_title(title)
+    if not title: dropped += 1; continue
+    if (tag, slug) in keys: dup += 1; continue                          # 첫 등록 제목 유지
+    if len(added) >= PROJECT_NEW_MAX or active + len(added) >= PROJECT_ACTIVE_MAX or len(cur) + len(added) >= PROJECT_FILE_LINES: over += 1; continue
+    keys.add((tag, slug)); added.append((tag, slug, title))
+if not added: print("유효한 새 줄 없음(버린 줄 %d, 이미 있음 %d, 상한 초과 %d)" % (dropped, dup, over)); sys.exit(1)
+with open(tmp, "w", encoding="utf-8") as f: f.write("".join("%s|%s|%s\n" % x for x in cur + added))
+print("ok 새 %d줄 → 전체 %d줄(버린 줄 %d, 이미 있음 %d, 상한 초과 %d)" % (len(added), len(cur) + len(added), dropped, dup, over))
+PY
+  ) && [ -s "$tmp" ] && chmod 600 "$tmp" \
+    && { [ ! -e "$dst" ] && [ ! -L "$dst" ] || { rm -f "$dst.bak" && cp -p "$dst" "$dst.bak"; }; } \
+    && mv -f "$tmp" "$dst" 2>/dev/null
+  if [ $? -eq 0 ]; then type log >/dev/null 2>&1 && log "프로젝트 목록 갱신: $res"
+  else rm -f "$tmp"; type log >/dev/null 2>&1 && log "프로젝트 목록 유지(기존 그대로): ${res:-반영 실패}"; fi
+  return 0
+}
+
+# 회고·정리 프롬프트에 넣을 "열린 프로젝트" 목록(`태그/슬러그 — 제목` 줄, 최대 50줄; 없으면 `(없음)`).
+# data/project-state.json 에서 done·합쳐진 것은 뺀다(읽기만). 일지에 최근 기록이 있는 순으로 고르고, 기록 없는 것은 최근 등록순.
+# 실패해도 `(없음)` 을 출력하고 0 을 반환한다. render_template 에는 반드시 다른 키보다 뒤에 넘긴다(값 안의 {{키}} 가 다시 치환되지 않게).
+open_projects_text() {
+  local out
+  out=$(python3 -I - "$MARU_DATA/projects.txt" "$MARU_DATA/project-state.json" "$MEM/journal" "$_maru_lib" <<'PY' 2>/dev/null
+import sys
+sys.path.insert(0, sys.argv[4])
+from textclean import open_project_lines
+print("\n".join(open_project_lines(sys.argv[1], sys.argv[2], sys.argv[3], 50)))
+PY
+  )
+  [ -n "$out" ] && printf '%s\n' "$out" || printf '(없음)\n'
+  return 0
+}
+
 # ---- 일지(journal): apply_journal <stage의 journal.txt> <세션 id 앞 8자> <프로젝트 라벨(없으면 빈 문자열)>
 # 모델이 쓴 `<kind>|<중요도>|<태그>|<문장>` 줄(kind=done|decision|todo, 중요도 1~10, 태그 1~12자 [0-9A-Za-z가-힣-], 없으면 빈 칸 — 정확히 4칸, 문장 160자 이하; 날짜 파일에는 `@태그 ` 접두로 기록)을 검증해 $MEM/journal/YYYY-MM-DD.md
+# 태그 칸은 `태그/슬러그` 로 프로젝트를 가리킬 수 있다(슬러그 [0-9a-z가-힣-]{1,24}). 슬러그가 틀리거나 data/projects.txt 에 없으면 줄은 두고 슬러그만 뗀다(`@태그/슬러그 문장`).
 # 에 블록으로 덧붙인다(헤더는 셸이 쓴다). 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 제어·서식·보이지 않는 문자는 제거
 # (textclean.py, apply_suggestions 와 공용) / 문장은 neutralize_body 로 무해화(백틱 제거, < > [ ] 치환, 앞쪽 # 제거) /
 # 형식에 안 맞는 줄·비밀값처럼 보이는 줄(sk-…, 16진수 32자+, base64 40자+)·중복 줄은 버림 / 앞에서 8줄까지.
@@ -322,15 +406,16 @@ PY
 apply_journal() {
   local src=$1 sid8=$2 label=${3:-} res rc
   [ -e "$src" ] || [ -L "$src" ] || return 1     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
-  res=$(python3 -I - "$src" "$MEM" "$(date +%F)" "$(date +%H:%M)" "$sid8" "$label" "$_maru_lib" <<'PY' 2>&1
+  res=$(python3 -I - "$src" "$MEM" "$(date +%F)" "$(date +%H:%M)" "$sid8" "$label" "$_maru_lib" "$MARU_DATA/projects.txt" <<'PY' 2>&1
 import os, re, stat, sys, tempfile
-src, mem, day, hhmm, sid8, label, libdir = sys.argv[1:8]
+src, mem, day, hhmm, sid8, label, libdir, regpath = sys.argv[1:9]
 sys.path.insert(0, libdir)
-from textclean import strip_bad, neutralize_body, looks_secret, TAG_CHARS
+from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, split_project, read_projects
 MAX_BYTES, MAX_LINES, MAX_CHARS = 32768, 8, 160
+registry = {(t, s) for t, s, _ in read_projects(regpath)}   # 등록된 프로젝트만 참조할 수 있다
 KINDS = {"done": "한 일", "decision": "결정", "todo": "남은 일"}
-# 정확히 4칸 kind|중요도|태그|문장. 태그 칸은 비어도 되지만(태그 없음) 비어 있지 않은데 형식이 틀리면 줄을 버린다.
-LINE = re.compile(r"^(done|decision|todo)[ ]*\|[ ]*([0-9]{1,2})[ ]*\|[ ]*([" + TAG_CHARS + r"]{0,12})[ ]*\|[ ]*(.+?)[ ]*$")
+# 정확히 4칸 kind|중요도|태그|문장. 태그 칸은 비어도 되지만(태그 없음) 비어 있지 않은데 태그 형식이 틀리면 줄을 버린다(슬러그만 틀리면 슬러그만 뗀다).
+LINE = re.compile(r"^(done|decision|todo)[ ]*\|[ ]*([0-9]{1,2})[ ]*\|[ ]*([^|]*?)[ ]*\|[ ]*(.+?)[ ]*$")
 try:
     st = os.lstat(src)
     if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
@@ -345,7 +430,11 @@ for line in text.split("\n"):
     if not line: continue
     m = LINE.match(line)
     if not m: dropped += 1; continue
-    kind, imp, tag, body = m.group(1), int(m.group(2)), m.group(3) or "", m.group(4)
+    kind, imp, tfield, body = m.group(1), int(m.group(2)), m.group(3), m.group(4)
+    tag, slug = split_project(tfield) if tfield else ("", None)
+    if tfield and not valid_tag(tag): dropped += 1; continue   # 태그 칸이 비어 있지 않은데 태그 형식이 틀리면(`/슬러그` 만 있는 경우 포함) 줄을 버린다
+    if slug and (tag, slug) not in registry: slug = None
+    if slug: tag = tag + "/" + slug
     if len(body) > MAX_CHARS or looks_secret(body): dropped += 1; continue   # 원문 기준: 길이·비밀값 모양
     body = neutralize_body(body)   # 백틱 제거, < > [ ] 치환, 앞쪽 # 제거(읽을 때도 같은 함수)
     if not 1 <= imp <= 10 or not body or len(body) > MAX_CHARS:

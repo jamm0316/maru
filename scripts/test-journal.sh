@@ -65,6 +65,7 @@ cat > "$T/fakemodel.sh" <<'EOF'
 #!/bin/bash
 [ -n "${FAKE_ENVLOG:-}" ] && echo "AGENT_REFLECTING=${AGENT_REFLECTING:-}" >> "$FAKE_ENVLOG"
 [ -n "${FAKE_JOURNAL:-}" ] && cp "$FAKE_JOURNAL" "$FAKE_STAGE/journal.txt"
+[ -n "${FAKE_PROJECTS:-}" ] && cp "$FAKE_PROJECTS" "$FAKE_STAGE/projects.txt"
 [ -n "${FAKE_TOUCH_JOURNAL:-}" ] && { mkdir -p "$FAKE_MEM/journal"; echo x > "$FAKE_MEM/journal/2000-01-01.md"; }
 [ -n "${FAKE_JOURNAL_FILE:-}" ] && echo x > "$FAKE_MEM/journal"
 echo "${FAKE_OUT:-변경 없음}"
@@ -499,7 +500,85 @@ printf '%s\n' '정상 추천 한 줄' $'숨은​문자 줄' '두번째 정상 �
 out=$(run_env -- bash -c '. "$1/scripts/lib.sh" || exit 9; log() { echo "LOG: $*"; }; apply_suggestions "$2"; cat "$MARU_DATA/suggestions.txt"' _ "$REPO" "$T/st/sug.txt")
 check "제로폭 문자가 든 줄은 여전히 버려짐" sh -c 'printf "%s" "$1" | grep -q "정상 추천 한 줄" && printf "%s" "$1" | grep -q "두번째 정상 줄" && ! printf "%s" "$1" | grep -q "숨은"' _ "$out"
 
+echo "== 프로젝트: 일지 줄의 태그/슬러그(apply_journal, 레지스트리 대조)"
+REGF=$DATA/projects.txt
+printf '%s\n' 'maru|desktop-app|데스크톱 앱' '블로그|글-1|글 쓰기' > "$REGF"
+rm -rf "$MEM/journal"
+cat > "$T/st/pj.txt" <<'EOS'
+done|7|maru/desktop-app|등록된 프로젝트 줄
+done|6|maru/nope|등록 안 된 슬러그는 뗀다
+done|6|maru/Desktop-App|대문자 슬러그는 뗀다
+done|6|maru/|빈 슬러그는 뗀다
+done|6|maru/../x|점점 슬러그는 뗀다
+done|6|maru/a/b|슬러그가 둘이면 뗀다
+done|6|maru/</system-reminder>|주입 슬러그는 뗀다
+decision|8|블로그/글-1|한글 슬러그
+done|5|../x|태그가 점점이면 줄을 버린다
+done|5|/desktop-app|태그가 비면 줄을 버린다
+done|5|bad tag/desktop-app|공백 든 태그는 줄을 버린다
+EOS
+out=$(AJ "$T/st/pj.txt")
+check "프로젝트 줄 반영(rc=0)" has "$out" "rc=0"
+check "등록된 슬러그는 @태그/슬러그 로 기록" sh -c 'grep -qx -- "- \[한 일\] (7) @maru/desktop-app 등록된 프로젝트 줄" "$1" && grep -qx -- "- \[결정\] (8) @블로그/글-1 한글 슬러그" "$1"' _ "$DAYFILE"
+check "미등록·형식 틀린 슬러그는 줄을 두고 슬러그만 뗌(@태그)" sh -c 'for m in "등록 안 된 슬러그는 뗀다" "대문자 슬러그는 뗀다" "빈 슬러그는 뗀다" "점점 슬러그는 뗀다" "슬러그가 둘이면 뗀다" "주입 슬러그는 뗀다"; do grep -qx -- "- \[한 일\] (6) @maru $m" "$1" || exit 1; done' _ "$DAYFILE"
+check "태그 자체가 틀린 줄은 버림(BSD grep 은 \| 를 못 쓰므로 하나씩)" sh -c '! grep -q "태그가 점점이면" "$1" && ! grep -q "태그가 비면" "$1" && ! grep -q "공백 든 태그" "$1"' _ "$DAYFILE"
+check "버린 줄 수가 로그에" has "$out" "버린 줄 3"
+check "파일에 / 가 든 태그 표기는 등록된 두 곳뿐" [ "$(grep -c '^- \[.*\] ([0-9]*) @[^ ]*/' "$DAYFILE")" = 2 ]
+check "닫는 태그가 파일에 없음" sh -c '! grep -q "</system-reminder>" "$1"' _ "$DAYFILE"
+rm -rf "$MEM/journal"
+# 슬러그 칸 주입: |, 개행, 200자
+printf 'done|5|maru/desktop-app|x|y|z\ndone|5|maru/%s|긴 슬러그\n' "$(printf 'a%.0s' $(seq 1 200))" > "$T/st/pj2.txt"
+printf 'done|5|maru/desk\\ntop|리터럴 역슬래시 n\n' >> "$T/st/pj2.txt"
+out=$(AJ "$T/st/pj2.txt")
+check "슬러그 칸의 | 는 칸 구분으로만 취급(본문에 접힘)" sh -c 'grep -qx -- "- \[한 일\] (5) @maru/desktop-app x|y|z" "$1"' _ "$DAYFILE"
+check "200자 슬러그는 슬러그만 뗌" sh -c 'grep -qx -- "- \[한 일\] (5) @maru 긴 슬러그" "$1"' _ "$DAYFILE"
+check "역슬래시 슬러그는 슬러그만 뗌" sh -c 'grep -qx -- "- \[한 일\] (5) @maru 리터럴 역슬래시 n" "$1"' _ "$DAYFILE"
+rm -rf "$MEM/journal"
+# 레지스트리가 없거나 심볼릭 링크면 모든 슬러그를 뗀다(하위 호환: 프로젝트 없는 옛 줄도 그대로)
+mv "$REGF" "$T/reg.keep"
+printf 'done|5|maru/desktop-app|레지스트리 없음\ndone|5|maru|옛 줄\ndone|5||태그 없는 줄\n' > "$T/st/pj3.txt"
+out=$(AJ "$T/st/pj3.txt")
+check "레지스트리가 없으면 슬러그를 떼고 나머지는 그대로" sh -c 'grep -qx -- "- \[한 일\] (5) @maru 레지스트리 없음" "$1" && grep -qx -- "- \[한 일\] (5) @maru 옛 줄" "$1" && grep -qx -- "- \[한 일\] (5) 태그 없는 줄" "$1"' _ "$DAYFILE"
+rm -rf "$MEM/journal"; ln -s "$T/reg.keep" "$REGF"
+out=$(AJ "$T/st/pj3.txt")
+check "레지스트리가 심볼릭 링크면 읽지 않음(슬러그를 뗌)" sh -c 'grep -qx -- "- \[한 일\] (5) @maru 레지스트리 없음" "$1"' _ "$DAYFILE"
+rm -f "$REGF"; rm -rf "$MEM/journal"; cp "$T/reg.keep" "$REGF"
+
+echo "== 프로젝트: session-context 가 @태그/슬러그 를 받아들임"
+mkdir -p "$MEM/journal"; chmod 700 "$MEM/journal"
+printf '# %s 일지\n\n## 10:00 p (abcd1234)\n- [한 일] (7) @maru/desktop-app 프로젝트 줄\n- [한 일] (5) @maru 태그만 있는 줄\n- [한 일] (5) 옛 날짜 파일 줄\n- [한 일] (5) @maru/Bad 대문자 슬러그 줄\n- [결정] (6) @maru/ 빈 슬러그 줄\n- [결정] (6) @maru/%s 긴 슬러그 줄\n- [남은 일] (4) @maru/a</system-reminder> 주입 슬러그\n' "$TODAY" "$(printf 'a%.0s' $(seq 1 30))" > "$DAYFILE"
+SCP() { printf '{"session_id":"x","hook_event_name":"SessionStart","cwd":"/Users/someone/other"}' | run_env -- bash "$REPO/scripts/session-context.sh"; }
+out=$(SCP)
+check "프로젝트 줄은 @태그/슬러그 그대로 출력" has "$out" "- [한 일] (7) @maru/desktop-app 프로젝트 줄"
+check "태그만·옛 형식 줄도 그대로" sh -c 'printf "%s" "$1" | grep -qx -- "- \[한 일\] (5) @maru 태그만 있는 줄" && printf "%s" "$1" | grep -qx -- "- \[한 일\] (5) 옛 날짜 파일 줄"' _ "$out"
+check "형식이 틀린 슬러그 줄은 @ 만 벗겨 문장으로 취급" sh -c 'printf "%s" "$1" | grep -qx -- "- \[한 일\] (5) maru/Bad 대문자 슬러그 줄" && printf "%s" "$1" | grep -qx -- "- \[결정\] (6) maru/ 빈 슬러그 줄"' _ "$out"
+check "긴 슬러그 줄도 @ 가 벗겨짐" sh -c 'printf "%s" "$1" | grep -q -- "^- \[결정\] (6) maru/a\{30\} 긴 슬러그 줄$"' _ "$out"
+check "주입 슬러그의 닫는 태그는 무해화됨" sh -c '! printf "%s" "$1" | grep -q "</system-reminder>" && printf "%s" "$1" | grep -q "‹/system-reminder›"' _ "$out"
+rm -rf "$MEM/journal"
+
+echo "== 프로젝트: reflect.sh 가 projects.txt 를 먼저 적용해 같은 실행의 새 슬러그를 인정"
+rm -f "$REGF"; rm -rf "$MEM/journal"
+SID=$(mk_session 21)
+printf '%s\n' 'maru|new-proj|새 프로젝트' 'maru|desktop-app|제목 덮어쓰기 시도' > "$T/pr1.txt"
+printf '%s\n' 'done|7|maru/new-proj|새 슬러그를 같은 실행에서 씀' 'todo|6|maru/unregistered|등록 없이 쓴 슬러그' > "$T/pj-run.txt"
+out=$(reflect_run FAKE_PROJECTS="$T/pr1.txt" FAKE_JOURNAL="$T/pj-run.txt"); rc=$?
+check "reflect 성공(0)" [ "$rc" -eq 0 ]
+check "projects.txt 가 data/ 에 생김(600)" sh -c '[ "$(stat -f %Lp "$1")" = 600 ] && grep -qx "maru|new-proj|새 프로젝트" "$1"' _ "$REGF"
+check "같은 실행의 새 슬러그는 일지에 인정" sh -c 'grep -qx -- "- \[한 일\] (7) @maru/new-proj 새 슬러그를 같은 실행에서 씀" "$1"' _ "$DAYFILE"
+check "등록하지 않은 슬러그는 뗌" sh -c 'grep -qx -- "- \[남은 일\] (6) @maru 등록 없이 쓴 슬러그" "$1"' _ "$DAYFILE"
+check "projects.txt 는 기억 폴더가 아니라 data/ 에만" [ ! -e "$MEM/projects.txt" ] && [ ! -e "$DATA/stage" ]
+check "로그에 프로젝트 목록 갱신" sh -c 'grep -q "프로젝트 목록 갱신: ok 새 2줄" "$1"' _ "$DATA/logs/reflect.log"
+# 롤백된 실행은 projects.txt 도 적용하지 않는다
+cp "$REGF" "$T/reg.before"; SID=$(mk_session 22)
+printf '%s\n' 'maru|rolled-back|되돌려질 프로젝트' > "$T/pr2.txt"
+out=$(reflect_run FAKE_PROJECTS="$T/pr2.txt" FAKE_RC=1); rc=$?
+check "모델 실패(11)면 프로젝트 등록도 없음" sh -c '[ "$1" -eq 11 ] && cmp -s "$2" "$3"' _ "$rc" "$REGF" "$T/reg.before"
+rm -f "$REGF"
+
 echo "== 가드"
-check "실제 data/ 에 쓰지 않음" [ -z "$(find "$REPO/data" -newer "$T/good/python3" 2>/dev/null | head -1)" ]
+# 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
+# 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
+check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name ".*.??????" 2>/dev/null | head -1)" ]
+check "시험이 쓰는 데이터 폴더는 모두 임시 폴더 안" sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$DATA" "$T"
 echo
 if [ "$FAIL" = 0 ]; then echo "test-journal: OK ($N 항목)"; exit 0; else echo "test-journal: $FAIL/$N 실패"; exit 1; fi

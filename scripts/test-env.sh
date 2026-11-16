@@ -86,6 +86,16 @@ else
   # 후보 첫 항목이 죽어 있어도 다음 후보로 넘어간다
   out=$(run_env MARU_TOOL_DIRS="$T/nodir:$T/good" -- bash -c '. "$1/scripts/lib.sh"; echo "MEM=$MEM"' _ "$REPO")
   check "죽은 후보는 건너뜀" has "$out" "MEM=$PROJ/$SLUG/memory"
+  # 프로젝트 추적 함수도 폴백 python3 로 동작한다(셰임이 PATH 앞에 있어도): 등록 → 열린 목록 → 할 일 슬러그 대조
+  printf '%s\n' 'maru|desktop-app|데스크톱 앱' 'maru|Upper|대문자 슬러그' > "$T/proj.stage"
+  printf '%s\n' 'maru/desktop-app|7|앱 마무리|이어서 해줘' 'maru/unknown|5|미등록|p' > "$T/todos.stage"
+  out=$(run_env MARU_TOOL_DIRS="$T/good" MARU_DATA="$T/pdata" -- bash -c '. "$1/scripts/lib.sh"; log() { :; }; apply_projects "$2"; echo "rc=$?"; cat "$MARU_DATA/projects.txt"; open_projects_text; apply_todos "$3"; cat "$MARU_DATA/todos.txt"' _ "$REPO" "$T/proj.stage" "$T/todos.stage")
+  check "폴백 python3 로 apply_projects 가 등록(검증 거부 줄 제외)" has "$out" "rc=0
+maru|desktop-app|데스크톱 앱
+maru/desktop-app — 데스크톱 앱"
+  check "폴백 python3 로 apply_todos 가 등록된 슬러그만 인정" has "$out" "maru/desktop-app|7|앱 마무리|이어서 해줘
+maru|5|미등록|p"
+  rm -rf "$T/pdata"
 fi
 
 echo "== (ii) 후보가 없으면 즉시 실패하고 MEM 이 설정되지 않음"
@@ -219,7 +229,10 @@ fi
 
 echo "== 가드 확인"
 check "진짜 launchctl 은 호출되지 않음" [ ! -e "$T/real-launchctl.called" ]
-check "실제 data/ 에 쓰지 않음" [ -z "$(find "$REPO/data" -newer "$T/stamp" 2>/dev/null | head -1)" ]
+# 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
+# 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
+check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/stamp" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name ".*.??????" 2>/dev/null | head -1)" ]
+check "maru.conf 는 바뀌지 않음" [ -z "$(find "$REPO/data" -type f -newer "$T/stamp" -name maru.conf 2>/dev/null)" ]
 
 echo
 if [ "$FAIL" = 0 ]; then echo "test-env: OK ($N 항목)"; exit 0; else echo "test-env: $FAIL/$N 실패"; exit 1; fi

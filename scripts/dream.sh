@@ -82,7 +82,7 @@ trap 'rm -rf "$RLOCK" "$DLOCK"; rotate_log "$LOG"' EXIT
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 TXN=$STATE/txn.dream
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
-prompt="$(render_template "$MARU_HOME/prompts/consolidate-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE")"
+prompt="$(render_template "$MARU_HOME/prompts/consolidate-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" OPEN_PROJECTS="$(open_projects_text)")"
 mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { env_fail "작업 폴더를 만들 수 없음: $MARU_WORK"; exit 1; }
 # 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
 txn_begin "$MEM" "$TXN" || { env_fail "기억 폴더 스냅샷 실패 — 정리 건너뜀(MEM 경로·권한 확인)"; txn_end "$TXN"; exit 1; }
@@ -126,6 +126,7 @@ else
 fi
 txn_end "$TXN"
 if [ -z "$reason" ]; then   # 추천·할 일 목록: 기억 트랜잭션과 독립(lib.sh)
+  apply_projects "$STAGE/projects.txt"         # 새 프로젝트 등록: 아래 할 일이 새 슬러그를 참조할 수 있게 먼저(lib.sh)
   apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식)
   apply_todos "$STAGE/todos.txt"               # 옛 추천보다 우선
 fi

@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('maru', {
   onWorkspacesChanged: (cb) => { ipcRenderer.on('ws:changed', () => cb()); },
   getPanels: () => ipcRenderer.invoke('panels:get'),
   fillQuest: (id, index, shown) => ipcRenderer.invoke('quest:fill', String(id), index | 0, String(shown)),
+  // 프로젝트 추적: 키·상태·짧은 이름 문자열만 싣는다(경로·문장은 받지 않는다). main 이 자기 목록과 대조한다.
+  getProjectDetail: (key) => ipcRenderer.invoke('projects:detail', String(key).slice(0, 40)),
+  setProjectStatus: (key, status) => ipcRenderer.invoke('projects:set-status', String(key).slice(0, 40), String(status).slice(0, 8)),
+  renameProject: (key, title) => ipcRenderer.invoke('projects:rename', String(key).slice(0, 40), String(title).slice(0, 400)),
+  mergeProject: (key, into) => ipcRenderer.invoke('projects:merge', String(key).slice(0, 40), String(into).slice(0, 40)),
+  continueProject: (id, key, shown) => ipcRenderer.invoke('projects:continue', String(id), String(key).slice(0, 40), String(shown).slice(0, 200)),
   notifyRendered: () => ipcRenderer.send('app:rendered'),
   // 프로필·설정·업그레이드: URL·경로는 받지 않는다(키·불리언·짧은 문자열만)
   getProfile: () => ipcRenderer.invoke('profile:get'),

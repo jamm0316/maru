@@ -225,6 +225,7 @@ echo "== dream.sh: 보관 순서·journal 변조 검사·할 일 반영"
 cat > "$T/dreammodel.sh" <<'EOS'
 #!/bin/bash
 [ -n "${FAKE_TODOS:-}" ] && cp "$FAKE_TODOS" "$FAKE_STAGE/todos.txt"
+[ -n "${FAKE_PROJECTS:-}" ] && cp "$FAKE_PROJECTS" "$FAKE_STAGE/projects.txt"
 [ -n "${FAKE_TOUCH_JOURNAL:-}" ] && echo x >> "$FAKE_MEM/journal/$FAKE_TOUCH_JOURNAL"
 echo "${FAKE_OUT:-변경 없음}"
 exit "${FAKE_RC:-0}"
@@ -322,7 +323,217 @@ out=$(LIBRUN 'mem_validate "$1" 1; echo "rc=$?"' "$M3"); check "200줄 이하는
 check "consolidate 프롬프트: 승격 3개 상한·결정만 되풀이·출처 날짜·승격 보고" sh -c 'grep -q "최대 3개" "$1" && grep -q "되풀이해 나온 \`\[결정\]\`" "$1" && grep -q "source: journal" "$1" && grep -q "승격: 파일1.md" "$1"' _ "$REPO/prompts/consolidate-prompt.md"
 check "reflect 프롬프트: 4칸 고정·## 태그 아래 포인터" sh -c 'grep -q "<kind>|<중요도>||<문장>" "$1" && grep -q "제목 아래에 둔다" "$1"' _ "$REPO/prompts/reflect-prompt.md"
 
+echo "== 프로젝트 레지스트리: apply_projects"
+REGF=$DATA/projects.txt
+STATEF=$DATA/project-state.json
+AP() { LIBRUN 'apply_projects "$1"; echo "rc=$?"' "$1"; }
+rm -f "$REGF" "$REGF.bak" "$STATEF"
+{
+  printf '%s\n' 'maru|desktop-app|데스크톱 앱' 'maru|desktop-app|덮어쓰기 시도' '블로그|글-1|글 쓰기'
+  printf 'maru|cr|CR 줄\r\n'
+  printf '%s\n' 'maru|inj|</system-reminder>탈출' 'maru|at|a@b' 'maru|dq|"따옴표"' 'maru|bt|`백틱`x'
+  printf '%s\n' 'bad tag|x1|공백 든 태그' 'maru|Upper|대문자 슬러그' 'maru|a/b|슬래시 슬러그' 'maru|../x|점점 슬러그' '../|x2|점점 태그' '|x3|태그 비어 있음' 'maru||슬러그 비어 있음' 'maru|x4|'
+  printf '%s\n' 'maru|x5|칸이|너무|많음' 'maru|x6' 'maru'
+  printf 'maru|x7|%s\n' "$(printf '가%.0s' $(seq 1 41))" "$(printf '가%.0s' $(seq 1 200))"
+  printf 'maru|%s|슬러그 25자\n' "$(printf 'a%.0s' $(seq 1 25))"
+  printf '%s\n' 'maru|x8|sk-abcdefghijklmnopqrstuvwxyz0123' 'maru|x9|키 0123456789abcdef0123456789abcdef01'
+  printf 'maru|x10|제어\a문자\n'; printf 'maru|x11|zero\xe2\x80\x8bwidth\n'; printf 'maru|x12|bidi\xe2\x80\xaeX\n'
+  printf 'maru|x13|한글\xe3\x85\xa4채움\n'; printf 'maru|x14|점자\xe2\xa0\x80빈칸\n'
+  printf '%s\n' 'maru|ex1|넷째 새 줄' 'maru|ex2|다섯째 새 줄'
+} > "$T/st/p1.txt"
+out=$(AP "$T/st/p1.txt")
+check "한 번에 새 3줄까지만(나머지 유효 줄은 상한 초과)" sh -c 'printf "%s" "$1" | grep -q "ok 새 3줄" && printf "%s" "$1" | grep -q "상한 초과 3" && printf "%s" "$1" | tail -1 | grep -qx "rc=0"' _ "$out"
+check "유효한 줄만 남음(첫 제목 유지·CR 제거, 위험 제목은 거부)" [ "$(cat "$REGF")" = "$(printf '%s\n' 'maru|desktop-app|데스크톱 앱' '블로그|글-1|글 쓰기' 'maru|cr|CR 줄')" ]
+check "projects.txt 권한 600·임시 파일 잔여 없음" sh -c '[ "$(stat -f %Lp "$1")" = 600 ] && [ -z "$(ls -A "$2" | grep "^\.projects")" ]' _ "$REGF" "$DATA"
+check "첫 등록에는 .bak 이 없음(기존 파일이 없었으므로)" [ ! -e "$REGF.bak" ]
+# 병합: 기존 제목 유지, 새 줄 추가, 허용 기호, 쓰기 전 .bak
+cp "$REGF" "$T/reg.v1"
+{ printf '%s\n' 'maru|desktop-app|다른 제목으로 바꾸려는 시도' 'maru|new-one|새 일' 'maru|punct|앱 v2.0, 설계/구현 (초안): a-b_c · d+e #1 & f' 'maru|nl|a  b   c' 'maru|sq|[대괄호]'; } > "$T/st/p2.txt"
+out=$(AP "$T/st/p2.txt")
+check "같은 키의 제목은 첫 등록 그대로, 새 키만 추가(허용 기호 통과·공백은 접어 등록, 새 3줄 상한)" [ "$(cat "$REGF")" = "$(printf '%s\n' 'maru|desktop-app|데스크톱 앱' '블로그|글-1|글 쓰기' 'maru|cr|CR 줄' 'maru|new-one|새 일' 'maru|punct|앱 v2.0, 설계/구현 (초안): a-b_c · d+e #1 & f' 'maru|nl|a b c')" ]
+check "다시 쓰기 전에 직전 파일이 .bak 으로 남음(600)" sh -c 'cmp -s "$1.bak" "$2" && [ "$(stat -f %Lp "$1.bak")" = 600 ]' _ "$REGF" "$T/reg.v1"
+cp "$REGF" "$T/reg.keep"
+printf '%s\n' 'maru|desktop-app|또 덮어쓰기' > "$T/st/p3.txt"; out=$(AP "$T/st/p3.txt")
+check "새 줄이 없으면 기존 파일 유지(로그)" sh -c 'cmp -s "$1" "$2" && printf "%s" "$3" | grep -q "프로젝트 목록 유지"' _ "$REGF" "$T/reg.keep" "$out"
+out=$(AP "$T/st/none.txt"); check "staged 파일 없음 → 조용히 유지" sh -c '[ "$(printf "%s" "$1" | tail -1)" = rc=0 ] && ! printf "%s" "$1" | grep -q LOG' _ "$out"
+ln -sf "$T/st/p2.txt" "$T/st/plink.txt"; out=$(AP "$T/st/plink.txt"); check "staged 심볼릭 링크 거부" has "$out" "일반 파일 아님"
+head -c 40000 /dev/zero | tr '\0' 'a' > "$T/st/pbig.txt"; out=$(AP "$T/st/pbig.txt"); check "staged 크기 초과 거부" has "$out" "크기 초과"
+printf '\xff\xfe' > "$T/st/pbin.txt"; out=$(AP "$T/st/pbin.txt"); check "staged UTF-8 아님 거부" has "$out" "읽기 실패"
+check "거부된 입력들은 기존 파일을 건드리지 않음" cmp -s "$REGF" "$T/reg.keep"
+# 기존 projects.txt 를 읽을 수 없으면 병합을 거부하고 그대로 둔다
+printf '%s\n' 'maru|fresh|새 줄' > "$T/st/pf.txt"
+rm -f "$REGF" "$REGF.bak"; printf 'x|y|링크 대상\n' > "$T/reg.target"; ln -s "$T/reg.target" "$REGF"
+out=$(AP "$T/st/pf.txt")
+check "기존 파일이 링크면 병합 거부(이유 로그)·링크와 대상 그대로" sh -c 'printf "%s" "$1" | grep -q "거부: 기존 projects.txt 를 읽을 수 없어" && [ -L "$2" ] && [ "$(cat "$3")" = "x|y|링크 대상" ] && [ ! -e "$2.bak" ]' _ "$out" "$REGF" "$T/reg.target"
+rm -f "$REGF"; printf 'maru|ok|정상\n\xff\xfe\n' > "$REGF"; cp "$REGF" "$T/reg.bad"
+out=$(AP "$T/st/pf.txt")
+check "기존 파일이 UTF-8 이 아니면 병합 거부·바이트 그대로" sh -c 'printf "%s" "$1" | grep -q "UTF-8\|읽기 실패" && cmp -s "$2" "$3" && [ ! -e "$2.bak" ]' _ "$out" "$REGF" "$T/reg.bad"
+rm -f "$REGF"; head -c 300000 /dev/zero | tr '\0' 'a' > "$REGF"; cp "$REGF" "$T/reg.huge"
+out=$(AP "$T/st/pf.txt")
+check "기존 파일이 크기 초과면 병합 거부·그대로" sh -c 'printf "%s" "$1" | grep -q "크기 초과" && cmp -s "$2" "$3"' _ "$out" "$REGF" "$T/reg.huge"
+rm -f "$REGF"; mkdir "$REGF"; out=$(AP "$T/st/pf.txt"); check "기존 경로가 폴더여도 거부" sh -c 'printf "%s" "$1" | grep -q "일반 파일 아님" && [ -d "$2" ] && [ -z "$(ls -A "$2")" ]' _ "$out" "$REGF"; rmdir "$REGF"
+# 형식이 틀린 기존 줄은 다시 쓸 때 사라지지만 .bak 에 남는다
+printf '%s\n' 'junk line' 'maru|a|정상 줄' 'maru|b|제목|여분' > "$REGF"; cp "$REGF" "$T/reg.junk"
+out=$(AP "$T/st/pf.txt")
+check "깨진 기존 줄은 정리되되 원본이 .bak 에 보존됨" sh -c '[ "$(cat "$1")" = "$(printf "%s\n" "maru|a|정상 줄" "maru|fresh|새 줄")" ] && cmp -s "$1.bak" "$2"' _ "$REGF" "$T/reg.junk"
+# 열린 프로젝트 200개 상한은 완료·합쳐진 것을 빼고 센다. 파일 자체는 1000줄
+rm -f "$REGF" "$REGF.bak" "$STATEF"
+"$REAL_PY" -c 'print("\n".join("t|p%d|제목 %d" % (i, i) for i in range(199)))' > "$REGF"
+printf '%s\n' 't|new1|새 1' 't|new2|새 2' 't|new3|새 3' > "$T/st/pn.txt"
+out=$(AP "$T/st/pn.txt"); check "열린 프로젝트가 199개면 1줄만 더 등록(상한 200)" sh -c 'printf "%s" "$1" | grep -q "ok 새 1줄" && [ "$(wc -l < "$2" | tr -d " ")" = 200 ]' _ "$out" "$REGF"
+printf '%s\n' 't|new2|새 2' 't|new3|새 3' > "$T/st/pn2.txt"
+out=$(AP "$T/st/pn2.txt"); check "가득 찬 뒤에는 새 줄이 안 들어감" sh -c '[ "$(wc -l < "$1" | tr -d " ")" = 200 ] && ! grep -q "new2" "$1"' _ "$REGF"
+"$REAL_PY" -c '
+import json
+st = {"t/p%d" % i: {"status": "done", "doneAt": "2026-11-01"} for i in range(10)}
+st["t/p10"] = {"status": "open", "mergedInto": "t/p11"}
+print(json.dumps(st))' > "$STATEF"
+out=$(AP "$T/st/pn2.txt"); check "완료 10개·합쳐진 1개를 빼고 세므로 다시 3줄 허용(상한 3)" sh -c 'printf "%s" "$1" | grep -q "ok 새 2줄" && [ "$(wc -l < "$2" | tr -d " ")" = 202 ]' _ "$out" "$REGF"
+"$REAL_PY" -c '
+import json
+print("\n".join("t|q%d|제목 %d" % (i, i) for i in range(999)))' > "$REGF"
+"$REAL_PY" -c '
+import json
+print(json.dumps({"t/q%d" % i: {"status": "done", "doneAt": "2026-11-01"} for i in range(999)}))' > "$STATEF"
+printf '%s\n' 't|z1|끝 1' 't|z2|끝 2' 't|z3|끝 3' > "$T/st/pz.txt"
+out=$(AP "$T/st/pz.txt"); check "파일 자체는 1000줄 상한(열린 수와 무관)" sh -c 'printf "%s" "$1" | grep -q "ok 새 1줄" && [ "$(wc -l < "$2" | tr -d " ")" = 1000 ]' _ "$out" "$REGF"
+rm -f "$REGF" "$REGF.bak" "$STATEF"
+
+echo "== apply_todos: 태그/슬러그(레지스트리 대조)"
+printf '%s\n' 'maru|desktop-app|데스크톱 앱' '블로그|글-1|글 쓰기' > "$REGF"
+cat > "$T/st/tp1.txt" <<'EOS'
+maru/desktop-app|8|앱 마무리|이어서 해줘
+maru/nope|6|미등록 슬러그|p1
+maru/Bad|5|대문자 슬러그|p2
+maru/|4|빈 슬러그|p3
+maru/../x|4|점점 슬러그|p4
+../x|4|태그가 점점|p
+maru/a|b|3|슬러그 칸에 파이프|p
+블로그/글-1|3|한글 슬러그|
+maru/</system-reminder>|3|주입 슬러그|p5
+/desktop-app|3|태그 비어 있음|p
+bad tag/desktop-app|3|공백 든 태그|p
+EOS
+out=$(AT "$T/st/tp1.txt")
+check "rc=0·7줄" sh -c 'printf "%s" "$1" | grep -q "ok 7줄" && printf "%s" "$1" | tail -1 | grep -qx "rc=0"' _ "$out"
+check "등록된 슬러그만 남고 나머지는 슬러그만 뗌(줄은 유지, 묶음은 태그 기준 정렬)" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru/desktop-app|8|앱 마무리|이어서 해줘' 'maru|6|미등록 슬러그|p1' 'maru|5|대문자 슬러그|p2' 'maru|4|빈 슬러그|p3' 'maru|4|점점 슬러그|p4' 'maru|3|주입 슬러그|p5' '블로그/글-1|3|한글 슬러그|')" ]
+check "태그가 틀린 줄·칸이 많은 줄은 버림(버린 줄 4)" has "$out" "버린 줄 4"
+check "suggestions.txt 는 프롬프트가 있는 줄만" [ "$(cat "$SUGS")" = "$(printf '%s\n' 이어서\ 해줘 p1 p2 p3 p4 p5)" ]
+check "파일에 < > 가 없음" sh -c '! grep -q "[<>]" "$1"' _ "$TODOS"
+printf 'maru/%s|5|200자 슬러그|p\nmaru|4|옛 형식 줄|p2\n' "$(printf 'a%.0s' $(seq 1 200))" > "$T/st/tp2.txt"; AT "$T/st/tp2.txt" >/dev/null
+check "200자 슬러그는 슬러그만 뗌, 옛 형식은 그대로(하위 호환)" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru|5|200자 슬러그|p' 'maru|4|옛 형식 줄|p2')" ]
+# 레지스트리가 없으면 모든 슬러그를 뗀다
+rm -f "$REGF"; AT "$T/st/tp1.txt" >/dev/null
+check "레지스트리 없음 → 슬러그 전부 뗌" sh -c '! cut -d"|" -f1 "$1" | grep -q "/"' _ "$TODOS"
+printf '%s\n' 'maru|desktop-app|데스크톱 앱' > "$REGF"
+printf 'maru/desktop-app|8|앱 마무리|p\nmaru|5|프로젝트 없는 일|\n' > "$TODOS"
+out=$(MT); check "maru todo: 태그/슬러그 도 태그로 묶어 보여 줌" sh -c '[ "$(printf "%s\n" "$1" | grep -c "^\[maru\]$")" = 1 ] && printf "%s\n" "$1" | grep -q "^  1\. (8) 앱 마무리" && printf "%s\n" "$1" | grep -q "^  2\. (5) 프로젝트 없는 일"' _ "$out"
+printf 'maru/Bad|8|옛 파일의 틀린 슬러그|p\n../x|5|태그가 틀림|p\n' > "$TODOS"
+out=$(MT); check "maru todo 는 읽을 때도 슬러그를 떼고 틀린 태그 줄은 버림" sh -c 'printf "%s\n" "$1" | grep -q "^\[maru\]$" && printf "%s\n" "$1" | grep -q "옛 파일의 틀린 슬러그" && ! printf "%s\n" "$1" | grep -q "태그가 틀림"' _ "$out"
+if [ -n "${NODE:-}" ] && [ -f "$REPO/app/lib.js" ]; then
+  printf 'maru/desktop-app|8|앱 마무리|p\nmaru|5|일반|\n블로그/글-1|3|글|\n' > "$TODOS"
+  appv=$("$NODE" -e 'const L=require(process.argv[1]);for(const x of L.parseTodos(require("fs").readFileSync(process.argv[2],"utf8")))console.log([x.tag,x.project||"",x.importance,x.title].join("|"))' "$REPO/app/lib.js" "$TODOS")
+  check "앱 parseTodos 가 같은 파일에서 태그·프로젝트를 읽음" [ "$appv" = "$(printf '%s\n' 'maru|maru/desktop-app|8|앱 마무리' 'maru||5|일반' '블로그|블로그/글-1|3|글')" ]
+fi
+
+echo "== 열린 프로젝트 목록(회고·정리 프롬프트용)"
+OPT() { LIBRUN 'open_projects_text; echo "rc=$?"'; }
+rm -rf "$MEM/journal"; mkdir -p "$MEM/journal/archive"; chmod 700 "$MEM/journal"
+printf '%s\n' 'maru|desktop-app|데스크톱 앱' 'maru|old|끝난 일' 'maru|other|합쳐진 일' '블로그|글-1|글 쓰기' 't|newest|가장 늦게 등록' > "$REGF"
+rm -f "$STATEF"
+D1=$(day_ago 1); D20=$(day_ago 20)
+printf '# %s 일지\n\n## 10:00 p (abcd1234)\n- [한 일] (5) @블로그/글-1 오늘 기록\n' "$TODAY" > "$MEM/journal/$TODAY.md"
+printf '# %s 일지\n\n## 10:00 p (abcd1234)\n- [한 일] (5) @maru/desktop-app 어제 기록\n- [한 일] (5) @maru/zzz 미등록 기록\n' "$D1" > "$MEM/journal/$D1.md"
+printf '# %s 일지\n\n## 10:00 p (abcd1234)\n- [한 일] (5) @maru/old 보관된 옛 기록\n' "$D20" > "$MEM/journal/archive/$D20.md"
+out=$(OPT); check "일지에 최근 기록이 있는 순(archive 포함), 기록 없는 것은 최근 등록순" [ "$out" = "$(printf '%s\n' '블로그/글-1 — 글 쓰기' 'maru/desktop-app — 데스크톱 앱' 'maru/old — 끝난 일' 't/newest — 가장 늦게 등록' 'maru/other — 합쳐진 일' 'rc=0')" ]
+printf '%s' '{"maru/old":{"status":"done","doneAt":"2026-11-10"},"maru/other":{"status":"open","mergedInto":"maru/desktop-app"},"블로그/글-1":{"status":"open","title":"새 이름"},"maru/desktop-app":{"status":"open","title":"<b>x"}}' > "$STATEF"
+out=$(OPT); check "완료·합쳐진 것은 빼고, 사용자가 바꾼 이름은 반영(허용 문자가 아닌 이름은 무시)" [ "$out" = "$(printf '%s\n' '블로그/글-1 — 새 이름' 'maru/desktop-app — 데스크톱 앱' 't/newest — 가장 늦게 등록' 'rc=0')" ]
+printf '%s' '{"maru/other":{"status":"open","mergedInto":"maru/ghost"},"maru/old":{"status":"open","mergedInto":"maru/old2"},"maru/old2":{"status":"open","mergedInto":"maru/old"}}' > "$STATEF"
+out=$(OPT); check "합친 대상이 레지스트리에 없거나 순환이면 합침을 무시하고 다시 보임(앱과 같은 규칙)" sh -c 'printf "%s" "$1" | grep -q "maru/other — 합쳐진 일" && printf "%s" "$1" | grep -q "maru/old — 끝난 일"' _ "$out"
+printf '%s' '{깨진 JSON' > "$STATEF"; out=$(OPT); check "상태 파일이 깨졌으면 전부 열린 것으로" has "$out" "maru/old — 끝난 일"
+rm -f "$STATEF"; ln -s "$T/st/p2.txt" "$STATEF"; out=$(OPT); check "상태 파일이 링크면 읽지 않음" has "$out" "maru/old — 끝난 일"; rm -f "$STATEF"
+"$REAL_PY" -c 'print("\n".join("t|p%d|제목 %d" % (i, i) for i in range(120)))' > "$REGF"
+printf '# %s 일지\n\n## 10:00 p (abcd1234)\n- [한 일] (5) @t/p5 오늘\n- [한 일] (5) @t/p100 오늘\n' "$TODAY" > "$MEM/journal/$TODAY.md"
+out=$(OPT); check "최대 50줄" [ "$(printf '%s\n' "$out" | grep -c ' — ')" = 50 ]
+check "50줄은 파일 순서가 아니라 최근 기록 순(p100·p5 → 기록 없는 것 중 최근 등록순)" [ "$(printf '%s\n' "$out" | sed -n '1,4p')" = "$(printf '%s\n' 't/p100 — 제목 100' 't/p5 — 제목 5' 't/p119 — 제목 119' 't/p118 — 제목 118')" ]
+check "50번째는 p72(119 부터 거꾸로 48개 뒤)" has "$out" "t/p72 — 제목 72"
+check "p0 은 밀려남" hasnt "$out" "t/p0 —"
+rm -f "$REGF"; out=$(OPT); check "없으면 (없음)" [ "$out" = "$(printf '%s\n' '(없음)' 'rc=0')" ]
+rm -rf "$MEM/journal"
+printf '%s\n' 't|brace|{{STAGE_DIR}} 와 {{MEMORY_DIR}}' 't|ok|정상 제목' > "$REGF"
+out=$(LIBRUN 'render_template "$1" MEMORY_DIR=/m STAGE_DIR=/s SKILLS_DIR=/k OPEN_PROJECTS="$(open_projects_text)"' "$REPO/prompts/reflect-prompt.md")
+check "reflect 프롬프트에 열린 프로젝트가 들어가고 자리표시자가 남지 않음" sh -c 'printf "%s" "$1" | grep -q "^<open-projects>$" && printf "%s" "$1" | grep -q "^t/ok — " && ! printf "%s" "$1" | grep -q "{{OPEN_PROJECTS}}"' _ "$out"
+check "{{ }} 가 든 제목은 허용 문자가 아니라 목록에 안 들어감(값 안의 자리표시자 치환 우려 없음)" sh -c '! printf "%s" "$1" | grep -q "t/brace" && ! printf "%s" "$1" | grep -q "{{STAGE_DIR}}"' _ "$out"
+out=$(LIBRUN 'render_template "$1" MEMORY_DIR=/m STAGE_DIR=/s OPEN_PROJECTS="$(open_projects_text)"' "$REPO/prompts/consolidate-prompt.md")
+check "consolidate 프롬프트도 같음" sh -c 'printf "%s" "$1" | grep -q "^t/ok — " && ! printf "%s" "$1" | grep -q "{{OPEN_PROJECTS}}"' _ "$out"
+check "프롬프트 문구: 기존 슬러그 재사용·새 일감만 등록·잔일은 태그만·완료는 모델이 판단하지 않음" sh -c 'for f in reflect-prompt.md consolidate-prompt.md; do p="$1/$f"; grep -q "projects.txt" "$p" && grep -q "며칠 이어질" "$p" && grep -q "프로젝트 없이 태그만" "$p" && grep -q "완료" "$p" || exit 1; done; grep -q "그 슬러그를 그대로" "$1/consolidate-prompt.md" && grep -q "반드시 그 슬러그를 그대로" "$1/reflect-prompt.md"' _ "$REPO/prompts"
+check "dream 승격 문구가 @태그/슬러그 를 다룸" sh -c 'grep -q "@태그/슬러그" "$1" && grep -q "앞의 태그만" "$1"' _ "$REPO/prompts/consolidate-prompt.md"
+rm -f "$REGF"
+
+echo "== dream.sh: projects.txt 를 먼저 적용해 같은 실행의 할 일이 새 슬러그를 인정"
+rm -rf "$MEM/journal"; mkdir -p "$MEM/journal"; chmod 700 "$MEM/journal"; rm -f "$DATA/state/dream.marker"
+printf '%s\n' 'maru|dream-new|새벽에 등록한 프로젝트' > "$T/st/dp.txt"
+printf '%s\n' 'maru/dream-new|7|새 프로젝트 할 일|이어서 해줘' 'maru/unregistered|5|미등록 슬러그|p' > "$T/st/dt2.txt"
+out=$(dream_run FAKE_PROJECTS="$T/st/dp.txt" FAKE_TODOS="$T/st/dt2.txt"); rc=$?
+check "dream 성공(0)" [ "$rc" -eq 0 ]
+check "레지스트리에 등록됨" [ "$(cat "$REGF")" = "maru|dream-new|새벽에 등록한 프로젝트" ]
+check "할 일은 새 슬러그만 인정하고 나머지는 슬러그를 뗌" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru/dream-new|7|새 프로젝트 할 일|이어서 해줘' 'maru|5|미등록 슬러그|p')" ]
+rm -f "$REGF"
+
+echo "== 셸·앱 판정 일치(제목 정규형·숨은 문자·합침 규칙)"
+if [ -z "${NODE:-}" ] || [ ! -f "$REPO/app/lib.js" ]; then
+  echo "  skip node 또는 app/lib.js 없음"
+else
+  "$REAL_PY" - "$T/corpus.json" <<'PY'
+import json, sys
+c = ["앱", "a ` b", "\"a ` b\"", "a​ b", "a ​ ​ b", "a⠀b", "a⠀ b", " # @x ", "[x] (y)", "한글 제목: a.b, c-d_e/f (g) · +#&",
+     "a  \t b", "x@y", "a<b", "a<b>c", "a`b`c", "a  b", "a　b", "a b", "a᠎b", "aᅟb", "aㅤb", "aﾠb", "a͏b", "a️b",
+     "a\U000e0100b", "a\u0007b", "a\u0085b", "a‮b", "a b", "ab", "v2.0, 설계/구현 (초안): a-b_c · d+e #1 & f", "😀", "ㄱㄴ", "a|b", "a\\b", "{{x}}",
+     "가" * 40, "가" * 41, "sk-abcdefghijklmnopqrstuvwxyz0123", "0123456789abcdef0123456789abcdef01", "", " ", "#", "@", "a" * 400, "a" * 401]
+json.dump(c, open(sys.argv[1], "w"))
+PY
+  sh_out=$("$REAL_PY" -I - "$T/corpus.json" "$REPO/scripts" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from textclean import clean_title, has_bad
+c = json.load(open(sys.argv[1]))
+print(json.dumps([[clean_title(x), has_bad(x)] for x in c], ensure_ascii=True))
+PY
+  )
+  js_out=$("$NODE" -e '
+const L = require(process.argv[1]); const c = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+console.log(JSON.stringify(c.map((x) => [L.cleanProjectTitle(x), L.hasBadChars(x)])).replace(/[\u0080-￿]/g, (m) => "\\u" + m.charCodeAt(0).toString(16).padStart(4, "0")));' "$REPO/app/lib.js" "$T/corpus.json")
+  check "같은 입력 52개에서 clean_title/cleanProjectTitle 과 has_bad/hasBadChars 가 모두 같음" [ -n "$sh_out" ] && [ "$sh_out" = "$js_out" ]
+  if [ "$sh_out" != "$js_out" ]; then "$REAL_PY" -I -c '
+import json, sys
+a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2]); c = json.load(open(sys.argv[3]))
+for x, p, q in zip(c, a, b):
+    if p != q: print("  차이:", ascii(x)[:60], "셸", p, "앱", q)' "$sh_out" "$js_out" "$T/corpus.json"; fi
+  check "멱등: 정리한 결과를 다시 정리해도 같음(셸)" "$REAL_PY" -I -c '
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from textclean import clean_title
+c = json.load(open(sys.argv[1]))
+sys.exit(0 if all(clean_title(clean_title(x)) == clean_title(x) for x in c) else 1)' "$T/corpus.json" "$REPO/scripts"
+  # 합침·완료 규칙: 같은 레지스트리·상태에서 셸의 열린 목록 = 앱의 열린 프로젝트 키
+  printf '%s\n' 't|a|열린 일' 't|b|완료된 일' 't|c|합쳐진 일' 't|d|대상 없는 합침' 't|e|순환 1' 't|f|순환 2' 't|g|대표' > "$REGF"
+  printf '%s' '{"t/b":{"status":"done","doneAt":"2026-11-01"},"t/c":{"status":"open","mergedInto":"t/g"},"t/d":{"status":"open","mergedInto":"t/ghost"},"t/e":{"status":"open","mergedInto":"t/f"},"t/f":{"status":"open","mergedInto":"t/e"}}' > "$STATEF"
+  rm -rf "$MEM/journal"
+  sh_keys=$(LIBRUN 'open_projects_text' | sed 's/ — .*//' | sort | tr '\n' ' ')
+  js_keys=$("$NODE" -e '
+const L = require(process.argv[1]); const fs = require("fs");
+const reg = L.parseProjectRegistry(fs.readFileSync(process.argv[2], "utf8"));
+const st = L.parseProjectState({ text: fs.readFileSync(process.argv[3], "utf8"), truncated: false });
+const l = L.buildProjects({ registry: reg, entries: [], state: st, todos: [], today: "2026-11-16" });
+console.log(l.filter((x) => x.kind === "project" && x.status === "open").map((x) => x.key).sort().join(" "));' "$REPO/app/lib.js" "$REGF" "$STATEF")
+  check "셸과 앱이 같은 프로젝트를 열린 것으로 봄(합친 대상이 없으면 무시, 순환은 둘 다 열림)" [ "$sh_keys" = "$js_keys " ] && has "$js_keys" "t/d"
+  rm -f "$REGF" "$STATEF"
+fi
+
 echo "== 가드"
-check "실제 data/ 에 쓰지 않음" [ -z "$(find "$REPO/data" -newer "$T/good/python3" 2>/dev/null | head -1)" ]
+# 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
+# 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
+check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name ".*.??????" 2>/dev/null | head -1)" ]
+check "시험이 쓰는 데이터 폴더는 모두 임시 폴더 안" sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$DATA" "$T"
 echo
 if [ "$FAIL" = 0 ]; then echo "test-todos: OK ($N 항목)"; exit 0; else echo "test-todos: $FAIL/$N 실패"; exit 1; fi

@@ -95,7 +95,8 @@ log "[$short] 회고 시작 (새 턴=$turns, 줄 $from→$total, model=$MODEL)"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 build_skills_view
 # 프롬프트의 경로 자리표시자를 실제 경로로 치환한다(템플릿에는 사용자 경로가 없다)
-prompt="$(render_template "$MARU_HOME/prompts/reflect-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" SKILLS_DIR="$SKILLS_VIEW")
+# OPEN_PROJECTS(열린 프로젝트 목록, 앱이 완료·합침으로 둔 것은 뺌)는 값 안의 {{키}} 가 다시 치환되지 않게 맨 뒤에 둔다
+prompt="$(render_template "$MARU_HOME/prompts/reflect-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" SKILLS_DIR="$SKILLS_VIEW" OPEN_PROJECTS="$(open_projects_text)")
 
 ---
 다이제스트 파일: $dg"
@@ -168,6 +169,7 @@ done
 # 프로젝트 라벨은 다이제스트 머리의 cwd 에서 얻는다(없으면 생략).
 jlabel=$(sed -n '2s/^cwd: //p' "$dg" 2>/dev/null | head -1); jlabel=$(basename "${jlabel:-/}" 2>/dev/null); [ "$jlabel" = / ] && jlabel=""
 journaled=""
+apply_projects "$STAGE/projects.txt"          # 새 프로젝트 등록: 아래 일지·할 일이 같은 실행의 새 슬러그를 참조할 수 있게 먼저 적용(lib.sh)
 apply_journal "$STAGE/journal.txt" "$short" "$jlabel" && journaled=1
 apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식) 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
 apply_todos "$STAGE/todos.txt"               # 오늘 할 일: 검증 후 data/todos.txt 교체 + suggestions.txt 재생성(위 옛 추천보다 우선)

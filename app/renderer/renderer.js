@@ -44,7 +44,11 @@
     syncModalState();
     if (m.prev && document.contains(m.prev) && !m.prev.closest('[inert]')) m.prev.focus(); else focusTerm();
   }
-  function focusTerm() { const e = terms.get(activeId); if (!modalOpen() && e && e.opened) e.term.focus(); }
+  function focusTerm() {
+    if (modalOpen()) return;
+    if (detailOpen) { $('pd-title').focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
+    const e = terms.get(activeId); if (e && e.opened) e.term.focus();
+  }
   // Tab 순환(모달 안에서만)
   function trapTab(e) {
     const top = modals[modals.length - 1];
@@ -58,6 +62,7 @@
 
   // ---- 터미널: 작업 공간마다 xterm 하나를 살려 두고 활성만 보인다 ----
   // WebGL 은 활성 터미널에만 붙이고, 숨길 때 dispose 한다(컨텍스트 수 제한 회피). 비활성 터미널은 DOM 렌더러 없이도 버퍼만 유지한다.
+  let detailOpen = false; let detailKey = null; let detail = null; let detailSig = ''; let detailSeq = 0; // 프로젝트 상세(아래 '프로젝트' 절). 열려 있으면 터미널은 숨기기만 한다
   const terms = new Map(); // id -> { id, term, fit, host, gl, opened, started, starting }
   let activeId = null;
   let wsList = [];
@@ -96,11 +101,12 @@
 
   function doFit() {
     const e = terms.get(activeId);
-    if (!e || !e.opened || e.host.hidden) return;
+    if (detailOpen || !e || !e.opened || e.host.hidden) return; // 상세가 터미널을 가리는 동안은 맞추지 않는다(크기 0 으로 pty 를 줄이지 않게)
     try { e.fit.fit(); window.maru.ptyResize(e.id, e.term.cols, e.term.rows); } catch (x) { /* 레이아웃 전 */ }
   }
   // 활성 터미널만 보이고(나머지는 숨김, WebGL 해제), 보일 때 맞춤·재그리기. 처음 보일 때 open(숨겨진 채로 열면 글자 크기를 못 잼).
   function showActive(focus) {
+    if (detailOpen) return; // 상세가 열려 있으면 터미널을 그리지 않는다(닫을 때 closeDetail 이 다시 부른다)
     for (const e of terms.values()) {
       if (e.id === activeId) continue;
       e.host.hidden = true;
@@ -173,7 +179,7 @@
     for (const e of [...terms.values()]) if (!ids.has(e.id)) disposeTerm(e);
     wsList = r.list; activeId = ids.has(r.active) ? r.active : null;
     renderWs();
-    if (activeId !== prev || fresh.some((e) => e.id === activeId)) showActive(true);
+    if (activeId !== prev || fresh.some((e) => e.id === activeId)) { closeDetail(false); showActive(true); } // 상세가 터미널을 가린 채로는 xterm 을 열지 않는다(숨은 컨테이너에서 open 금지)
     ensureStarted(terms.get(activeId));
   }
   function renderWs() {
@@ -196,7 +202,7 @@
       c.append(l1, el('span', 's', w.path));
       main.append(el('span', 'dot ' + k), c);
       main.title = w.path;
-      main.addEventListener('click', async () => { try { await window.maru.activateWorkspace(w.id); } catch (x) { /* 무시 */ } syncWs(); });
+      main.addEventListener('click', async () => { closeDetail(true); try { await window.maru.activateWorkspace(w.id); } catch (x) { /* 무시 */ } syncWs(); });
       const x = el('button', 'ws-x', '×'); x.type = 'button'; x.setAttribute('aria-label', T('ws.close.aria', { title: w.title }));
       x.addEventListener('click', async () => { try { await window.maru.closeWorkspace(w.id); } catch (e) { /* 무시 */ } syncWs(); });
       row.append(main, x); box.append(row);
@@ -207,7 +213,7 @@
       if (t) t.focus();
     }
     $('ws-add').disabled = wsList.length >= Lib.WS_MAX;
-    $('term-empty').hidden = wsList.length > 0;
+    $('term-empty').hidden = wsList.length > 0 || detailOpen;
     const a = wsList.find((w) => w.id === activeId);
     $('term-name').textContent = a ? a.title : T('app.title');
     $('term-cwd').textContent = a ? a.path : '';
@@ -225,11 +231,12 @@
   window.maru.onWorkspacesChanged(() => syncWs());
   // ⌘W: 열린 모달·메뉴·팝오버가 있으면 그것을 닫고, 아니면 활성 작업 공간을 닫는다(확인은 main)
   window.maru.onCloseRequest(async () => {
-    const act = Lib.closeRequestAction({ overlayOpen: modalOpen() || menuOpen || updOpen, hasActive: !!activeId });
+    const act = Lib.closeRequestAction({ overlayOpen: modalOpen() || menuOpen || updOpen || detailOpen, hasActive: !!activeId });
     if (act === 'overlay') {
       if (modalOpen()) { const top = modals[modals.length - 1]; if (top.closable()) top.close(); }
       else if (menuOpen) closeMenu(true);
-      else closeUpdate(true);
+      else if (updOpen) closeUpdate(true);
+      else closeDetail(true);
     } else if (act === 'workspace') {
       try { await window.maru.closeWorkspace(activeId); } catch (x) { /* 무시 */ }
       syncWs();
@@ -311,6 +318,7 @@
       b.append(imp, body);
       if (!canFill) b.append(el('span', 'own', T('todo.own')));
       if (canFill) b.addEventListener('click', async () => {
+        closeDetail(false); // 상세가 열려 있으면 터미널로 돌아간 뒤 채운다
         let res = null;
         try { res = await window.maru.fillQuest(activeId || '', i, Lib.todoKey(it)); } catch (e) { /* 무시 */ }
         if (!res || !res.ok) note(T(Lib.fillNoticeKey(res && res.reason)));
@@ -318,6 +326,9 @@
       });
       q.append(b);
     });
+
+    renderProjects(p.projects);
+    if (detailOpen) fetchDetail(false);
 
     const sk = $('skills'); sk.replaceChildren();
     for (const n of p.skills) sk.append(el('span', 'chip', n));
@@ -329,6 +340,193 @@
       const row = el('div', 'brief'); row.append(el('span', 'at', fmtAt(e.at)), el('span', '', T('ev.' + e.code, { n: e.n }))); br.append(row);
     }
   }
+
+  // ---- 프로젝트: 왼쪽 목록(카테고리 > 프로젝트)과 가운데 상세 ----
+  // 모든 문구는 textContent 로만 넣는다. 키는 main 의 목록에서 온 값이고, 상태 변경·이어서 하기는 main 이 키를 다시 대조한다.
+  let projView = { open: [], done: [], doneCount: 0 };
+  let doneOpen = false; // 접힘 상태는 저장하지 않는다
+  const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  function projTitle(it) { return it.kind === 'unclassified' ? T('proj.unclassified') : it.title; }
+  function projRow(it) {
+    const b = el('button', 'proj' + (it.kind === 'unclassified' ? ' unc' : '') + (it.key === detailKey ? ' on' : '')); b.type = 'button'; b.dataset.key = it.key;
+    const name = projTitle(it);
+    let cnt;
+    if (it.status === 'done') cnt = el('span', 'cnt', it.doneAt || '');
+    else if (it.needsCheck) cnt = el('span', 'cnt check', T('proj.check'));
+    else cnt = el('span', 'cnt', T('proj.todos', { n: it.openTodos }));
+    b.append(el('span', 'pt', name), cnt);
+    b.title = name;
+    if (it.key === detailKey) b.setAttribute('aria-current', 'true');
+    b.setAttribute('aria-label', T('proj.row.aria', { title: name, state: cnt.textContent }));
+    b.addEventListener('click', () => openDetail(it.key));
+    return b;
+  }
+  function fillGroups(box, groups) {
+    for (const g of groups) { box.append(el('div', 'proj-cat', g.tag)); for (const it of g.items) box.append(projRow(it)); }
+  }
+  function renderProjects(pv) {
+    projView = pv && Array.isArray(pv.open) && Array.isArray(pv.done) ? pv : { open: [], done: [], doneCount: 0 };
+    const card = $('proj-card'); const f = document.activeElement;
+    const refocus = f && card.contains(f) ? (f.dataset.key ? 'k:' + f.dataset.key : f.id === 'proj-done-toggle' ? 't' : null) : null;
+    const box = $('projects'); box.replaceChildren();
+    if (!projView.open.length) box.append(el('div', 'empty', T('proj.empty')));
+    fillGroups(box, projView.open);
+    const n = projView.doneCount | 0;
+    const tg = $('proj-done-toggle'); tg.hidden = n === 0; tg.textContent = T('proj.done.toggle', { n });
+    tg.setAttribute('aria-label', T('proj.done.toggle', { n }) + ' — ' + T('proj.done.aria'));
+    tg.setAttribute('aria-expanded', String(doneOpen && n > 0));
+    const done = $('projects-done'); done.replaceChildren(); done.hidden = !doneOpen || n === 0;
+    if (!done.hidden) fillGroups(done, projView.done);
+    if (refocus) {
+      const t = refocus === 't' ? tg : [...card.querySelectorAll('.proj')].find((x) => 'k:' + x.dataset.key === refocus);
+      if (t && !t.hidden) t.focus();
+    }
+  }
+  $('proj-done-toggle').addEventListener('click', () => { doneOpen = !doneOpen; if (lastPanels) renderProjects(lastPanels.projects); $('proj-done-toggle').focus(); });
+
+  function openDetail(key) {
+    detailKey = key; detailOpen = true; detail = null; detailSig = '';
+    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = false;
+    $('pd-note').textContent = '';
+    if (lastPanels) renderProjects(lastPanels.projects);
+    fetchDetail(true);
+  }
+  // 시험 전용: 첫 프로젝트(없으면 첫 '분류 안 됨')의 상세를 연다
+  function openFirstProject() {
+    const all = projView.open.flatMap((g) => g.items);
+    const it = all.find((x) => x.kind === 'project') || all[0];
+    if (it) openDetail(it.key);
+  }
+  function closeDetail(refocus) {
+    if (!detailOpen) return;
+    detailOpen = false; detailKey = null; detail = null; detailSig = ''; detailSeq++;
+    $('proj-detail').hidden = true; $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
+    if (lastPanels) renderProjects(lastPanels.projects);
+    showActive(false); // 숨겨 둔 동안 바뀐 크기를 다시 맞추고 그린다(pty 는 그대로 살아 있다)
+    if (refocus) focusTerm();
+  }
+  async function fetchDetail(first) {
+    const my = ++detailSeq; const key = detailKey;
+    let d = null;
+    try { d = await window.maru.getProjectDetail(key); } catch (x) { d = null; }
+    if (my !== detailSeq || !detailOpen || key !== detailKey) return;
+    if (!d || d.key !== key) { closeDetail(true); return; } // 합쳐졌거나 사라진 프로젝트
+    const sig = JSON.stringify(d);
+    if (sig === detailSig && !first) return;
+    detailSig = sig; detail = d; renderDetail(first);
+  }
+  function detailActions(d) {
+    const acts = $('pd-actions'); acts.replaceChildren();
+    if (d.kind !== 'project') return;
+    const btn = (label, fn, cls, k) => { const b = el('button', 'btn' + (cls ? ' ' + cls : ''), label); b.type = 'button'; b.dataset.k = k; b.addEventListener('click', fn); acts.append(b); return b; };
+    btn(T('proj.act.continue'), doContinue, 'primary', 'continue');
+    btn(T(d.status === 'done' ? 'proj.act.reopen' : 'proj.act.done'), () => setProjStatus(d.status === 'done' ? 'open' : 'done'), '', 'status');
+    btn(T('proj.act.rename'), () => openProjDialog('rename'), '', 'rename');
+    if (d.status === 'open') { const m = btn(T('proj.act.merge'), () => openProjDialog('merge'), '', 'merge'); if (!d.mergeTargets.length) m.title = T('proj.merge.none'); }
+  }
+  function renderDetail(focusTitle) {
+    const d = detail; if (!d) return;
+    const f = document.activeElement; const had = f && $('pd-actions').contains(f) ? f.dataset.k : null;
+    $('proj-detail').setAttribute('aria-label', T('proj.detail.aria'));
+    $('pd-tag').textContent = d.tag;
+    $('pd-title').textContent = d.kind === 'unclassified' ? T('proj.unclassified') : d.title;
+    const st = $('pd-status'); st.hidden = d.kind !== 'project';
+    st.className = 'pill ' + (d.status === 'done' ? 'ok' : 'open'); st.textContent = T(d.status === 'done' ? 'proj.status.done' : 'proj.status.open', { date: d.doneAt || '' }).trim();
+    $('pd-meta').textContent = d.lastDay ? T('proj.meta', { date: d.lastDay, n: d.records }) : T('proj.meta.none');
+    const sg = $('pd-suggest'); sg.hidden = !(d.needsCheck && d.status === 'open');
+    if (!sg.hidden) $('pd-suggest-text').textContent = T('proj.suggest', { days: Lib.daysBetween(todayStr(), d.lastDay) });
+    $('pd-suggest-btn').hidden = d.kind !== 'project';
+    const td = $('pd-todos'); td.replaceChildren();
+    if (!d.todos.length) td.append(el('div', 'empty', T('proj.none')));
+    for (const t of d.todos) {
+      const r = el('div', 'pd-todo'); const imp = el('span', 'imp');
+      if (Lib.todoStarred(t.importance)) { imp.textContent = '★'; imp.title = T('todo.imp'); imp.setAttribute('aria-label', imp.title); }
+      r.append(imp, el('span', '', t.title)); td.append(r);
+    }
+    const lg = $('pd-log'); lg.replaceChildren();
+    if (!d.log.length) lg.append(el('div', 'empty', T('proj.none')));
+    for (const e of d.log) {
+      const r = el('div', 'pd-row'); r.append(el('span', 'd', e.day), el('span', 'k k-' + e.kind, T('proj.kind.' + e.kind)), el('span', 'x', e.text)); lg.append(r);
+    }
+    const mm = $('pd-mem'); mm.replaceChildren();
+    if (!d.memories.length) mm.append(el('span', 'empty', T('proj.none')));
+    for (const m of d.memories) { const c = el('span', 'chip', m.name); if (m.description) c.title = m.description; mm.append(c); }
+    detailActions(d);
+    if (had) { const n = $('pd-actions').querySelector('[data-k="' + had + '"]'); if (n) n.focus(); }
+    else if (focusTitle) $('pd-title').focus();
+  }
+  $('pd-close').addEventListener('click', () => closeDetail(true));
+  $('pd-suggest-btn').addEventListener('click', () => setProjStatus('done'));
+  function projErr(res) { return T(res && res.reason === 'save' ? 'proj.err.save' : res && res.reason === 'size' ? 'proj.err.size' : 'proj.err.invalid'); }
+  async function setProjStatus(status) {
+    if (!detail) return;
+    let res = null; try { res = await window.maru.setProjectStatus(detail.key, status); } catch (x) { res = null; }
+    $('pd-note').textContent = res && res.ok ? '' : projErr(res);
+    await poll(); fetchDetail(false);
+  }
+  async function doContinue() {
+    if (!detail) return;
+    let res = null; try { res = await window.maru.continueProject(activeId || '', detail.key, detail.title); } catch (x) { res = null; }
+    if (res && res.ok) { closeDetail(true); return; } // 입력줄에 채웠다(Enter 는 사용자가)
+    $('pd-note').textContent = T(Lib.fillNoticeKey(res && res.reason));
+  }
+
+  // 이름 바꾸기 / 합치기 대화상자
+  let pjMode = 'rename'; let pjPick = null; let pjBusy = false;
+  function renderPjPick() {
+    const seg = $('pj-pick'); seg.replaceChildren();
+    const targets = detail ? detail.mergeTargets : [];
+    targets.forEach((t, i) => {
+      const on = pjPick === t.key;
+      const b = el('button', 'seg-b' + (on ? ' on' : ''), t.title); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(on));
+      b.tabIndex = on || (pjPick === null && i === 0) ? 0 : -1;
+      b.addEventListener('click', () => { pjPick = t.key; renderPjPick(); [...seg.children][i].focus(); });
+      b.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        e.preventDefault();
+        const j = (i + (e.key === 'ArrowDown' ? 1 : -1) + targets.length) % targets.length;
+        pjPick = targets[j].key; renderPjPick(); [...seg.children][j].focus();
+      });
+      seg.append(b);
+    });
+    $('pj-ok').disabled = pjMode === 'merge' && pjPick === null;
+  }
+  function openProjDialog(mode) {
+    if (!detail || detail.kind !== 'project' || modalOpen()) return;
+    pjMode = mode; pjPick = null; pjBusy = false;
+    const rename = mode === 'rename';
+    $('pj-title').textContent = T(rename ? 'proj.rename.title' : 'proj.merge.title');
+    $('pj-name-wrap').hidden = !rename; $('pj-pick-wrap').hidden = rename;
+    const none = !rename && !detail.mergeTargets.length;
+    $('pj-hint').textContent = rename ? T('proj.rename.hint') : T(none ? 'proj.merge.none' : 'proj.merge.hint');
+    $('pj-err').textContent = '';
+    $('pj-ok').textContent = T(rename ? 'common.save' : 'proj.merge.ok'); $('pj-ok').disabled = none;
+    if (rename) { $('pj-input').value = detail.title; } else renderPjPick();
+    openModal($('dlg-proj'), rename ? $('pj-input') : ($('pj-pick').querySelector('.seg-b') || $('pj-cancel')), { closable: () => !pjBusy });
+    if (rename) $('pj-input').select();
+  }
+  async function submitProjDialog() {
+    if (pjBusy || !detail) return;
+    let res = null;
+    if (pjMode === 'rename') {
+      const name = Lib.cleanProjectTitle($('pj-input').value);
+      if (!name) { $('pj-err').textContent = T('proj.rename.err'); $('pj-input').focus(); return; }
+      pjBusy = true; $('pj-ok').disabled = true;
+      try { res = await window.maru.renameProject(detail.key, name); } catch (x) { res = null; }
+    } else {
+      if (pjPick === null) return;
+      pjBusy = true; $('pj-ok').disabled = true;
+      try { res = await window.maru.mergeProject(detail.key, pjPick); } catch (x) { res = null; }
+    }
+    pjBusy = false; $('pj-ok').disabled = false;
+    if (!res || !res.ok) { $('pj-err').textContent = res && res.reason === 'title' ? T('proj.rename.err') : projErr(res); return; }
+    if (pjMode === 'merge') { detailKey = pjPick; detail = null; detailSig = ''; }
+    closeModal($('dlg-proj'));
+    await poll(); fetchDetail(true);
+  }
+  $('pj-ok').addEventListener('click', submitProjDialog);
+  $('pj-cancel').addEventListener('click', () => { if (!pjBusy) closeModal($('dlg-proj')); });
+  $('pj-input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitProjDialog(); } });
 
   // ---- 상태 링 움직임(lib.js stepRing 으로 속도가 부드럽게 바뀐다) ----
   let ringMode = 'none'; let ringSt = Lib.ringInit(); let ringRaf = 0; let ringLast = 0;
@@ -390,6 +588,7 @@
     applyStatic();
     if (lastPanels) renderStatic(lastPanels);
     wsKey = null; renderWs();
+    if (detailOpen && detail) renderDetail(false);
     if (setRows) renderSettings();
     if (!$('pop-update').hidden) renderUpdate();
     renderLangSeg();
@@ -715,6 +914,7 @@
       if (top.closable()) top.close();
     } else if (menuOpen) { e.preventDefault(); closeMenu(true); }
     else if (updOpen) { e.preventDefault(); closeUpdate(true); }
+    else if (detailOpen) { e.preventDefault(); closeDetail(true); } // 프로젝트 상세 -> 터미널 복귀
   }, true);
   document.addEventListener('mousedown', (e) => {
     const t = e.target;
@@ -741,7 +941,7 @@
     else if (init && init.uiOpen === 'settings') openSettings();
     else if (init && init.uiOpen === 'update') openUpdate();
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll);
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
     setInterval(syncWs, 1000); // 상태 파일은 이벤트가 없으므로 주기적으로 읽는다
   }
