@@ -120,7 +120,7 @@ button.todo:hover,button.todo:focus-visible{border-color:var(--or);background:va
 .warn{margin:12px 16px 0;padding:10px 14px;border:1px solid var(--or);border-radius:8px;background:var(--sel);color:var(--or2);font-size:13px}
 .warn[hidden]{display:none}
 /* 한글 단어 중간 줄바꿈 방지(긴 영문·경로는 anywhere 로 줄바꿈) */
-.card,.quest,.todo,.todo .body,.brief,.status-sub,.empty,.ws,.party-row,.growth-row,.warn,.proj-detail{word-break:keep-all;overflow-wrap:anywhere}
+.card,.quest,.todo,.todo .body,.brief,.status-sub,.empty,.ws,.party-row,.sq-head,.growth-row,.warn,.proj-detail{word-break:keep-all;overflow-wrap:anywhere}
 .quest .num,.brief .at,.lv,.chip{flex:none;white-space:nowrap;overflow-wrap:normal}
 
 .core.waiting{border-color:var(--or);box-shadow:0 0 0 1px var(--or),0 0 24px rgba(255,138,42,.35)}
@@ -277,6 +277,34 @@ html[lang="en"] .card,html[lang="en"] .quest,html[lang="en"] .todo,html[lang="en
 #pj-input:focus{border-color:var(--or);outline:none;box-shadow:0 0 0 2px rgba(255,138,42,.25)}
 #pj-input[hidden],#pj-name-wrap[hidden],#pj-pick-wrap[hidden]{display:none}
 
+/* 스쿼드: 기본 팀 소제목 + 접을 수 있는 스쿼드 묶음 */
+#party{gap:8px}
+.sq-base{font-size:11px;font-weight:600;letter-spacing:.5px;color:var(--mute)}
+.sq-group{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);padding-top:6px}
+.sq-head{display:flex;align-items:center;gap:6px;width:100%;min-height:26px;padding:2px 4px;margin:0 -4px;border:0;border-radius:6px;background:transparent;color:var(--soft);font:inherit;font-size:12px;font-weight:600;text-align:left;cursor:pointer}
+.sq-head:hover,.sq-head:focus-visible{color:var(--ink);background:var(--sel);outline:none}
+.sq-head:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
+.sq-caret{flex:none;width:10px;font-size:10px;color:var(--mute)}
+.sq-name{min-width:0;overflow-wrap:anywhere}
+.sq-tag{flex:none;font-size:10px;font-weight:500;color:var(--mute);border:1px solid #4A3A2C;border-radius:999px;padding:0 6px;white-space:nowrap}
+.sq-dot{flex:none;width:6px;height:6px;margin-left:auto;border-radius:50%;background:var(--or);animation:breathe 1.6s ease-in-out infinite}
+.sq-group.active .sq-name{color:var(--or)}
+.sq-body{padding-left:10px}
+.party-row.sq-lead b{color:var(--ink)}
+.party-row.sq-lead.working b{color:var(--or)}
+/* 할 일 완료/안 함 단추: 본문 단추와 따로 둔다(단추 안의 단추 금지) */
+.todo-row{display:flex;align-items:stretch;gap:4px}
+.todo-row .todo-main{flex:1 1 auto;min-width:0}
+.todo-acts{flex:none;display:flex;flex-direction:column;justify-content:center;gap:4px}
+.pd-todo .todo-acts{flex-direction:row}
+.todo-act{width:26px;height:24px;padding:0;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--mute);font:inherit;font-size:13px;line-height:1;cursor:pointer;opacity:.65}
+.todo-row:hover .todo-act,.todo-row:focus-within .todo-act,.pd-todo:hover .todo-act,.pd-todo:focus-within .todo-act,.todo-act:focus-visible{opacity:1}
+.todo-act:hover,.todo-act:focus-visible{border-color:var(--or);color:var(--or);background:var(--sel);outline:none}
+.todo-act:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
+.pd-todo .pd-todo-t{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.note-undo{margin:0;padding:0 2px;border:0;background:transparent;color:var(--or2);font:inherit;text-decoration:underline;cursor:pointer}
+.note-undo:hover,.note-undo:focus-visible{color:var(--or);outline:none}
+.note-undo:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3);border-radius:3px}
 /* 움직임 줄이기: CSS 애니메이션·전환을 끄고 상태는 색·글자로만 보인다(링 움직임은 renderer.js 가 따로 멈춘다) */
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.party-row.working::after{background:rgba(255,138,42,.4)}}
 .pill.open{color:var(--or2);border-color:#5A4630}

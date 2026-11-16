@@ -11,7 +11,7 @@ const U = require('./updater');
 const SR = require('./tools/sign-release');
 
 const CLT_GIT = '/Library/Developer/CommandLineTools/usr/bin/git';
-const SCRATCH = '/private/tmp/claude-501/-Users-evan/6054e0aa-03e5-4050-b22e-c186ad026154/scratchpad';
+const SCRATCH = process.env.MARU_TEST_TMP || require('os').tmpdir();
 fs.mkdirSync(SCRATCH, { recursive: true });
 const TMP = fs.mkdtempSync(path.join(SCRATCH, 'updater-test-'));
 

@@ -171,7 +171,7 @@ function cleanOldStateFiles() {
 }
 const INDEX_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 let cache = {
-  status: null, todos: [], skills: [], briefing: [], battery: null, disk: null,
+  status: null, todosRaw: [], todos: [], skills: [], briefing: [], battery: null, disk: null,
 };
 // 프로젝트·기억 캐시는 refresh() 가 통째로 바꾸는 cache 와 따로 둔다(예전에 cache = {...} 교체가 memMetasAt 을 지워 관련 기억이 항상 비던 회귀 방지)
 const proj = { raw: { registry: [], entries: [] }, list: [], view: { open: [], done: [], doneCount: 0 } };
@@ -215,6 +215,32 @@ function readProjectsRaw() {
 const findProject = (key) => (typeof key === 'string' && key.length <= 40 ? proj.list.find((x) => x.key === key) || null : null);
 const projectMetas = () => memMetasCache.get();
 
+// ---- 할 일 완료/안 함 표시(앱 소유 data/todo-done.txt; data/todos.txt 는 셸 소유라 건드리지 않는다) ----
+const nowSec = () => Math.floor(Date.now() / 1000);
+const todoDoneFile = () => path.join(ROOT, 'data', 'todo-done.txt');
+let todoDone = []; let todoDoneLoaded = false;
+function loadTodoDone() {
+  if (!ROOT) return;
+  const r = L.readTodoDoneFile(todoDoneFile());
+  if (r.status === 'error') return; // EMFILE·EACCES 같은 일시 오류: 메모리 값을 그대로 두고 파일은 .bak 으로 치우지 않는다
+  if (r.status === 'corrupt' && PERSIST) L.backupCorruptFile(todoDoneFile()); // 시험·스모크 실행은 실제 data 를 건드리지 않는다
+  todoDone = r.data; todoDoneLoaded = true;
+}
+function applyTodoFilter() { cache.todos = L.filterTodos(cache.todosRaw, todoDone, nowSec()); }
+// 새 기록 목록을 쓰고(PERSIST 가 아니면 메모리에만) 화면용 목록·프로젝트 요약을 다시 만든다
+function commitTodoDone(next) {
+  if (PERSIST && (!ROOT || !L.saveTodoDone(todoDoneFile(), next))) return false;
+  todoDone = next; applyTodoFilter(); recomputeProjects(); refreshTray();
+  return true;
+}
+const recentMarks = new Map(); // 되돌리기용: main 이 방금 쓴 줄만 기억한다(id -> entries)
+function rememberMarks(entries) {
+  const id = crypto.randomBytes(8).toString('hex');
+  if (recentMarks.size >= 20) recentMarks.delete(recentMarks.keys().next().value);
+  recentMarks.set(id, entries);
+  return id;
+}
+
 // ---- 데이터 수집(고정 경로만) ----
 function run(file, args, opts = {}) {
   return new Promise((resolve) => {
@@ -257,7 +283,8 @@ async function refresh() {
     });
     cache = {
       status,
-      todos: L.resolveTodos(todoRes, sug), // todos.txt 우선, 없거나 유효 항목이 없으면 suggestions.txt
+      todosRaw: L.resolveTodos(todoRes, sug), // todos.txt 우선, 없거나 유효 항목이 없으면 suggestions.txt. 화면·번호·⌘목록은 완료 표시를 걸러 낸 todos 를 쓴다
+      todos: [],
       skills: L.mergeSkillNames(
         skillDirs(path.join(os.homedir(), '.claude', 'skills')),
         skillDirs(path.join(ROOT, '.claude', 'skills')),
@@ -266,6 +293,8 @@ async function refresh() {
       battery: batt ? L.parseBattery(batt) : null,
       disk: df ? L.parseDiskFree(df) : null,
     };
+    if (PERSIST || !todoDoneLoaded) loadTodoDone(); // 시험·스모크에서는 처음 한 번만 읽는다(메모리 변경을 덮지 않게)
+    applyTodoFilter();
     loadProjState();
     if (PERSIST || !projUiLoaded) loadProjUi(); // 시험·스모크에서는 처음 한 번만 읽는다(메모리 변경을 덮지 않게)
     readProjectsRaw();
@@ -275,12 +304,47 @@ async function refresh() {
   } finally { refreshing = false; }
 }
 
+// ---- 스쿼드: scripts/squads.py meta 한 줄 JSON 을 엄격 검증해 캐시한다. 실패·없음이면 빈 목록(앱은 그대로 동작) ----
+const PY_CANDS = ['/Library/Developer/CommandLineTools/usr/bin/python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3']; // 저장소 스크립트(lib.sh)와 같은 도구 폴더 순서. /usr/bin/python3 셔임은 쓰지 않는다
+function pythonBin() {
+  for (const c of PY_CANDS) { try { fs.accessSync(c, fs.constants.X_OK); if (fs.statSync(c).isFile()) return c; } catch { /* 다음 후보 */ } }
+  return null;
+}
+const FAKE_SQUADS = L.parseSquadMeta(JSON.stringify({ squads: [ // 시험 전용(MARU_APP_UI=party)
+  { slug: 'dev', name: '개발', description: '', source: 'builtin', lead: { agent: 'sq-dev-lead', model: 'sonnet' }, members: [
+    { role: 'builder', agent: 'sq-dev-builder', model: 'sonnet' }, { role: 'tester', agent: 'sq-dev-tester', model: 'haiku' }, { role: 'reviewer', agent: 'sq-dev-reviewer', model: 'opus' }] },
+  { slug: 'notes', name: '글쓰기', description: '', source: 'personal', lead: { agent: 'sq-notes-lead', model: 'inherit' }, members: [{ role: 'editor', agent: 'sq-notes-editor', model: 'sonnet' }] },
+] }));
+let squads = []; let squadsBusy = false;
+async function refreshSquads() {
+  if (squadsBusy || TEST_UI === 'party') return;
+  squadsBusy = true;
+  try {
+    const script = ROOT ? path.join(ROOT, 'scripts', 'squads.py') : null;
+    const py = script && isFileSafe(script) ? pythonBin() : null;
+    const out = py ? await run(py, ['-I', script, 'meta'], { timeout: 3000, maxBuffer: L.SQUAD_META_MAX_BYTES, killSignal: 'SIGKILL', env: childEnv() }) : null;
+    squads = out ? L.parseSquadMeta(out) : [];
+  } catch { squads = []; } finally { squadsBusy = false; }
+}
+// 작업 공간에서 claude 대신 실행할 래퍼: 저장소 scripts/maru-claude.sh 가 정규 실행 파일(링크 아님, 소유자·쓰기 권한 검사 통과)일 때만
+function claudeWrapper() {
+  if (!ROOT) return null;
+  try {
+    const f = path.join(ROOT, 'scripts', 'maru-claude.sh');
+    const st = fs.lstatSync(f);
+    if (!st.isFile() || !safeOwned(st)) return null;
+    fs.accessSync(f, fs.constants.X_OK);
+    return f;
+  } catch { return null; }
+}
+
 function partyView() {
   const lead = leadModel(wsOf(activeId));
   return [{ name: null, roleKey: 'lead', model: lead, lead: true }, ...partyCache.get().map((m) => (m.model === 'inherit' ? { ...m, model: lead } : m))];
 }
 function panels() {
   const st = cache.status || {};
+  const party = partyView();
   const lv = L.levelInfo(typeof st.memoryFiles === 'number' ? st.memoryFiles : 0);
   return {
     rootMissing: !ROOT,
@@ -295,8 +359,9 @@ function panels() {
     briefing: cache.briefing,
     battery: cache.battery,
     disk: cache.disk,
-    party: partyView(), // name null = 앱 이름(i18n app.title)
-    subs: TEST_UI === 'party' ? [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }] : (wsOf(activeId) ? readSubs(wsOf(activeId)) : []),
+    party, // 기본 팀. name null = 앱 이름(i18n app.title)
+    squads: L.squadView(TEST_UI === 'party' ? FAKE_SQUADS : squads, party[0].model), // 스쿼드별 묶음(총괄 + 팀원)
+    subs: TEST_UI === 'party' ? [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }, { type: 'sq-dev-lead', count: 1 }, { type: 'sq-dev-builder', count: 2 }, { type: 'sq-ghost-lead', count: 1 }] : (wsOf(activeId) ? readSubs(wsOf(activeId)) : []),
     calendar: profile && profile.calendar && cal.ok ? cal.events : [], // 메모리에만 둔다(디스크·로그 금지)
     updateAvailable: upd.view.status === 'available',
   };
@@ -349,7 +414,7 @@ function spawnPty(w, cols, rows) {
   // 스모크·시험에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
   if (w.fx) { self.write('echo ' + SMOKE_LINE + '; echo fixture-' + w.fx.name + '\r'); writeFxState(w); }
   else if (SMOKE) self.write('echo ' + SMOKE_LINE + '\r');
-  else if (ROOT) self.write('command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec claude\r');
+  else if (ROOT) self.write(L.claudeLaunchCommand(sid, claudeWrapper())); // 래퍼가 있으면 스쿼드를 실은 claude, 없으면 그냥 claude
   wsChanged(false);
   return true;
 }
@@ -894,6 +959,26 @@ ipcMain.handle('quest:fill', (e, id, index, shown) => {
   if (!item.prompt) return { ok: false, reason: 'no-prompt' }; // 사용자가 직접 할 일
   return writePrompt(w, item.prompt);
 });
+// 할 일 완료/안 함: 렌더러가 본 항목(shown)이 main 의 index 번 항목과 같을 때만. 기록하는 태그·제목은 항상 main 이 가진 항목의 값이다.
+ipcMain.handle('todos:mark', (e, index, shown, kind) => {
+  if (!fromMain(e) || !int(index, 0, Math.max(0, cache.todos.length - 1)) || (kind !== 'done' && kind !== 'skip') || typeof shown !== 'string') return { ok: false, reason: 'invalid' };
+  const item = L.matchTodo(cache.todos, index, shown);
+  if (!item) return { ok: false, reason: 'stale' };
+  const entry = L.makeTodoDone(item, kind, nowSec());
+  if (!entry) return { ok: false, reason: 'unsupported' }; // | · 개행 · 제어문자가 든 제목은 기록하지 않는다
+  if (PERSIST) loadTodoDone(); // 파일을 직접 고친 경우를 반영
+  if (!commitTodoDone(L.addTodoDone(todoDone, [entry], nowSec()))) return { ok: false, reason: 'save' };
+  return { ok: true, id: rememberMarks([entry]) };
+});
+// 되돌리기: main 이 방금 쓴 그 줄만 파일에서 뺀다(id 는 main 이 준 것만)
+ipcMain.handle('todos:undo', (e, id) => {
+  if (!fromMain(e) || typeof id !== 'string' || !recentMarks.has(id)) return { ok: false, reason: 'invalid' };
+  const entries = recentMarks.get(id);
+  if (PERSIST) loadTodoDone();
+  if (!commitTodoDone(L.removeTodoDone(todoDone, entries))) return { ok: false, reason: 'save' };
+  recentMarks.delete(id);
+  return { ok: true };
+});
 // 입력줄에 한 줄을 채운다(자동 Enter 없음). 할 일 클릭과 프로젝트 "이어서 하기"가 같은 경로·같은 안전장치를 쓴다.
 function writePrompt(w, raw) {
   if (!w.term) return { ok: false, reason: 'no-term' };
@@ -935,11 +1020,38 @@ function commitProjState(next) {
   projState = next; recomputeProjects();
   return { ok: true };
 }
-ipcMain.handle('projects:set-status', (e, key, status) => {
+// "완료로 옮기기": 남은 일이 있으면 네이티브 창으로 먼저 알리고, 승인하면 그 항목들을 '안 함'으로 기록한 뒤 완료 처리한다.
+// "다시 열기"는 그 기록을 되돌리지 않는다(되돌아오려면 회고가 다시 올려야 하고, 기록은 7일 뒤 풀린다).
+let projDoneAsking = false;
+const todoMarkId = (item) => item.tag + '\n' + (item.project || '') + '\n' + L.todoKey(item); // 같은 항목인지 가르는 키(태그·프로젝트·제목·프롬프트)
+ipcMain.handle('projects:set-status', async (e, key, status) => {
   const s = fromMain(e) ? findProject(key) : null;
   if (!s || s.kind !== 'project' || (status !== 'open' && status !== 'done')) return { ok: false, reason: 'invalid' };
   loadProjState(); // 파일을 직접 고친 경우를 반영
-  return commitProjState(L.stateWithStatus(projState, s.key, status, todayStr()));
+  const pend = status === 'done' ? L.projectOpenTodos({ summary: s, registry: proj.raw.registry, state: projState, todos: cache.todos }) : [];
+  if (!pend.length) return commitProjState(L.stateWithStatus(projState, s.key, status, todayStr()));
+  if (projDoneAsking) return { ok: false, reason: 'busy' };
+  projDoneAsking = true;
+  try {
+    const shownKeys = new Set(pend.map((p) => todoMarkId(p.item))); // 창을 띄운 시점에 보여 준 항목만 기록한다
+    const ans = await box({ type: 'warning', buttons: [tr('dlg.projDone.ok'), tr('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message: tr('dlg.projDone.title', { n: pend.length }), detail: tr('dlg.projDone.detail') });
+    if (ans.response !== 0) return { ok: false, reason: 'cancel' };
+    const s2 = findProject(key); // 묻는 동안 목록이 바뀌었을 수 있다: 다시 대조하고 그 시점의 남은 일을 쓴다
+    if (!s2 || s2.kind !== 'project') return { ok: false, reason: 'invalid' };
+    loadProjState();
+    const t = nowSec();
+    const nextState = L.stateWithStatus(projState, s2.key, 'done', todayStr());
+    if (!nextState || !L.projectStateFits(nextState)) return { ok: false, reason: 'size' }; // 저장할 수 없는 상태면 표시를 쓰기 전에 거부한다
+    const entries = L.projectOpenTodos({ summary: s2, registry: proj.raw.registry, state: projState, todos: cache.todos }).filter((p) => shownKeys.has(todoMarkId(p.item))).map((p) => L.makeTodoDone(p.item, 'skip', t)).filter(Boolean);
+    if (PERSIST) loadTodoDone();
+    if (entries.length && !commitTodoDone(L.addTodoDone(todoDone, entries, t))) return { ok: false, reason: 'save' };
+    const r = commitProjState(nextState);
+    if (!r.ok && entries.length) { // 완료 처리가 실패하면 방금 쓴 줄을 거둔다. 거두지도 못하면 따로 알린다
+      if (PERSIST) loadTodoDone();
+      if (!commitTodoDone(L.removeTodoDone(todoDone, entries))) return { ok: false, reason: 'rollback' };
+    }
+    return r;
+  } finally { projDoneAsking = false; }
 });
 ipcMain.handle('projects:rename', (e, key, title) => {
   const s = fromMain(e) ? findProject(key) : null;
@@ -1109,6 +1221,7 @@ app.whenReady().then(() => {
   createTray();
   refresh();
   setInterval(refresh, REFRESH_MS).unref();
+  refreshSquads(); setInterval(refreshSquads, 60000).unref(); // 스쿼드 목록은 시작 때와 60초마다(1초 폴링에 넣지 않는다)
   // 훅이 쓰는 상태 파일은 이벤트가 없으므로 1초마다 읽어 트레이를 갱신한다
   setInterval(() => {
     if (TEST_FX) for (const w of wsOrder()) if (w.term) writeFxState(w);

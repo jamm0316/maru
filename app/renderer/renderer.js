@@ -274,31 +274,98 @@
   }
 
   let lastPanels = null;
-  // 파티: 활성 작업 공간의 서브에이전트가 돌면 그 줄이 움직인다. 파티에 없는 종류는 임시 줄. 마루 줄은 세션이 busy 일 때.
-  // (subs 는 main 이 이미 검증했지만 형식을 다시 확인한다)
-  const SUB_TYPE = /^[A-Za-z0-9_:.-]{1,64}$/;
+  // 스쿼드 칸: 맨 위 "기본 팀"(마루 + scout/worker/expert) 아래에 스쿼드별 묶음(총괄 + 팀원). 서브에이전트가 돌면 agent_type 으로 줄을 찾아 움직인다.
+  // 목록에 없는 종류(sq-… 포함)는 기본 팀 맨 아래 임시 줄. 마루 줄은 세션이 busy 일 때. (subs·squads 는 main 이 이미 검증했지만 형식을 다시 확인한다)
+  const SQUAD_SLUG = /^[a-z0-9][a-z0-9-]{0,19}$/;
+  const squadUser = new Map(); // slug -> 사용자가 직접 정한 펼침(true)·접힘(false). 이 앱을 켜 둔 동안만 존중한다
+  function partyRow(label, suffix, model, n, cls, multi) {
+    const row = el('div', 'party-row' + (cls ? ' ' + cls : '') + (n ? ' working' : ''));
+    const l = el('span', 'pl'); l.append(el('span', 'pd'), el('b', '', label));
+    if (suffix) l.append(document.createTextNode(' ' + suffix));
+    const r = el('span', 'pr');
+    if (n) r.append(el('span', 'pw', n > 1 && multi ? T('squad.working.n', { n }) : T('squad.working')));
+    if (model) r.append(el('span', 'm', model));
+    row.append(l, r);
+    return row;
+  }
   function renderParty() {
     const p = lastPanels; const party = $('party');
     if (!p || !Array.isArray(p.party)) return;
-    const subs = new Map();
-    for (const s of Array.isArray(p.subs) ? p.subs : []) if (s && typeof s.type === 'string' && SUB_TYPE.test(s.type) && Number.isInteger(s.count) && s.count >= 1 && s.count <= 32) subs.set(s.type, s.count);
-    const known = new Set(p.party.map((m) => m.name));
-    const rows = p.party.map((m) => ({ m, n: m.lead ? (lastAgent === 'busy' ? 1 : 0) : (subs.get(m.name) || 0) }));
-    for (const [type, count] of subs) if (!known.has(type)) rows.push({ m: { name: type, roleKey: null, model: '' }, n: count });
-    const sig = JSON.stringify([rows, lang]);
+    const squads = (Array.isArray(p.squads) ? p.squads : []).filter((q) => q && typeof q.slug === 'string' && SQUAD_SLUG.test(q.slug) && typeof q.name === 'string' && Array.isArray(q.rows));
+    const { counts, extra } = Lib.matchSubs(p.subs, [...p.party.map((m) => m.name), ...squads.flatMap((q) => q.rows.map((r) => r.agent))]);
+    const base = p.party.map((m) => ({ m, n: m.lead ? (lastAgent === 'busy' ? 1 : 0) : (counts.get(m.name) || 0) }));
+    for (const x of extra) base.push({ m: { name: x.type, roleKey: null, model: '' }, n: x.count });
+    const groups = squads.map((q) => {
+      const rows = q.rows.map((r) => ({ r, n: counts.get(r.agent) || 0 }));
+      const active = rows.some((x) => x.n > 0);
+      return { q, rows, active, open: Lib.squadOpen(squadUser.get(q.slug), active) };
+    });
+    const sig = JSON.stringify([base, groups.map((g) => [g.q, g.rows.map((x) => x.n), g.active, g.open]), lang]);
     if (sig === partySig) return;
-    partySig = sig; party.replaceChildren();
-    for (const { m, n } of rows) {
-      const row = el('div', 'party-row' + (m.lead ? ' lead' : '') + (n ? ' working' : ''));
-      const l = el('span', 'pl'); l.append(el('span', 'pd'), el('b', '', m.name || T('app.title')));
-      if (m.roleKey) l.append(document.createTextNode(' ' + T('role.' + m.roleKey)));
-      const r = el('span', 'pr');
-      if (n) r.append(el('span', 'pw', n > 1 && !m.lead ? T('party.working.n', { n }) : T('party.working')));
-      if (m.model) r.append(el('span', 'm', m.model));
-      row.append(l, r); party.append(row);
+    partySig = sig;
+    const f = document.activeElement; const refocus = f && party.contains(f) && f.dataset.squad ? f.dataset.squad : null;
+    party.replaceChildren();
+    if (groups.length) party.append(el('div', 'sq-base', T('squad.base')));
+    for (const { m, n } of base) party.append(partyRow(m.name || T('app.title'), m.roleKey ? T('role.' + m.roleKey) : '', m.model, n, m.lead ? 'lead' : '', !m.lead));
+    for (const g of groups) {
+      const grp = el('div', 'sq-group' + (g.active ? ' active' : '')); grp.dataset.slug = g.q.slug;
+      const h = el('button', 'sq-head'); h.type = 'button'; h.dataset.squad = g.q.slug;
+      h.setAttribute('aria-expanded', String(g.open)); h.setAttribute('aria-controls', 'sq-body-' + g.q.slug);
+      h.setAttribute('aria-label', T('squad.head.aria', { name: g.q.name, n: Math.max(0, g.rows.length - 1) }) + (g.q.personal ? ' · ' + T('squad.personal.aria') : '') + (g.active ? ' · ' + T('squad.head.active') : ''));
+      h.append(el('span', 'sq-caret', g.open ? '▾' : '▸'), el('span', 'sq-name', g.q.name));
+      if (g.q.personal) h.append(el('span', 'sq-tag', T('squad.personal')));
+      if (g.active) h.append(el('span', 'sq-dot'));
+      h.addEventListener('click', () => { squadUser.set(g.q.slug, !g.open); partySig = ''; renderParty(); });
+      grp.append(h);
+      if (g.open) {
+        const body = el('div', 'sq-body stack gap10'); body.id = 'sq-body-' + g.q.slug;
+        for (const { r, n } of g.rows) body.append(partyRow(r.lead ? T('role.squadLead') : String(r.role || ''), '', typeof r.model === 'string' ? r.model : '', n, r.lead ? 'sq-lead' : '', true));
+        grp.append(body);
+      }
+      party.append(grp);
     }
+    if (refocus) { const t = [...party.querySelectorAll('.sq-head')].find((x) => x.dataset.squad === refocus); if (t) t.focus(); }
   }
   let partySig = '';
+  // ---- 할 일 완료/안 함: 카드(또는 상세 줄) 옆의 별도 단추 두 개. 본문 클릭(프롬프트 채우기)과 겹치지 않는다 ----
+  function todoActs(title, fn) {
+    const acts = el('span', 'todo-acts');
+    for (const kind of ['done', 'skip']) {
+      const b = el('button', 'todo-act ' + kind, kind === 'done' ? '✓' : '×'); b.type = 'button'; b.dataset.act = kind;
+      b.title = T('todo.' + kind); b.setAttribute('aria-label', T('todo.' + kind + '.aria', { title }));
+      b.addEventListener('click', () => fn(kind));
+      acts.append(b);
+    }
+    return acts;
+  }
+  const markTimers = new Map(); // 상자별 타이머(두 상자가 하나를 나눠 쓰면 먼저 뜬 쪽의 되돌리기 안내가 남는다)
+  const todoErr = (res) => T(res && res.reason === 'unsupported' ? 'todo.err.unsupported' : res && res.reason === 'save' ? 'todo.err.save' : 'todo.err.stale');
+  function clearMarkNote(box) {
+    clearTimeout(markTimers.get(box)); markTimers.delete(box);
+    const had = box.contains(document.activeElement);
+    box.replaceChildren();
+    if (had) focusTerm();
+  }
+  // 표시 직후의 한 줄 안내 "완료로 표시했습니다 · 되돌리기"(6초). 되돌리기는 main 이 방금 쓴 그 줄만 파일에서 뺀다
+  function markNote(box, kind, id) {
+    for (const b of [...markTimers.keys()]) if (b !== box) clearMarkNote(b); // 다른 상자의 안내는 먼저 거둔다
+    clearTimeout(markTimers.get(box)); clearTimeout(noteTimer); clearTimeout(projNoteTimer);
+    const undo = el('button', 'note-undo', T('todo.undo')); undo.type = 'button';
+    undo.addEventListener('click', async () => {
+      let res = null; try { res = await window.maru.undoTodoMark(id); } catch (x) { res = null; }
+      clearMarkNote(box);
+      if (!res || !res.ok) box.textContent = T('todo.err.undo');
+      await poll();
+    });
+    box.replaceChildren(el('span', '', T('todo.marked.' + kind) + ' · '), undo);
+    markTimers.set(box, setTimeout(() => clearMarkNote(box), 6000));
+  }
+  async function markTodo(idx, shown, kind, box, isDetail) {
+    let res = null; try { res = await window.maru.markTodo(idx, shown, kind); } catch (x) { res = null; }
+    if (!res || !res.ok) { clearMarkNote(box); clearTimeout(noteTimer); box.textContent = todoErr(res); if (!isDetail) noteTimer = setTimeout(() => { box.textContent = ''; }, 4000); await poll(); return; }
+    await poll(); // 즉시 목록에서 사라진다
+    markNote(box, kind, res.id);
+  }
   function renderStatic(p) {
     lastPanels = p;
     $('root-missing').hidden = !p.rootMissing;
@@ -328,13 +395,16 @@
       }
     }
 
-    const q = $('quests'); q.replaceChildren();
+    const q = $('quests');
+    const qf = document.activeElement; const fr = qf && q.contains(qf) ? qf.closest('.todo-row') : null; const refocusTodo = fr ? Number(fr.dataset.i) : null; const refocusKey = fr ? fr.dataset.k : null; const refocusAct = fr && qf.dataset.act ? qf.dataset.act : null;
+    q.replaceChildren();
     if (!p.todos.length) q.append(el('div', 'empty', T('todo.empty')));
     let prevTag = null;
     p.todos.forEach((it, i) => {
       if (it.tag !== prevTag) { prevTag = it.tag; q.append(el('div', 'tag-head', it.tag === '추천' ? T('todo.tag.suggest') : it.tag)); }
       const canFill = !!it.prompt;
-      const b = el(canFill ? 'button' : 'div', 'todo' + (canFill ? '' : ' manual'));
+      const rowEl = el('div', 'todo-row'); rowEl.dataset.i = String(i); rowEl.dataset.k = Lib.todoKey(it);
+      const b = el(canFill ? 'button' : 'div', 'todo todo-main' + (canFill ? '' : ' manual'));
       if (canFill) b.type = 'button';
       const body = el('span', 'body'); body.append(el('span', 't', it.title));
       if (canFill) { const pe = el('span', 'p', it.prompt); pe.title = it.prompt; body.append(pe); }
@@ -349,8 +419,17 @@
         if (!res || !res.ok) note(T(Lib.fillNoticeKey(res && res.reason)));
         focusTerm();
       });
-      q.append(b);
+      rowEl.append(b);
+      if (Lib.todoMarkable(it)) rowEl.append(todoActs(it.title, (kind) => markTodo(i, Lib.todoKey(it), kind, $('quest-note'), false)));
+      q.append(rowEl);
     });
+    if (refocusTodo !== null) { // 눌러서 사라진 항목이면 그 자리에 온 다음 항목의 본문(없으면 첫 단추)에 포커스를 둔다(연달아 Enter 로 다음 항목이 표시되지 않게)
+      const rows = [...q.querySelectorAll('.todo-row')];
+      const r = rows.find((x) => Number(x.dataset.i) === refocusTodo) || rows[rows.length - 1];
+      const same = r && r.dataset.k === refocusKey; // 같은 항목이 그대로면 누르던 단추에, 아니면(눌러서 사라짐) 다음 항목의 본문에
+      const t = r && ((same && refocusAct && r.querySelector('[data-act="' + refocusAct + '"]')) || (same && r.querySelector('button.todo-main')) || r.querySelector('button.todo-main') || r.querySelector('.todo-act'));
+      if (t) t.focus();
+    }
 
     renderProjects(p.projects);
     if (detailOpen) fetchDetail(false);
@@ -595,7 +674,9 @@
     for (const t of d.todos) {
       const r = el('div', 'pd-todo'); const imp = el('span', 'imp');
       if (Lib.todoStarred(t.importance)) { imp.textContent = '★'; imp.title = T('todo.imp'); imp.setAttribute('aria-label', imp.title); }
-      r.append(imp, el('span', '', t.title)); td.append(r);
+      r.append(imp, el('span', 'pd-todo-t', t.title));
+      if (t.markable === true && Number.isInteger(t.idx) && typeof t.shown === 'string') r.append(todoActs(t.title, (kind) => markTodo(t.idx, t.shown, kind, $('pd-note'), true)));
+      td.append(r);
     }
     const lg = $('pd-log'); lg.replaceChildren();
     if (!d.log.length) lg.append(el('div', 'empty', T('proj.none')));
@@ -611,11 +692,11 @@
   }
   $('pd-close').addEventListener('click', () => closeDetail(true));
   $('pd-suggest-btn').addEventListener('click', () => setProjStatus('done'));
-  function projErr(res) { return T(res && res.reason === 'save' ? 'proj.err.save' : res && res.reason === 'size' ? 'proj.err.size' : 'proj.err.invalid'); }
+  function projErr(res) { return T(res && res.reason === 'save' ? 'proj.err.save' : res && res.reason === 'size' ? 'proj.err.size' : res && res.reason === 'busy' ? 'proj.err.busy' : res && res.reason === 'rollback' ? 'proj.err.rollback' : 'proj.err.invalid'); }
   async function setProjStatus(status) {
     if (!detail) return;
     let res = null; try { res = await window.maru.setProjectStatus(detail.key, status); } catch (x) { res = null; }
-    $('pd-note').textContent = res && res.ok ? '' : projErr(res);
+    $('pd-note').textContent = res && (res.ok || res.reason === 'cancel') ? '' : projErr(res); // 취소는 오류가 아니다
     await poll(); fetchDetail(false);
   }
   async function doContinue() {

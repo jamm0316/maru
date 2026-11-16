@@ -105,6 +105,107 @@ function matchTodo(items, index, shown) {
   return typeof shown === 'string' && todoKey(items[index]) === shown ? items[index] : null;
 }
 
+// ---- 할 일 개별 완료/안 함 (앱 소유 파일 data/todo-done.txt) ----
+// 한 줄 `<epoch초>|<done|skip>|<태그 또는 태그/슬러그>|<제목>`(정확히 4칸). 최대 200줄, 14일 지난 줄은 쓸 때 지운다. 파일은 32768바이트(UTF-8)를 넘지 않게 오래된 줄부터 덜어 낸다. 화면은 최근 7일 줄과 최상위 태그·제목 키가 모두 같은 할 일을 걸러 낸다.
+const TODO_DONE_MAX = 200;
+const TODO_DONE_KEEP_SEC = 14 * 86400;
+const TODO_DONE_HIDE_SEC = 7 * 86400;
+// 셸 scripts/textclean.py 의 TODO_DONE_MAX_BYTES 와 반드시 같아야 한다(넘으면 셸이 파일 전체를 무시한다). 시험이 두 값을 대조한다.
+const TODO_DONE_MAX_BYTES = 32768;
+const TODO_DONE_KINDS = ['done', 'skip'];
+// 셸의 " ".join(title.split()).casefold() 의 근사: 공백 접기 + 소문자화(ß ς ſ 만 따로 처리). ASCII·한글은 같지만 모든 코드포인트에서 일치하지는 않는다
+function titleKey(title) {
+  if (typeof title !== 'string') return '';
+  return title.split(/\s+/).filter(Boolean).join(' ').toLowerCase().replace(/\u00df|\u1e9e/g, 'ss').replace(/\u03c2/g, '\u03c3').replace(/\u017f/g, 's');
+}
+// 제목이 파일에 기록될 수 있는가: 정리 함수를 거친 값 그대로여야 하고(제어문자·bidi 없음), | 가 없고, 1~60자
+function todoTitleRecordable(title) {
+  return typeof title === 'string' && title !== '' && cleanQuestText(title) === title && !title.includes('|') && [...title].length <= TODO_TITLE_MAX;
+}
+function validTodoDoneTag(f) { return typeof f === 'string' && (TODO_TAG_RE.test(f) || PROJ_KEY_RE.test(f)); }
+function validTodoDoneEntry(e) {
+  return isPlainObject(e) && Number.isInteger(e.at) && e.at >= 1e8 && e.at <= 99999999999 && TODO_DONE_KINDS.includes(e.kind) && validTodoDoneTag(e.tag) && todoTitleRecordable(e.title);
+}
+// main 이 가진 할 일 항목 -> 기록 한 줄(없으면 null). 제목·태그는 항목의 값만 쓴다(렌더러가 보낸 문자열은 쓰지 않는다)
+function makeTodoDone(item, kind, nowSec) {
+  if (!item) return null;
+  const e = { at: nowSec, kind, tag: item.project || item.tag, title: item.title };
+  return validTodoDoneEntry(e) ? e : null;
+}
+const todoMarkable = (item) => !!item && todoTitleRecordable(item.title);
+function formatTodoDone(entries) { return entries.map((e) => [e.at, e.kind, e.tag, e.title].join('|') + '\n').join(''); }
+// 줄 수 200 상한 + 파일 바이트 상한: 앞(오래된) 줄부터 덜어 낸다
+function fitTodoDone(entries) {
+  let cur = entries.length > TODO_DONE_MAX ? entries.slice(entries.length - TODO_DONE_MAX) : entries;
+  let total = 0; const sizes = cur.map((e) => { const b = Buffer.byteLength(formatTodoDone([e]), 'utf8'); total += b; return b; });
+  let drop = 0;
+  while (total > TODO_DONE_MAX_BYTES && drop < cur.length) total -= sizes[drop++];
+  return drop ? cur.slice(drop) : cur;
+}
+// 본문 -> 유효한 줄 배열(파일 순서). 형식 틀린 줄은 버리고, 200줄을 넘으면 마지막 200줄만. truncated 면 마지막(불완전) 줄은 버린다
+function parseTodoDone(text, truncated = false) {
+  if (typeof text !== 'string') return [];
+  const rows = text.split(/\r?\n/);
+  if (truncated) rows.pop();
+  const out = [];
+  for (const raw of rows) {
+    if (!raw || raw.length > 400) continue;
+    const f = raw.split('|');
+    if (f.length !== 4 || !/^[0-9]{9,11}$/.test(f[0])) continue;
+    const e = { at: Number(f[0]), kind: f[1], tag: f[2], title: f[3] };
+    if (validTodoDoneEntry(e)) out.push(e);
+  }
+  return out.length > TODO_DONE_MAX ? out.slice(out.length - TODO_DONE_MAX) : out;
+}
+// 14일(KEEP) 넘은 줄과 하루 넘게 미래인 줄을 지우고 최근 200줄만
+function pruneTodoDone(entries, nowSec) {
+  const kept = (Array.isArray(entries) ? entries : []).filter((e) => validTodoDoneEntry(e) && nowSec - e.at <= TODO_DONE_KEEP_SEC && e.at - nowSec <= 86400);
+  return fitTodoDone(kept);
+}
+function addTodoDone(entries, added, nowSec) { return pruneTodoDone([...(Array.isArray(entries) ? entries : []), ...(Array.isArray(added) ? added : [])], nowSec); }
+// 방금 쓴 그 줄만 제거(같은 줄이 여럿이면 가장 뒤의 것 하나씩). 하나도 못 찾으면 같은 배열을 돌려준다
+function removeTodoDone(entries, targets) {
+  let cur = Array.isArray(entries) ? entries : [];
+  for (const t of Array.isArray(targets) ? targets : []) {
+    for (let i = cur.length - 1; i >= 0; i--) {
+      const e = cur[i];
+      if (e.at === t.at && e.kind === t.kind && e.tag === t.tag && e.title === t.title) { cur = [...cur.slice(0, i), ...cur.slice(i + 1)]; break; }
+    }
+  }
+  return cur;
+}
+// 표시 키: 최상위 태그('/' 앞) + 제목 키. 기록의 태그는 `태그/슬러그` 일 수 있고 할 일 쪽은 항상 item.tag 가 최상위 태그다(셸과 같은 규칙)
+const todoMarkKey = (tag, title) => String(tag).split('/')[0] + '\n' + titleKey(title);
+// 최근 7일 안의 기록과 최상위 태그·제목 키가 모두 같은 할 일은 뺀다(제목만 같고 태그가 다르면 남긴다)
+function filterTodos(todos, entries, nowSec) {
+  const hide = new Set();
+  for (const e of Array.isArray(entries) ? entries : []) if (nowSec - e.at <= TODO_DONE_HIDE_SEC && e.at - nowSec <= 86400) hide.add(todoMarkKey(e.tag, e.title));
+  return hide.size ? (Array.isArray(todos) ? todos : []).filter((t) => !hide.has(todoMarkKey(t.tag, t.title))) : (Array.isArray(todos) ? todos : []);
+}
+// 시작·갱신 때 읽기(Node 전용): { status: 'missing'|'corrupt'|'error'|'ok', data }.
+// corrupt = 일반 파일이 아니거나(링크·FIFO·폴더) 상한을 넘음 -> 호출 쪽이 .bak 으로 치운다. error = 그 밖의 읽기 오류(EMFILE·EACCES 등) -> 호출 쪽은 메모리 값을 그대로 두고 파일은 건드리지 않는다.
+function readTodoDoneFile(file) {
+  const fs = require('fs');
+  let lst;
+  try { lst = fs.lstatSync(file); } catch (err) { return err && err.code === 'ENOENT' ? { status: 'missing', data: [] } : { status: 'error', data: [] }; }
+  if (!lst.isFile() || lst.size > TODO_DONE_MAX_BYTES) return { status: 'corrupt', data: [] };
+  let fd = null;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > TODO_DONE_MAX_BYTES) return { status: 'corrupt', data: [] };
+    const buf = Buffer.alloc(st.size);
+    const n = fs.readSync(fd, buf, 0, st.size, 0);
+    return { status: 'ok', data: parseTodoDone(buf.toString('utf8', 0, n)) };
+  } catch (err) {
+    return { status: err && (err.code === 'ELOOP') ? 'corrupt' : 'error', data: [] }; // O_NOFOLLOW 로 링크가 막히면 ELOOP
+  } finally { if (fd !== null) try { fs.closeSync(fd); } catch { /* 무시 */ } }
+}
+function saveTodoDone(file, entries) {
+  if (!Array.isArray(entries) || entries.length > TODO_DONE_MAX || !entries.every(validTodoDoneEntry)) return false;
+  return writeTextAtomic(file, formatTodoDone(fitTodoDone(entries)), 'todo-done'); // 바이트 상한을 넘으면 오래된 줄부터 덜어 내고 쓴다
+}
+
 // 채우기 거부 사유 -> 문구 키(문구는 i18n.js 의 'fill.<사유>')
 const FILL_REASONS = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive', 'invalid'];
 function fillNoticeKey(reason) { return 'fill.' + (FILL_REASONS.includes(reason) ? reason : 'invalid'); }
@@ -235,6 +336,80 @@ function parseSubType(text) {
   if (typeof text !== 'string' || text.length > 256) return null;
   const t = text.split(/\r?\n/)[0];
   return SUB_TYPE_RE.test(t) ? t : null;
+}
+
+// ---- 스쿼드(scripts/squads.py meta 의 한 줄 JSON) ----
+// {"squads":[{slug,name,description,source:'builtin'|'personal',lead:{agent,model},members:[{role,agent,model}]}],"skipped":[...]} -> 엄격 검증한 배열.
+// 모르는 필드는 버리고, 틀린 스쿼드·팀원은 버린다(팀원이 6명을 넘는 스쿼드는 통째로 버린다). 스쿼드 12개까지.
+const SQUAD_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,19}$/;
+const SQUADS_MAX = 12;
+const SQUAD_MEMBERS_MAX = 6;
+const SQUAD_NAME_MAX = 24;
+const SQUAD_DESC_MAX = 200;
+const SQUAD_META_MAX_BYTES = 256 * 1024;
+const SQUAD_SCAN_MAX = 64; // 앞에서부터 이만큼만 훑는다
+const SQUAD_MODELS = ['haiku', 'sonnet', 'opus', 'inherit'];
+const SQUAD_RESERVED_ROLES = ['lead', 'squad'];
+const isPlainObject = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
+function squadText(s, max, min) { // 보이지 않는 문자·제어문자가 있거나 앞뒤 공백이 있으면 거부
+  if (typeof s !== 'string' || hasBadChars(s) || s !== s.trim()) return null;
+  const n = [...s].length;
+  return n >= min && n <= max ? s : null;
+}
+function validSquad(o) {
+  if (!isPlainObject(o) || typeof o.slug !== 'string' || !SQUAD_SLUG_RE.test(o.slug)) return null;
+  const name = squadText(o.name, SQUAD_NAME_MAX, 1);
+  const description = squadText(o.description, SQUAD_DESC_MAX, 0);
+  if (name === null || description === null || (o.source !== 'builtin' && o.source !== 'personal')) return null;
+  const lead = o.lead;
+  if (!isPlainObject(lead) || lead.agent !== 'sq-' + o.slug + '-lead' || !SQUAD_MODELS.includes(lead.model)) return null;
+  if (!Array.isArray(o.members) || o.members.length > SQUAD_MEMBERS_MAX) return null;
+  const members = []; const roles = new Set();
+  for (const m of o.members) {
+    if (!isPlainObject(m) || typeof m.role !== 'string' || !SQUAD_SLUG_RE.test(m.role) || SQUAD_RESERVED_ROLES.includes(m.role) || roles.has(m.role)) continue;
+    if (m.agent !== 'sq-' + o.slug + '-' + m.role || !SQUAD_MODELS.includes(m.model)) continue;
+    roles.add(m.role); members.push({ role: m.role, agent: m.agent, model: m.model });
+  }
+  return { slug: o.slug, name, description, personal: o.source === 'personal', lead: { agent: lead.agent, model: lead.model }, members };
+}
+function parseSquadMeta(text) {
+  if (typeof text !== 'string' || text.length > SQUAD_META_MAX_BYTES) return [];
+  let o; try { o = JSON.parse(text); } catch { return []; }
+  if (!isPlainObject(o) || !Array.isArray(o.squads)) return [];
+  const out = []; const seen = new Set();
+  for (const e of o.squads.slice(0, SQUAD_SCAN_MAX)) {
+    if (out.length >= SQUADS_MAX) break;
+    const v = validSquad(e);
+    if (!v || seen.has(v.slug)) continue;
+    seen.add(v.slug); out.push(v);
+  }
+  return out;
+}
+// 검증된 스쿼드 -> 화면용 묶음. 모델 'inherit' 는 마루 줄의 모델(leadModel)로 바꾼다. 줄: { agent, lead, role(총괄이면 null), model }
+function squadView(squads, leadModel) {
+  const mdl = (m) => (m === 'inherit' ? leadModel || '—' : m);
+  return (Array.isArray(squads) ? squads : []).map((q) => ({
+    slug: q.slug, name: q.name, personal: q.personal,
+    rows: [{ agent: q.lead.agent, lead: true, role: null, model: mdl(q.lead.model) }, ...q.members.map((m) => ({ agent: m.agent, lead: false, role: m.role, model: mdl(m.model) }))],
+  }));
+}
+// 서브에이전트 종류 -> 개수(Map), 알려진 줄에 붙고 남은 것(임시 줄 후보)
+function matchSubs(subs, knownNames) {
+  const counts = new Map(); const extra = [];
+  const known = new Set(knownNames);
+  for (const s of Array.isArray(subs) ? subs : []) {
+    if (!s || typeof s.type !== 'string' || !SUB_TYPE_RE.test(s.type) || !Number.isInteger(s.count) || s.count < 1 || s.count > 32) continue;
+    counts.set(s.type, s.count);
+    if (!known.has(s.type)) extra.push({ type: s.type, count: s.count });
+  }
+  return { counts, extra };
+}
+// 스쿼드 묶음을 펼칠지: 사용자가 직접 정했으면 그대로, 아니면 그 스쿼드의 에이전트가 돌 때만
+function squadOpen(userChoice, active) { return typeof userChoice === 'boolean' ? userChoice : !!active; }
+// 작업 공간에서 claude 를 띄우는 한 줄(셸에 쓴다). wrapper = 저장소의 maru-claude.sh 절대 경로(없거나 이상하면 null -> 그냥 claude)
+function claudeLaunchCommand(sid, wrapper) {
+  const ok = typeof wrapper === 'string' && wrapper.startsWith('/') && wrapper.length <= 1024 && !hasBadChars(wrapper) && !/[\r\n]/.test(wrapper);
+  return 'command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + '\r';
 }
 
 // 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru
@@ -424,7 +599,8 @@ function parseProfile(res) {
 function loadProfile(file) { return parseProfile(readRegular(file, PROFILE_MAX_BYTES, false)); }
 
 // 원자적 저장(임시 파일 0600 + rename). data 폴더가 심볼릭 링크면 거부. 성공 여부를 돌려준다.
-function writeJsonAtomic(file, value, tmpPrefix) {
+function writeJsonAtomic(file, value, tmpPrefix) { return writeTextAtomic(file, JSON.stringify(value, null, 2) + '\n', tmpPrefix); }
+function writeTextAtomic(file, text, tmpPrefix) {
   const fs = require('fs'); const path = require('path'); const crypto = require('crypto');
   const dir = path.dirname(file);
   const tmp = path.join(dir, '.' + tmpPrefix + '.' + crypto.randomBytes(6).toString('hex') + '.tmp');
@@ -435,7 +611,7 @@ function writeJsonAtomic(file, value, tmpPrefix) {
     if (!st) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     else if (st.isSymbolicLink() || !st.isDirectory()) return false;
     fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-    fs.writeSync(fd, JSON.stringify(value, null, 2) + '\n');
+    fs.writeSync(fd, text);
     fs.fsyncSync(fd); fs.closeSync(fd); fd = null;
     fs.renameSync(tmp, file);
     return true;
@@ -1037,6 +1213,18 @@ function readMemoryMetas(memDir) {
   return out;
 }
 
+// 그 프로젝트(또는 분류 안 됨 묶음)에 속한 남은 일 -> [{ item, idx }] (idx = todos 배열 안의 위치)
+function projectOpenTodos({ summary, registry, state, todos }) {
+  const st = state || {};
+  const regKeys = new Set((registry || []).map((r) => r.key));
+  const ownerOf = (key) => { const r = projectRoot(st, key); return regKeys.has(r) ? r : (regKeys.has(key) ? key : null); };
+  const mineTodo = (t) => (summary.kind === 'project'
+    ? !!t.project && ownerOf(t.project) === summary.key
+    : t.tag === summary.tag && !(t.project && ownerOf(t.project)));
+  const out = [];
+  (Array.isArray(todos) ? todos : []).forEach((t, idx) => { if (mineTodo(t)) out.push({ item: t, idx }); });
+  return out;
+}
 // 상세(요청 시): 요약 + 남은 일 + 작업 기록(최신 날짜 먼저, 최대 200) + 관련 기억 + 합치기 후보. 모두 원시 값(문자열·숫자)만.
 function buildProjectDetail({ summary, registry, entries, state, todos, memories, list, today }) {
   const st = state || {};
@@ -1048,10 +1236,7 @@ function buildProjectDetail({ summary, registry, entries, state, todos, memories
   const log = (entries || []).filter(mine)
     .sort((a, b) => (a.day !== b.day ? (a.day < b.day ? 1 : -1) : a.time !== b.time ? (a.time < b.time ? 1 : -1) : a.seq - b.seq))
     .slice(0, PROJ_LOG_MAX).map((e) => ({ day: e.day, kind: e.kind, text: e.text }));
-  const mineTodo = (t) => (summary.kind === 'project'
-    ? !!t.project && ownerOf(t.project) === summary.key
-    : t.tag === summary.tag && !(t.project && ownerOf(t.project)));
-  const open = (todos || []).filter(mineTodo).map((t) => ({ title: t.title, importance: t.importance })).sort((a, b) => b.importance - a.importance);
+  const open = projectOpenTodos({ summary, registry, state, todos }).map(({ item: t, idx }) => ({ title: t.title, importance: t.importance, idx, shown: todoKey(t), markable: todoMarkable(t) })).sort((a, b) => b.importance - a.importance || a.idx - b.idx);
   const mergeTargets = summary.kind === 'project' && summary.status === 'open'
     ? (list || []).filter((x) => canMerge(list, summary.key, x.key)).map((x) => ({ key: x.key, title: x.title })) : [];
   return {
@@ -1290,6 +1475,8 @@ const api = {
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
   SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput,
+  SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, matchSubs, squadOpen, claudeLaunchCommand,
+  TODO_DONE_MAX, TODO_DONE_MAX_BYTES, fitTodoDone, todoMarkKey, TODO_DONE_KEEP_SEC, TODO_DONE_HIDE_SEC, titleKey, todoTitleRecordable, validTodoDoneEntry, makeTodoDone, todoMarkable, formatTodoDone, parseTodoDone, pruneTodoDone, addTodoDone, removeTodoDone, filterTodos, readTodoDoneFile, saveTodoDone, projectOpenTodos,
   confirmClose, confirmRestart, closeRequestAction, lookupWs, ringFrameInterval, readWorkspacesFile, backupCorruptFile,
   WS_MAX, WS_STATES, workspaceTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,
   LOGO, logoShapesSvg, RING, ringInit, stepRing, ringView,

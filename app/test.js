@@ -204,7 +204,7 @@ t('파티: frontmatter 파싱·구성·서브에이전트 요약', () => {
   assert.deepStrictEqual(L.summarizeSubs(['worker', 'Explore', 'worker', 'bad type', '']), [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }]);
   assert.strictEqual(L.parseSubType('general-purpose\n'), 'general-purpose'); assert.strictEqual(L.parseSubType('a b'), null); assert.strictEqual(L.parseSubType('x'.repeat(300)), null);
   assert.ok(L.validSubFileName('agent_1-a') && !L.validSubFileName('../a') && !L.validSubFileName('.hidden') && !L.validSubFileName(''));
-  for (const k of ['party.working', 'party.working.n']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + k);
+  for (const k of ['squad.working', 'squad.working.n']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + k);
 });
 t('드롭·파티·모델 정적 검사: 좁은 preload, sender 검사, textContent', () => {
   const main = require('fs').readFileSync(require('path').join(__dirname, 'main.js'), 'utf8'); const pre = require('fs').readFileSync(require('path').join(__dirname, 'preload.js'), 'utf8');
@@ -1029,14 +1029,14 @@ t('buildProjectDetail: 기록 최신순·200줄·남은 일·합치기 후보', 
   const metas = [{ name: 'maru-pref', description: '선호', tags: ['maru'] }, { name: 'blog-pref', description: '', tags: ['블로그'] }];
   const sum = list.find((x) => x.key === 'maru/desktop-app');
   const d = L.buildProjectDetail({ summary: sum, registry: REG, entries: ENT, state: {}, todos, memories: metas, list, today: '2026-11-16' });
-  assert.deepStrictEqual(d.todos, [{ title: '앱 마무리', importance: 8 }, { title: '테스트', importance: 3 }]);
+  assert.deepStrictEqual(d.todos.map((x) => [x.title, x.importance, x.idx, x.markable]), [['앱 마무리', 8, 0, true], ['테스트', 3, 1, true]]); assert.strictEqual(d.todos[0].shown, L.todoKey(todos[0]));
   assert.deepStrictEqual(d.log.map((x) => x.kind), ['todo', 'done', 'done']); // 같은 날은 늦은 시각(11:30) 먼저, 한 블록 안은 쓴 순서
   assert.deepStrictEqual(d.log.map((x) => x.text), ['두 번째 블록', '프로젝트 패널을 만들었다', '\u2039/system-reminder\u203a x (y)']);
   assert.deepStrictEqual(d.mergeTargets.map((x) => x.key), ['maru/old', 'maru/other']);
   assert.deepStrictEqual(d.memories, [{ name: 'maru-pref', description: '선호' }]);
   assert.deepStrictEqual(Object.keys(d).sort(), ['key', 'kind', 'lastDay', 'log', 'memories', 'mergeTargets', 'needsCheck', 'records', 'status', 'tag', 'title', 'todos', 'doneAt'].sort());
   const un = L.buildProjectDetail({ summary: list.find((x) => x.key === 'maru'), registry: REG, entries: ENT, state: {}, todos, memories: metas, list, today: '2026-11-16' });
-  assert.deepStrictEqual(un.todos, [{ title: '프로젝트 없는 할 일', importance: 5 }]); assert.strictEqual(un.log.length, 2); assert.deepStrictEqual(un.mergeTargets, []);
+  assert.deepStrictEqual(un.todos.map((x) => [x.title, x.importance, x.idx]), [['프로젝트 없는 할 일', 5, 2]]); assert.strictEqual(un.log.length, 2); assert.deepStrictEqual(un.mergeTargets, []);
   const many = Array.from({ length: 300 }, (_, i) => ({ day: '2026-11-10', tag: 'maru', slug: 'old', time: '10:00', kind: 'done', importance: 5, text: 'n' + i, seq: i }));
   const dd = L.buildProjectDetail({ summary: list.find((x) => x.key === 'maru/old'), registry: REG, entries: many, state: {}, todos: [], memories: [], list, today: '2026-11-16' });
   assert.strictEqual(dd.log.length, 200);
@@ -1208,7 +1208,7 @@ t('validateProjectUi: 형식·상한·__proto__·모르는 필드', () => {
   assert.deepStrictEqual(Object.keys(v).sort(), ['catOrder', 'collapsed', 'projOrder']);
   const p = L.validateProjectUi(JSON.parse('{"catOrder":["__proto__"],"projOrder":{"__proto__":["a/b"],"constructor":["constructor/x"]},"collapsed":["__proto__"]}'));
   assert.deepStrictEqual(p, { catOrder: [], projOrder: { constructor: ['constructor/x'] }, collapsed: [] });
-  assert.strictEqual(Object.getPrototypeOf(p.projOrder), Object.prototype); assert.strictEqual({}.a, undefined); assert.ok(!('polluted' in {}));
+  assert.strictEqual(Object.getPrototypeOf(p.projOrder), Object.prototype); assert.ok(!('polluted' in {}) && !Object.prototype.hasOwnProperty.call(p, '__proto__') && !Object.prototype.hasOwnProperty.call(p.projOrder, '__proto__'));
   for (const bad of [null, [], 'x', 5, { catOrder: 'x' }, { collapsed: {} }, { projOrder: [] }, { projOrder: { maru: 'x' } }, { catOrder: Array(201).fill('a') }, { collapsed: Array(201).fill('a') },
     { projOrder: { maru: Array(201).fill('maru/a') } }, { projOrder: Object.fromEntries(Array.from({ length: 201 }, (_, i) => ['t' + i, []])) }]) assert.strictEqual(L.validateProjectUi(bad), null, JSON.stringify(bad).slice(0, 40));
   const wide = {}; for (let i = 0; i < 6; i++) wide['t' + i] = Array.from({ length: 200 }, (_, j) => 't' + i + '/p' + j);
@@ -1258,6 +1258,206 @@ t('메뉴·화면 연결 정적 검사: ⌘1~9 는 numberTargets, 번호 힌트�
   assert.ok(/prefers-reduced-motion:reduce\)\{\*,\*::before,\*::after\{animation:none!important;transition:none!important/.test(css));
   for (const k of ['menu.gotoProj', 'menu.gotoNone', 'proj.cat.aria', 'proj.cat.tip', 'proj.row.tip', 'proj.moved', 'proj.err.move']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
   for (const lg of I.LANGS) { assert.ok(I.t(lg, 'proj.moved', { title: 'x', pos: 2, total: 3 }).includes('2')); assert.ok(I.t(lg, 'menu.gotoNone', { n: 4 }).includes('4')); }
+});
+// ---- 스쿼드 ----
+const SQ = (o) => ({ slug: 'dev', name: '개발', description: '개발 팀', source: 'builtin', lead: { agent: 'sq-dev-lead', model: 'sonnet' }, members: [{ role: 'coder', agent: 'sq-dev-coder', model: 'haiku' }, { role: 'tester', agent: 'sq-dev-tester', model: 'inherit' }], ...o });
+t('parseSquadMeta: 정상 형식·모르는 필드 무시·개인 표시', () => {
+  const r = L.parseSquadMeta(JSON.stringify({ squads: [{ ...SQ(), extra: 1, lead: { agent: 'sq-dev-lead', model: 'opus', x: 1 } }, SQ({ slug: 'mine', name: 'Mine', source: 'personal', lead: { agent: 'sq-mine-lead', model: 'inherit' }, members: [] })], skipped: [{ slug: 'x', reason: 'y' }], more: 1 }));
+  assert.deepStrictEqual(r.map((q) => [q.slug, q.name, q.personal, q.lead.model, q.members.length]), [['dev', '개발', false, 'opus', 2], ['mine', 'Mine', true, 'inherit', 0]]);
+  assert.deepStrictEqual(Object.keys(r[0]).sort(), ['description', 'lead', 'members', 'name', 'personal', 'slug']);
+  assert.deepStrictEqual(r[0].members[0], { role: 'coder', agent: 'sq-dev-coder', model: 'haiku' });
+});
+t('parseSquadMeta: 틀린 항목은 버린다', () => {
+  const bad = [SQ({ slug: 'Bad' }), SQ({ slug: '-x' }), SQ({ slug: 'a'.repeat(21) }), SQ({ name: '' }), SQ({ name: '가'.repeat(25) }), SQ({ name: 'a\u202Eb' }), SQ({ name: ' x' }), SQ({ description: 'd'.repeat(201) }), SQ({ description: 5 }),
+    SQ({ source: 'other' }), SQ({ lead: { agent: 'sq-other-lead', model: 'sonnet' } }), SQ({ lead: { agent: 'sq-dev-lead', model: 'gpt' } }), SQ({ lead: null }), SQ({ members: 'x' }),
+    SQ({ members: Array.from({ length: 7 }, (_, i) => ({ role: 'r' + i, agent: 'sq-dev-r' + i, model: 'haiku' })) }), null, 'x', 5, []];
+  assert.deepStrictEqual(L.parseSquadMeta(JSON.stringify({ squads: bad })), []);
+  assert.strictEqual(L.parseSquadMeta(JSON.stringify({ squads: [SQ({ name: '가'.repeat(24) }), SQ({ slug: 'a'.repeat(20), lead: { agent: 'sq-' + 'a'.repeat(20) + '-lead', model: 'haiku' }, members: [] })] })).length, 2); // 경계값
+  const m = L.parseSquadMeta(JSON.stringify({ squads: [SQ({ members: [{ role: 'ok', agent: 'sq-dev-ok', model: 'haiku' }, { role: 'lead', agent: 'sq-dev-lead', model: 'haiku' }, { role: 'Bad', agent: 'sq-dev-Bad', model: 'haiku' }, { role: 'x', agent: 'sq-dev-y', model: 'haiku' }, { role: 'ok', agent: 'sq-dev-ok', model: 'opus' }, { role: 'z', agent: 'sq-dev-z', model: 'nope' }] })] }));
+  assert.deepStrictEqual(m[0].members.map((x) => x.role), ['ok']); // 틀린 팀원만 버리고 스쿼드는 남긴다(예약어 lead·형식 오류·이름 불일치·중복·모델 오류)
+  for (const x of ['', '{', 'null', '[]', '{"squads":5}', '{"squads":{}}', 'x'.repeat(L.SQUAD_META_MAX_BYTES + 1)]) assert.deepStrictEqual(L.parseSquadMeta(x), [], x.slice(0, 10));
+  assert.deepStrictEqual(L.parseSquadMeta(undefined), []);
+});
+t('parseSquadMeta: 스쿼드 12개 상한·같은 slug 는 앞의 것만·__proto__ 안전', () => {
+  const many = Array.from({ length: 20 }, (_, i) => SQ({ slug: 's' + i, lead: { agent: 'sq-s' + i + '-lead', model: 'haiku' }, members: [] }));
+  assert.strictEqual(L.parseSquadMeta(JSON.stringify({ squads: many })).length, L.SQUADS_MAX);
+  assert.deepStrictEqual(L.parseSquadMeta(JSON.stringify({ squads: [SQ(), SQ({ name: '둘째' })] })).map((q) => q.name), ['개발']);
+  const evil = '{"squads":[{"__proto__":{"slug":"zz"},"slug":"dev","name":"n","description":"","source":"builtin","lead":{"agent":"sq-dev-lead","model":"haiku","__proto__":{"a":1}},"members":[{"role":"constructor","agent":"sq-dev-constructor","model":"haiku"},{"role":"x","agent":"sq-dev-x","model":"haiku","__proto__":{"p":1}}]}]}';
+  const r = L.parseSquadMeta(evil);
+  assert.strictEqual(r.length, 1); assert.strictEqual(r[0].slug, 'dev'); assert.strictEqual(Object.getPrototypeOf(r[0].lead), Object.prototype); assert.deepStrictEqual(Object.keys(r[0].lead).sort(), ['agent', 'model']);
+  assert.deepStrictEqual(r[0].members.map((x) => x.role), ['constructor', 'x']); assert.ok(!Object.prototype.hasOwnProperty.call(r[0].lead, '__proto__'));
+});
+t('squadView·matchSubs·squadOpen: 모델 상속, 활동 매칭, 임시 줄, 접힘 규칙', () => {
+  const v = L.squadView(L.parseSquadMeta(JSON.stringify({ squads: [SQ()] })), 'opus');
+  assert.deepStrictEqual(v[0].rows.map((r) => [r.agent, r.lead, r.role, r.model]), [['sq-dev-lead', true, null, 'sonnet'], ['sq-dev-coder', false, 'coder', 'haiku'], ['sq-dev-tester', false, 'tester', 'opus']]);
+  assert.strictEqual(L.squadView(L.parseSquadMeta(JSON.stringify({ squads: [SQ()] })), null)[0].rows[2].model, '—');
+  assert.deepStrictEqual(L.squadView(null, 'x'), []);
+  const m = L.matchSubs([{ type: 'worker', count: 2 }, { type: 'sq-dev-coder', count: 1 }, { type: 'sq-ghost-lead', count: 3 }, { type: 'bad type', count: 1 }, { type: 'x', count: 0 }, { type: 'y', count: 33 }, null], ['worker', 'sq-dev-coder']);
+  assert.deepStrictEqual([...m.counts], [['worker', 2], ['sq-dev-coder', 1], ['sq-ghost-lead', 3]]); assert.deepStrictEqual(m.extra, [{ type: 'sq-ghost-lead', count: 3 }]);
+  assert.strictEqual(L.squadOpen(undefined, false), false); assert.strictEqual(L.squadOpen(undefined, true), true);
+  assert.strictEqual(L.squadOpen(false, true), false); assert.strictEqual(L.squadOpen(true, false), true); // 사용자가 정한 것을 존중
+});
+t('claudeLaunchCommand: 래퍼가 있으면 인용해 exec, 없거나 이상하면 claude', () => {
+  const sid = 'abcd1234-aaaa';
+  assert.strictEqual(L.claudeLaunchCommand(sid, null), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude\r');
+  assert.strictEqual(L.claudeLaunchCommand(null, undefined), 'command -v claude >/dev/null && exec claude\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh'), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/my repo/a b$(x)`y`;&\'"/scripts/maru-claude.sh').split('exec ')[1], String.raw`/my\ repo/a\ b\$\(x\)\`y\`\;\&\'\"/scripts/maru-claude.sh` + '\r');
+  for (const bad of ['/r/a\nb', '/r/a\rb', '/r/a\u001bb', '/r/a\u202Eb', 'relative/x.sh', '', 5, '/' + 'a'.repeat(1030)]) assert.ok(L.claudeLaunchCommand(sid, bad).endsWith('exec claude\r'), String(bad).slice(0, 8)); // 개행·제어·bidi 가 든 경로는 쓰지 않는다
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/한글 폴더/scripts/maru-claude.sh').split('exec ')[1], '/r/한글\\ 폴더/scripts/maru-claude.sh\r');
+});
+t('스쿼드 정적 검사: 래퍼 검사·python 도구 폴더·시간·크기 상한·60초 갱신', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  assert.ok(/'\/Library\/Developer\/CommandLineTools\/usr\/bin\/python3'/.test(main) && !/'\/usr\/bin\/python3'/.test(main));
+  assert.ok(/'-I', script, 'meta'\], \{ timeout: 3000, maxBuffer: L\.SQUAD_META_MAX_BYTES/.test(main) && L.SQUAD_META_MAX_BYTES === 256 * 1024);
+  assert.ok(/setInterval\(refreshSquads, 60000\)/.test(main) && !/refreshSquads\(\)/.test(main.split('setInterval(() => {\n    if (TEST_FX)')[1] || ''), '1초 폴링에 넣지 않는다');
+  assert.ok(/lstatSync\(f\)[\s\S]{0,120}st\.isFile\(\) \|\| !safeOwned\(st\)[\s\S]{0,80}X_OK/.test(main) && /L\.claudeLaunchCommand\(sid, claudeWrapper\(\)\)/.test(main));
+  assert.ok(!/exec claude/.test(main.replace(/\/\/.*$/gm, '')), 'exec claude 문자열은 lib 의 한 곳에만');
+  assert.ok(/squadUser/.test(rd) && /aria-expanded/.test(rd) && !/innerHTML/.test(rd));
+  for (const k of ['squad.eyebrow', 'squad.base', 'squad.personal', 'squad.head.aria', 'role.squadLead', 'squad.working', 'squad.working.n']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
+  assert.strictEqual(I.STR.ko['squad.eyebrow'], '스쿼드'); assert.strictEqual(I.STR.en['squad.eyebrow'], 'Squads');
+  assert.ok(!Object.keys(I.STR.ko).some((k) => k.startsWith('party.')));
+});
+
+// ---- 할 일 완료/안 함 ----
+const NOW = 1800000000;
+const E = (o) => ({ at: NOW, kind: 'done', tag: 'maru', title: '앱 마무리', ...o });
+t('titleKey: 공백 접기 + 소문자(셸 casefold 의 근사, ASCII·한글은 일치)', () => {
+  assert.strictEqual(L.titleKey('  Fix   The\tBug \n'), 'fix the bug');
+  assert.strictEqual(L.titleKey('ABC  가나  다 Straße'), 'abc 가나 다 strasse');
+  assert.strictEqual(L.titleKey('ΣΑΣ'), L.titleKey('σας')); // ς 는 σ 로
+  assert.strictEqual(L.titleKey('앱  마무리'), L.titleKey(' 앱 마무리 '));
+  assert.notStrictEqual(L.titleKey('앱 마무리'), L.titleKey('앱마무리'));
+  assert.strictEqual(L.titleKey(null), '');
+});
+t('todo-done 줄 파싱: 정확히 4칸·형식 검증', () => {
+  const ok = [`${NOW}|done|maru|앱 마무리`, `${NOW}|skip|maru/desktop-app|Fix bug`, `${NOW}|done|책|가나다`].join('\n');
+  assert.deepStrictEqual(L.parseTodoDone(ok).map((e) => [e.kind, e.tag, e.title]), [['done', 'maru', '앱 마무리'], ['skip', 'maru/desktop-app', 'Fix bug'], ['done', '책', '가나다']]);
+  const bad = ['', 'x', `${NOW}|done|maru`, `${NOW}|done|maru|a|b`, `${NOW}|nope|maru|a`, `abc|done|maru|a`, `12345|done|maru|a`, `${NOW}|done|bad tag|a`, `${NOW}|done|maru/BAD|a`, `${NOW}|done||a`, `${NOW}|done|maru|`, `${NOW}|done|__proto__|a`,
+    `${NOW}|done|maru|${'가'.repeat(61)}`, `${NOW}|done|maru|a\u001b[2Jb`, `${NOW}|done|maru|a\u202Eb`, `${NOW}|done|maru|a\u200Bb`, `${NOW}|done|maru| a`, `${NOW}x|done|maru|a`, `-${NOW}|done|maru|a`, `${NOW}.5|done|maru|a`];
+  assert.deepStrictEqual(L.parseTodoDone(bad.join('\n')), []);
+  assert.strictEqual(L.parseTodoDone(`${NOW}|done|maru|가${'나'.repeat(59)}`).length, 1); // 60자 경계
+  assert.deepStrictEqual(L.parseTodoDone(`${NOW}|done|maru|__proto__`).map((e) => e.title), ['__proto__']); // 제목이 __proto__ 여도 일반 값
+  assert.deepStrictEqual(L.parseTodoDone(`${NOW}|done|maru|a\r\n${NOW}|skip|maru|b\r\n`).map((e) => e.title), ['a', 'b']);
+  assert.deepStrictEqual(L.parseTodoDone(`${NOW}|done|maru|a\n${NOW}|done|maru|잘린`, true).map((e) => e.title), ['a']); // 잘렸으면 마지막 줄 버림
+  assert.deepStrictEqual(L.parseTodoDone(undefined), []);
+});
+t('todo-done: 201줄이면 마지막 200줄만, 만료·미래 줄 제거', () => {
+  const lines = Array.from({ length: 201 }, (_, i) => `${NOW + i}|done|maru|일 ${i}`).join('\n');
+  const p = L.parseTodoDone(lines); assert.strictEqual(p.length, 200); assert.strictEqual(p[0].title, '일 1'); assert.strictEqual(p[199].title, '일 200');
+  const pr = L.pruneTodoDone([E({ at: NOW - 14 * 86400 - 1, title: '옛' }), E({ at: NOW - 14 * 86400, title: '경계' }), E({ at: NOW - 86400, title: '어제' }), E({ at: NOW + 2 * 86400, title: '미래' }), E({ title: '지금' })], NOW);
+  assert.deepStrictEqual(pr.map((e) => e.title), ['경계', '어제', '지금']);
+  const big = Array.from({ length: 200 }, (_, i) => E({ title: '일 ' + i })); const added = L.addTodoDone(big, [E({ title: '새것' })], NOW);
+  assert.strictEqual(added.length, 200); assert.strictEqual(added[199].title, '새것'); assert.strictEqual(added[0].title, '일 1');
+  assert.deepStrictEqual(L.addTodoDone(null, [E()], NOW).length, 1);
+});
+t('filterTodos: 7일 안 기록과 최상위 태그·제목 키가 모두 같은 할 일만 뺀다', () => {
+  const todos = L.parseTodos('maru|8|앱 마무리|p\n책|5|앱 마무리|\nmaru|3|Fix Bug|\nmaru|2|다른 일|');
+  assert.deepStrictEqual(L.filterTodos(todos, [E()], NOW).map((x) => x.tag + ':' + x.title), ['책:앱 마무리', 'maru:Fix Bug', 'maru:다른 일']); // 같은 제목 다른 태그는 남는다
+  assert.deepStrictEqual(L.filterTodos(todos, [E({ tag: '책' })], NOW).map((x) => x.tag + ':' + x.title), ['maru:앱 마무리', 'maru:Fix Bug', 'maru:다른 일']);
+  assert.deepStrictEqual(L.filterTodos(todos, [E({ title: '  fix   BUG', kind: 'skip' })], NOW).map((x) => x.title), ['앱 마무리', '앱 마무리', '다른 일']); // 공백·대소문자 접기
+  const withProj = L.parseTodos('maru/desktop-app|5|앱 마무리|\nmaru|5|앱 마무리|\nblog/x|5|앱 마무리|');
+  assert.deepStrictEqual(L.filterTodos(withProj, [E({ tag: 'maru/desktop-app' })], NOW).map((x) => x.tag + ':' + (x.project || '')), ['blog:blog/x']); // 기록 태그의 최상위(maru)로 비교
+  assert.deepStrictEqual(L.filterTodos(withProj, [E({ tag: 'maru' })], NOW).map((x) => x.tag), ['blog']);
+  assert.strictEqual(L.filterTodos(todos, [E({ at: NOW - 7 * 86400 })], NOW).length, 3); // 7일 정각은 아직 숨김
+  assert.strictEqual(L.filterTodos(todos, [E({ at: NOW - 7 * 86400 - 1 })], NOW).length, 4); // 7일을 넘기면 다시 보인다
+  assert.strictEqual(L.filterTodos(todos, [], NOW), todos);
+  assert.strictEqual(L.filterTodos(todos, [E({ title: '앱마무리' })], NOW).length, 4); // 공백 제거까지는 같게 보지 않는다
+  const open = L.projectOpenTodos({ summary: { kind: 'unclassified', tag: '책' }, registry: [], state: {}, todos: L.filterTodos(todos, [E({ tag: '책' })], NOW) });
+  assert.strictEqual(open.length, 0); // 프로젝트·트레이가 쓰는 남은 일 목록도 같은 필터를 거친다
+  assert.deepStrictEqual(L.filterTodos(null, [E()], NOW), []);
+});
+t('makeTodoDone: main 의 항목 값만 쓰고, 주입 문자·| 가 든 제목은 기록하지 않는다', () => {
+  const [a] = L.parseTodos('maru/desktop-app|8|앱 마무리|p');
+  assert.deepStrictEqual(L.makeTodoDone(a, 'skip', NOW), { at: NOW, kind: 'skip', tag: 'maru/desktop-app', title: '앱 마무리' });
+  assert.strictEqual(L.makeTodoDone({ tag: '블로그', title: '글' }, 'done', NOW).tag, '블로그');
+  for (const title of ['a|b', 'a\nb', 'a\u001b[2J', 'a\u202Eb', 'a\u200Bb', '', ' a', '가'.repeat(61), '__proto__\n']) assert.strictEqual(L.makeTodoDone({ tag: 'maru', title }, 'done', NOW), null, JSON.stringify(title));
+  assert.strictEqual(L.makeTodoDone({ tag: 'bad tag', title: 'a' }, 'done', NOW), null); assert.strictEqual(L.makeTodoDone({ tag: 'maru', title: 'a' }, 'nope', NOW), null); assert.strictEqual(L.makeTodoDone(null, 'done', NOW), null);
+  assert.ok(L.todoMarkable({ title: '정상' }) && !L.todoMarkable({ title: 'a|b' }) && !L.todoMarkable(null));
+  assert.strictEqual(L.parseTodoDone(L.formatTodoDone([E({ title: '__proto__' })])).length, 1);
+});
+t('todo-done: 되돌리기는 방금 쓴 그 줄만 뺀다', () => {
+  const a = E({ title: 'A' }); const b = E({ title: 'B', at: NOW + 1 }); const a2 = E({ title: 'A', tag: '책' });
+  const list = [a, b, a2];
+  assert.deepStrictEqual(L.removeTodoDone(list, [b]).map((e) => e.title + e.tag), ['Amaru', 'A책']);
+  assert.deepStrictEqual(L.removeTodoDone(list, [a2]).map((e) => e.title + e.tag), ['Amaru', 'Bmaru']); // 같은 제목 다른 태그는 그대로
+  assert.strictEqual(L.removeTodoDone(list, [E({ title: '없음' })]).length, 3);
+  assert.strictEqual(L.removeTodoDone(list, [a, b]).length, 1);
+  assert.deepStrictEqual(L.removeTodoDone([a, a], [a]).length, 1); // 같은 줄이 둘이면 하나만
+  assert.strictEqual(L.removeTodoDone(list, null).length, 3);
+  const times = L.addTodoDone([], [a], NOW); assert.deepStrictEqual(L.removeTodoDone(times, [a]), []);
+});
+t('todo-done 파일: 원자적 저장 0600·손상·링크·상한·주입', () => {
+  const dir = fs.mkdtempSync(path.join(tmp, 'td-')); const f = path.join(dir, 'todo-done.txt');
+  assert.strictEqual(L.readTodoDoneFile(f).status, 'missing');
+  const list = [E({ title: '앱 마무리' }), E({ kind: 'skip', tag: 'maru/app', title: 'Fix bug', at: NOW + 1 })];
+  assert.strictEqual(L.saveTodoDone(f, list), true);
+  assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  assert.strictEqual(fs.readFileSync(f, 'utf8'), `${NOW}|done|maru|앱 마무리\n${NOW + 1}|skip|maru/app|Fix bug\n`);
+  assert.deepStrictEqual(L.readTodoDoneFile(f), { status: 'ok', data: list });
+  assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.startsWith('.')), []); // 임시 파일이 남지 않는다
+  assert.strictEqual(L.saveTodoDone(f, [E({ title: 'a|b' })]), false); assert.strictEqual(L.saveTodoDone(f, [E({ title: 'a\nb' })]), false); assert.strictEqual(L.saveTodoDone(f, [{ ...E(), extra: 1, kind: 'x' }]), false);
+  assert.strictEqual(L.saveTodoDone(f, Array.from({ length: 201 }, (_, i) => E({ title: 'x' + i }))), false);
+  assert.strictEqual(L.saveTodoDone(f, Array.from({ length: 200 }, (_, i) => E({ title: 'x' + i }))), true);
+  assert.strictEqual(L.parseTodoDone(fs.readFileSync(f, 'utf8')).length, 200);
+  assert.ok(fs.statSync(f).size < L.TODO_DONE_MAX_BYTES); // 정상 최대치가 읽기 상한 안
+  assert.strictEqual(L.saveTodoDone(f, Array.from({ length: 200 }, (_, i) => E({ tag: '가'.repeat(12) + '/' + '나'.repeat(24), title: '가'.repeat(60) }))), true);
+  assert.strictEqual(L.readTodoDoneFile(f).status, 'ok'); assert.ok(L.readTodoDoneFile(f).data.length >= 100 && fs.statSync(f).size <= L.TODO_DONE_MAX_BYTES); // 가장 긴 줄 200개는 바이트 상한까지만 남고 읽힌다
+  fs.writeFileSync(f, ' '.repeat(L.TODO_DONE_MAX_BYTES + 1)); assert.strictEqual(L.readTodoDoneFile(f).status, 'corrupt'); // 상한 초과
+  assert.ok(L.backupCorruptFile(f) && fs.existsSync(f + '.bak') && !fs.existsSync(f));
+  fs.writeFileSync(f, `x\n${NOW}|done|maru|좋은 줄\n쓰레기|\n`); assert.deepStrictEqual(L.readTodoDoneFile(f).data.map((e) => e.title), ['좋은 줄']); // 줄 단위로 걸러 낸다
+  const real = path.join(dir, 'real.txt'); fs.writeFileSync(real, `${NOW}|done|maru|a\n`); const link = path.join(dir, 'link.txt'); fs.symlinkSync(real, link);
+  assert.strictEqual(L.readTodoDoneFile(link).status, 'corrupt'); // 링크는 읽지 않는다
+  assert.strictEqual(L.readTodoDoneFile(dir).status, 'corrupt'); // 일반 파일이 아니면(폴더) 손상
+  assert.strictEqual(L.readTodoDoneFile(path.join(real, 'x')).status, 'error'); // 읽기 오류(ENOTDIR)는 손상이 아니다: 치우지 않는다
+  if (process.getuid && process.getuid() !== 0) { const noread = path.join(dir, 'noread.txt'); fs.writeFileSync(noread, `${NOW}|done|maru|a\n`, { mode: 0o000 }); assert.strictEqual(L.readTodoDoneFile(noread).status, 'error'); fs.chmodSync(noread, 0o600); } // EACCES
+  const ldir = path.join(tmp, 'td-link'); fs.symlinkSync(dir, ldir);
+  assert.strictEqual(L.saveTodoDone(path.join(ldir, 'todo-done.txt'), list), false); // 폴더가 링크면 쓰지 않는다
+  fs.writeFileSync(f, `${NOW}|done|maru|a\u202Eb\n${NOW}|done|maru|c\u001b[31m\n${NOW}|done|maru|d\n`); assert.deepStrictEqual(L.readTodoDoneFile(f).data.map((e) => e.title), ['d']);
+});
+t('todo-done: 바이트 상한 32768 을 넘지 않게 오래된 줄부터 덜어 낸다', () => {
+  const dir = fs.mkdtempSync(path.join(tmp, 'tdb-')); const f = path.join(dir, 'todo-done.txt');
+  const longTag = '가'.repeat(12) + '/' + '나'.repeat(24);
+  const list = Array.from({ length: 200 }, (_, i) => E({ at: NOW - 200 + i, tag: longTag, title: String(i % 10).repeat(2) + '가'.repeat(58) }));
+  assert.ok(Buffer.byteLength(L.formatTodoDone(list), 'utf8') > L.TODO_DONE_MAX_BYTES); // 줄 수 상한만으로는 못 막는 크기
+  assert.strictEqual(L.TODO_DONE_MAX_BYTES, 32768);
+  assert.strictEqual(L.saveTodoDone(f, list), true);
+  const size = fs.statSync(f).size; assert.ok(size <= 32768 && size > 32768 - 300, String(size)); // 한계 가까이까지는 채운다
+  const back = L.readTodoDoneFile(f); assert.strictEqual(back.status, 'ok');
+  assert.ok(back.data.length < 200 && back.data.length > 100);
+  assert.deepStrictEqual(back.data, list.slice(list.length - back.data.length)); // 최신 줄이 남고 오래된 줄이 빠진다
+  const added = L.addTodoDone(list.slice(0, 199), [E({ at: NOW, tag: longTag, title: '새것' })], NOW); // 가공 경로도 같은 상한
+  assert.ok(Buffer.byteLength(L.formatTodoDone(added), 'utf8') <= 32768 && added[added.length - 1].title === '새것');
+  assert.deepStrictEqual(L.fitTodoDone([E()]), [E()]);
+  fs.writeFileSync(f, ' '.repeat(32768)); assert.strictEqual(L.readTodoDoneFile(f).status, 'ok'); // 정확히 상한이면 읽힌다
+  fs.writeFileSync(f, ' '.repeat(32769)); assert.strictEqual(L.readTodoDoneFile(f).status, 'corrupt');
+});
+t('셸 textclean.py 의 TODO_DONE_MAX_BYTES 와 같다', () => {
+  const py = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'textclean.py'), 'utf8');
+  const m = /^TODO_DONE_MAX_BYTES\s*=\s*([0-9_]+)/m.exec(py); assert.ok(m, 'python 상수를 찾지 못했다');
+  assert.strictEqual(Number(m[1].replace(/_/g, '')), L.TODO_DONE_MAX_BYTES);
+  const ml = /^TODO_DONE_MAX_LINES\s*=\s*([0-9]+)/m.exec(py); assert.ok(ml); assert.strictEqual(Number(ml[1]), L.TODO_DONE_MAX);
+});
+t('main·preload·renderer 정적 검사: 완료/안 함 IPC 와 UI', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8');
+  for (const ch of ['todos:mark', 'todos:undo']) { assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch); assert.ok(new RegExp("ipcMain\\.handle\\('" + ch + "', \\(e,[^)]*\\) => \\{\\n  if \\(!fromMain\\(e\\)").test(main), 'sender 검사 ' + ch); }
+  const h = main.split("ipcMain.handle('todos:mark'")[1].split('\n});')[0];
+  assert.ok(/L\.matchTodo\(cache\.todos, index, shown\)/.test(h) && /L\.makeTodoDone\(item, kind/.test(h)); // 기록은 main 의 항목 값으로(동작은 makeTodoDone 시험이 본다)
+  assert.ok(/commitTodoDone[\s\S]*PERSIST && \(!ROOT \|\| !L\.saveTodoDone/.test(main) && /r\.status === 'corrupt' && PERSIST/.test(main.split('function loadTodoDone')[1].split('\n}')[0])); // 스모크·시험에서는 쓰지 않는다
+  assert.ok(/applyTodoFilter\(\);\n    loadProjState\(\);/.test(main)); // 프로젝트 요약(남은 일 N)은 걸러 낸 목록으로
+  assert.ok(/recentMarks\.has\(id\)/.test(main));
+  assert.ok(/L\.projectOpenTodos[\s\S]*dlg\.projDone\.title[\s\S]*makeTodoDone\(p\.item, 'skip'/.test(main));
+  const sd = main.split("ipcMain.handle('projects:set-status'")[1].split('\n});')[0];
+  assert.ok(/shownKeys\.has\(/.test(sd) && sd.indexOf('projectStateFits') < sd.indexOf('commitTodoDone(L.addTodoDone') && /reason: 'rollback'/.test(sd)); // 창에 보인 항목만, 저장 가능 검사가 표시보다 먼저, 되돌림 실패는 따로
+  assert.ok(/status === 'error'\) return/.test(main.split('function loadTodoDone')[1].split('\n}')[0]));
+  assert.ok(/class="[^"]*todo-main|'todo todo-main/.test(rd) && !/todo-act[\s\S]{0,40}b\.append\(todoActs/.test(rd)); // 본문 단추와 별도 단추
+  assert.ok(/6000/.test(rd.split('function markNote')[1].split('async function markTodo')[0]) && /undoTodoMark/.test(rd));
+  assert.ok(/aria-label/.test(rd.split('function todoActs')[1].split('let markTimer')[0]) && /\.todo-act:focus-visible/.test(css));
+  for (const k of ['proj.err.busy', 'proj.err.rollback', 'todo.done', 'todo.skip', 'todo.done.aria', 'todo.skip.aria', 'todo.marked.done', 'todo.marked.skip', 'todo.undo', 'dlg.projDone.title', 'dlg.projDone.detail', 'dlg.projDone.ok']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
+  for (const lg of I.LANGS) { assert.ok(I.t(lg, 'dlg.projDone.title', { n: 3 }).includes('3')); assert.ok(I.t(lg, 'todo.done.aria', { title: 'T' }).includes('T')); }
+  assert.strictEqual(I.STR.ko['todo.marked.done'] + ' · ' + I.STR.ko['todo.undo'], '완료로 표시했습니다 · 되돌리기');
+  assert.ok(!/MARU_APP_UI[\s\S]{0,40}todo-done/.test(main));
 });
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));
