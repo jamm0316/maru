@@ -178,7 +178,7 @@ t('resolveTodos 대체(suggestions)', () => {
 });
 t('matchTodo index·shown 일치', () => {
   const items = L.parseTodos('a|5|제목1|프롬프트1\nb|9|제목2|');
-  assert.deepStrictEqual([10, 8, 7, 5, 4, 1, NaN].map(L.todoStars), [3, 3, 2, 2, 1, 1, 1]);
+  assert.deepStrictEqual([10, 8, 7, 6, 5, 1, NaN].map(L.todoStarred), [true, true, true, false, false, false, false]);
   assert.strictEqual(L.matchTodo(items, 0, L.todoKey(items[0])), items[0]);
   assert.strictEqual(L.matchTodo(items, 1, L.todoKey(items[1])), items[1]);
   assert.strictEqual(L.matchTodo(items, 0, L.todoKey(items[1])), null);   // 오래된 목록: 다른 항목
