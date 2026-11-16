@@ -254,7 +254,7 @@ html[lang="en"] .card,html[lang="en"] .quest,html[lang="en"] .todo,html[lang="en
 .pd-row .x{min-width:0;overflow-wrap:anywhere}
 .pd-todo{display:flex;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px}
 .pd-todo .imp{flex:none;width:14px;text-align:center;color:var(--or)}
-.pd-actions{margin-top:auto;justify-content:flex-start;padding-top:8px;border-top:1px solid var(--line)}
+.pd-actions{margin:12px 0 4px;justify-content:flex-start;flex-wrap:wrap}
 .pj-pick{flex-direction:column}
 .pj-pick .seg-b{text-align:left}
 #pj-input{font:inherit;font-size:16px;color:var(--ink);background:#0E0B08;border:1px solid #3A2A1C;border-radius:10px;padding:10px 12px}
