@@ -124,4 +124,79 @@ t('effectiveAgent 되살림', () => {
   assert.deepStrictEqual(L.parseAgentRecord('{"state":"busy","at":"2026-01-01T00:00:00Z"}'), { state: 'busy', atMs: Date.parse('2026-01-01T00:00:00Z') });
   assert.strictEqual(L.parseAgentRecord('zzz'), null);
 });
+t('parseTodos 정상·정리', () => {
+  const r = L.parseTodos('블로그|8|글 초안 점검|초안을 점검해 줘\r\n생활-1|3|  병원 예약  |\n');
+  assert.deepStrictEqual(r, [
+    { tag: '블로그', importance: 8, title: '글 초안 점검', prompt: '초안을 점검해 줘' },
+    { tag: '생활-1', importance: 3, title: '병원 예약', prompt: '' },
+  ]);
+  assert.deepStrictEqual(L.parseTodos(undefined), []);
+});
+t('parseTodos 필드 수·| 개수', () => {
+  for (const bad of ['a|5|t', 'a|5|t|p|x', 'a|5||p|', 'a5tp', '|5|t|p', 'a|5|t|p|']) assert.deepStrictEqual(L.parseTodos(bad), [], bad);
+});
+t('parseTodos 태그 문자·길이', () => {
+  assert.strictEqual(L.parseTodos('abcdefghijkl|5|t|').length, 1);
+  assert.strictEqual(L.parseTodos('가나다라마바사아자차카타|5|t|').length, 1);
+  for (const tag of ['abcdefghijklm', '', 'a b', 'a_b', 'a.b', 'a\u200Bb', 'ㄱㄴ', 'a\u3164']) assert.deepStrictEqual(L.parseTodos(tag + '|5|t|'), [], JSON.stringify(tag));
+});
+t('parseTodos 중요도 범위', () => {
+  for (const i of ['1', '5', '10']) assert.strictEqual(L.parseTodos('a|' + i + '|t|').length, 1);
+  for (const i of ['0', '11', '-1', '5.5', '05', '', 'x', ' 5', '5 ', '１']) assert.deepStrictEqual(L.parseTodos('a|' + i + '|t|'), [], JSON.stringify(i));
+});
+t('parseTodos 길이 상한(제목 60·프롬프트 120)', () => {
+  assert.strictEqual(L.parseTodos('a|5|' + '가'.repeat(60) + '|' + '나'.repeat(120)).length, 1);
+  assert.deepStrictEqual(L.parseTodos('a|5|' + '가'.repeat(61) + '|'), []);
+  assert.deepStrictEqual(L.parseTodos('a|5|t|' + '나'.repeat(121)), []);
+  assert.deepStrictEqual(L.parseTodos('a|5|t|' + 'x'.repeat(500)), []);
+});
+t('parseTodos 최대 7개·잘림', () => {
+  const lines = Array.from({ length: 10 }, (_, i) => 'a|5|t' + i + '|');
+  assert.deepStrictEqual(L.parseTodos(lines.join('\n')).map((x) => x.title), ['t0', 't1', 't2', 't3', 't4', 't5', 't6']);
+  assert.deepStrictEqual(L.parseTodos('a|5|x|\nb|5|y|p', true).map((x) => x.title), ['x']);
+});
+t('parseTodos 보이지 않는 문자 제거·빈 제목 거부', () => {
+  const r = L.parseTodos('a|5|할\u202E일\u200B|하\u0007라\u{E0041}');
+  assert.deepStrictEqual(r, [{ tag: 'a', importance: 5, title: '할일', prompt: '하라' }]);
+  assert.deepStrictEqual(L.parseTodos('a|5|\u200B\u3164|p'), []);
+  assert.deepStrictEqual(L.parseTodos('a|5|t|\u200B')[0].prompt, '');
+});
+t('parseTodos 잘못된 줄만 건너뜀', () => {
+  assert.deepStrictEqual(L.parseTodos('bad\n\na|5|ok|\nb|99|no|').map((x) => x.title), ['ok']);
+});
+t('resolveTodos 대체(suggestions)', () => {
+  const sug = { text: '하나\n1 번\n둘', truncated: false };
+  const fb = [{ tag: '추천', importance: 5, title: '하나', prompt: '하나' }, { tag: '추천', importance: 5, title: '1 번', prompt: '1 번' }, { tag: '추천', importance: 5, title: '둘', prompt: '둘' }];
+  assert.deepStrictEqual(L.resolveTodos(null, sug), fb);
+  assert.deepStrictEqual(L.resolveTodos({ text: 'garbage\n', truncated: false }, sug), fb);
+  assert.deepStrictEqual(L.resolveTodos({ text: '', truncated: false }, sug), fb);
+  assert.strictEqual(L.resolveTodos({ text: 'a|5|t|', truncated: false }, sug).length, 1);
+  assert.deepStrictEqual(L.resolveTodos(null, null), []);
+  assert.strictEqual(L.resolveTodos(null, { text: Array.from({ length: 12 }, (_, i) => 's' + i).join('\n') }).length, 7);
+});
+t('matchTodo index·shown 일치', () => {
+  const items = L.parseTodos('a|5|제목1|프롬프트1\nb|9|제목2|');
+  assert.strictEqual(L.matchTodo(items, 0, L.todoKey(items[0])), items[0]);
+  assert.strictEqual(L.matchTodo(items, 1, L.todoKey(items[1])), items[1]);
+  assert.strictEqual(L.matchTodo(items, 0, L.todoKey(items[1])), null);   // 오래된 목록: 다른 항목
+  assert.strictEqual(L.matchTodo(items, 0, '제목1'), null);               // 제목만으로는 불가
+  assert.strictEqual(L.matchTodo(items, 0, '제목1\n다른 프롬프트'), null); // 프롬프트가 바뀜
+  for (const i of [-1, 2, 1.5, NaN, '0', null]) assert.strictEqual(L.matchTodo(items, i, L.todoKey(items[0])), null);
+  assert.strictEqual(L.matchTodo(items, 0, undefined), null);
+  assert.strictEqual(L.matchTodo([], 0, ''), null);
+});
+t('parseTodos 안전하지 않은 프롬프트 시작은 비움', () => {
+  for (const p of ['1 번', '!ls', '/help', '9x']) assert.strictEqual(L.parseTodos('a|5|t|' + p)[0].prompt, '', p);
+  assert.strictEqual(L.parseTodos('a|5|t|\u200B/help')[0].prompt, ''); // 정리 뒤 기준
+  assert.strictEqual(L.parseTodos('a|5|t|점검해 줘')[0].prompt, '점검해 줘');
+  assert.strictEqual(L.parseTodos('a|5|/title|')[0].title, '/title'); // 제목은 영향 없음
+});
+t('fillNotice 사유별 문구', () => {
+  const rs = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'invalid'];
+  const msgs = rs.map((r) => L.fillNotice(r));
+  assert.strictEqual(new Set(msgs).size, rs.length);
+  assert.strictEqual(L.fillNotice('???'), L.fillNotice('invalid'));
+  assert.strictEqual(L.fillNotice(undefined), L.fillNotice('invalid'));
+  assert.strictEqual(L.fillNotice('__proto__'), L.fillNotice('invalid'));
+});
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

@@ -41,6 +41,67 @@ function parseSuggestions(text, truncated = false) {
   return out;
 }
 
+// todos.txt 본문 -> [{tag, importance, title, prompt}]  (스크립트가 모델 출력으로 쓰는 신뢰 못 할 파일: 엄격 파싱)
+// 줄 형식: <tag>|<importance>|<title>|<prompt>  (| 정확히 3개)
+const TODO_MAX = 7;
+const TODO_LINE_MAX_CHARS = 400;
+const TODO_TITLE_MAX = 60;
+const TODO_PROMPT_MAX = 120;
+const TODO_TAG_RE = /^[0-9A-Za-z가-힣-]{1,12}$/;
+const TODO_IMP_RE = /^(10|[1-9])$/;
+function parseTodos(text, truncated = false) {
+  if (typeof text !== 'string') return [];
+  const rows = text.split(/\r?\n/);
+  if (truncated) rows.pop(); // 잘렸으면 마지막(불완전) 줄 버림
+  const out = [];
+  for (const raw of rows) {
+    if (out.length >= TODO_MAX) break;
+    if (!raw.trim() || [...raw].length > TODO_LINE_MAX_CHARS) continue;
+    const f = raw.split('|');
+    if (f.length !== 4) continue;
+    const [tag, imp, rawTitle, rawPrompt] = f;
+    if (!TODO_TAG_RE.test(tag) || !TODO_IMP_RE.test(imp)) continue;
+    const title = cleanQuestText(rawTitle);
+    let prompt = cleanQuestText(rawPrompt);
+    if (prompt && !isSafeQuestStart(prompt)) prompt = ''; // 붙여넣어도 거부될 프롬프트: 직접 할 일로 취급
+    if (!title || [...title].length > TODO_TITLE_MAX || [...prompt].length > TODO_PROMPT_MAX) continue;
+    out.push({ tag, importance: Number(imp), title, prompt });
+  }
+  return out;
+}
+
+// suggestions.txt 문장 -> 할 일 항목(todos.txt 가 없거나 유효 항목이 없을 때의 대체)
+function todosFromSuggestions(list) {
+  return (Array.isArray(list) ? list : []).slice(0, TODO_MAX).map((s) => ({ tag: '추천', importance: 5, title: s, prompt: s }));
+}
+
+// todosRes/sugRes: {text, truncated}|null (readRegular 결과)
+function resolveTodos(todosRes, sugRes) {
+  const t = todosRes ? parseTodos(todosRes.text, todosRes.truncated) : [];
+  if (t.length) return t;
+  return sugRes ? todosFromSuggestions(parseSuggestions(sugRes.text, sugRes.truncated)) : [];
+}
+
+// 렌더러가 보여 준 항목의 비교 키: 제목과 프롬프트(정리된 문자열에는 \n 이 없으므로 모호하지 않다)
+function todoKey(item) { return item ? item.title + '\n' + item.prompt : ''; }
+
+// main 이 가진 목록의 index 항목이 렌더러가 본 shown(todoKey)과 같을 때만 그 항목을 돌려준다
+function matchTodo(items, index, shown) {
+  if (!Array.isArray(items) || !Number.isInteger(index) || index < 0 || index >= items.length) return null;
+  return typeof shown === 'string' && todoKey(items[index]) === shown ? items[index] : null;
+}
+
+// 채우기 거부 사유 -> 사용자 안내 문구
+const FILL_NOTICES = {
+  stale: '목록이 바뀌어 넣지 않았습니다. 갱신된 목록에서 다시 눌러 주세요.',
+  'no-prompt': '이 항목은 직접 해야 하는 일이라 넣을 문장이 없습니다.',
+  'unsafe-start': '안전하지 않은 시작 문자라 넣지 않았습니다.',
+  'not-ready': '지금은 입력을 넣을 수 없습니다. 입력줄이 보일 때 다시 눌러 주세요.',
+  'no-term': '터미널이 실행 중이 아닙니다. Cmd+Shift+R 로 다시 시작해 주세요.',
+  invalid: '할 일을 넣지 못했습니다. 목록을 확인해 주세요.',
+};
+function fillNotice(reason) { return Object.prototype.hasOwnProperty.call(FILL_NOTICES, reason) ? FILL_NOTICES[reason] : FILL_NOTICES.invalid; }
+
 // pty 에 써 넣을 문장 정리: 개행·\r·제어문자·보이지 않는 문자 제거
 function cleanQuestText(s) {
   if (typeof s !== 'string') return '';
@@ -198,7 +259,7 @@ function mergeBriefing(eventLists, max = BRIEFING_MAX) {
 
 const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, matchTodo, fillNotice, TODO_MAX, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

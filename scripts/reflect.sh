@@ -169,7 +169,8 @@ done
 jlabel=$(sed -n '2s/^cwd: //p' "$dg" 2>/dev/null | head -1); jlabel=$(basename "${jlabel:-/}" 2>/dev/null); [ "$jlabel" = / ] && jlabel=""
 journaled=""
 apply_journal "$STAGE/journal.txt" "$short" "$jlabel" && journaled=1
-apply_suggestions "$STAGE/suggestions.txt"   # 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
+apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식) 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
+apply_todos "$STAGE/todos.txt"               # 오늘 할 일: 검증 후 data/todos.txt 교체 + suggestions.txt 재생성(위 옛 추천보다 우선)
 rm -rf "$STAGE"
 
 [ $rc -eq 0 ] && echo "$total" > "$LINES_FILE"

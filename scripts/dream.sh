@@ -119,17 +119,25 @@ if [ -n "$reason" ]; then
   log "되돌림(변경 폐기, 커밋·삭제 없음): $reason"
   fail_bump dream
 else
+  # 모델의 journal/ 변조 검사가 끝난 뒤에 셸이 오래된 일지를 archive/ 로 옮긴다(검사에 걸리지 않는 순서). 보관 뒤 스냅샷으로 마커를 기록한다.
+  archive_journal 14
   mem_snap "$MEM" | md5 -q > "$MARKER"
   fail_reset dream
 fi
 txn_end "$TXN"
-[ -z "$reason" ] && apply_suggestions "$STAGE/suggestions.txt"   # 추천 목록: 기억 트랜잭션과 독립(lib.sh)
+if [ -z "$reason" ]; then   # 추천·할 일 목록: 기억 트랜잭션과 독립(lib.sh)
+  apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식)
+  apply_todos "$STAGE/todos.txt"               # 옛 추천보다 우선
+fi
 rm -rf "$STAGE"
 [ -n "$reason" ] && exit 0
 
 # ---- c. Commit: 기억 폴더만
 summary=$(printf '%s\n' "$out" | grep -v '^Warning: this sign-in' | grep -v '^$' | head -1 \
   | python3 -c 'import sys;print(sys.stdin.read().strip()[:100])')
+# 일지 승격으로 만들거나 고친 기억 파일 목록(요약 출력의 `승격:` 줄, 모델이 쓴 그대로 — 검증하지 않은 로그용)
+promoted=$(printf '%s\n' "$out" | grep -m1 '^승격:' | cut -c1-300)
+[ -n "$promoted" ] && log "일지 승격 보고 — $promoted"
 hist_git add -A -- "$MEM" >> "$LOG" 2>&1
 if ! hist_git diff --cached --quiet -- "$MEM" 2>/dev/null; then
   hist_git commit -q -m "dream: $(date +%F) — ${summary:-정리}" -- "$MEM" >> "$LOG" 2>&1 && log "커밋 완료"

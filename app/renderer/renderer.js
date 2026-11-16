@@ -100,14 +100,21 @@
     }
 
     const q = $('quests'); q.replaceChildren();
-    if (!p.quests.length) q.append(el('div', 'empty', '오늘은 추천이 없습니다. 회고가 끝나면 채워집니다.'));
-    p.quests.forEach((text, i) => {
-      const b = el('button', 'quest'); b.type = 'button';
-      b.append(el('span', 'num', pad(i + 1)), el('span', 't', text));
-      b.addEventListener('click', async () => {
+    if (!p.todos.length) q.append(el('div', 'empty', '아직 추천할 일이 없습니다'));
+    let prevTag = null;
+    p.todos.forEach((it, i) => {
+      if (it.tag !== prevTag) { prevTag = it.tag; q.append(el('div', 'tag-head', it.tag)); }
+      const canFill = !!it.prompt;
+      const b = el(canFill ? 'button' : 'div', 'todo' + (canFill ? '' : ' manual'));
+      if (canFill) b.type = 'button';
+      const body = el('span', 'body'); body.append(el('span', 't', it.title));
+      if (canFill) { const pe = el('span', 'p', it.prompt); pe.title = it.prompt; body.append(pe); }
+      b.append(el('span', 'imp' + (it.importance >= 8 ? ' hi' : ''), String(it.importance)), body);
+      if (!canFill) b.append(el('span', 'own', '직접'));
+      if (canFill) b.addEventListener('click', async () => {
         let res = null;
-        try { res = await window.maru.fillQuest(i, text); } catch (e) { /* 무시 */ }
-        if (!res || !res.ok) note(res && res.reason === 'not-ready' ? '지금은 입력을 넣을 수 없습니다. 입력줄이 보일 때 다시 눌러 주세요.' : '퀘스트를 넣지 못했습니다. 목록이 갱신되었을 수 있습니다.');
+        try { res = await window.maru.fillQuest(i, window.MaruLib.todoKey(it)); } catch (e) { /* 무시 */ }
+        if (!res || !res.ok) note(window.MaruLib.fillNotice(res && res.reason));
         term.focus();
       });
       q.append(b);

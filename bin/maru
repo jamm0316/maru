@@ -1,6 +1,6 @@
 #!/bin/bash
 # maru 런처. 아무것도 설치·수정하지 않는다(PATH 등록 없음). bash 3.2 호환.
-# 사용: maru [ui|app|suggest [번호]|status|log [reflect|dream]|hist ...|doctor|help]
+# 사용: maru [ui|app|suggest [번호]|todo [번호]|status|log [reflect|dream]|hist ...|doctor|help]
 set -u
 
 # 자기 자신의 실제 경로(심볼릭 링크 해석)로 저장소 위치를 계산한다.
@@ -29,6 +29,7 @@ maru — 개인 에이전트 마루 런처
   maru ui              상황판(TUI): 1상태 2기억 3로그 4제안 5추천
   maru app             데스크톱 앱 실행(/Applications/Maru.app 이 있으면 그것, 없으면 app 폴더에서 npm start)
   maru suggest [번호]  추천 요청 목록 보기 / 그 번호의 줄을 클립보드에 복사(전송 안 함)
+  maru todo [번호]     오늘 할 일 목록(태그별) 보기 / 그 번호의 프롬프트를 클립보드에 복사(없으면 직접 할 일)
   maru status          maru-status.sh 출력 (--json 등 옵션 전달)
   maru log [reflect|dream]   로그 마지막 줄 보기(기본 reflect)
   maru hist ...        기억 변경 이력(읽기 전용: log show diff status ls-files)
@@ -129,6 +130,9 @@ case "$cmd" in
   suggest)
     need_env
     exec python3 "$MARU_HOME/scripts/maru_ui.py" --suggest "$@" ;;
+  todo)
+    need_env
+    exec python3 "$MARU_HOME/scripts/todo_cli.py" "$@" ;;
   status) exec "$MARU_HOME/scripts/maru-status.sh" "$@" ;;
   log)
     kind=${1:-reflect}

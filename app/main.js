@@ -70,7 +70,7 @@ let bracketed = false; // 터미널 앱이 브래킷 붙여넣기(?2004)를 켰�
 let seqTail = '';
 const INDEX_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 let cache = {
-  status: null, quests: [], skills: [], briefing: [], battery: null, disk: null,
+  status: null, todos: [], skills: [], briefing: [], battery: null, disk: null,
 };
 
 // ---- 데이터 수집(고정 경로만) ----
@@ -120,13 +120,14 @@ async function refresh() {
     try { status = st ? JSON.parse(st) : null; } catch { status = null; }
 
     const sug = readHead(path.join(ROOT, 'data', 'suggestions.txt'), L.SUGGESTIONS_MAX_BYTES);
+    const todoRes = readHead(path.join(ROOT, 'data', 'todos.txt'), L.SUGGESTIONS_MAX_BYTES);
     const logs = ['dream', 'reflect'].map((k) => {
       const r = readTail(path.join(ROOT, 'data', 'logs', `${k}.log`), L.LOG_TAIL_BYTES);
       return r ? L.parseLogEvents(r.text, k, r.truncated) : [];
     });
     cache = {
       status,
-      quests: sug ? L.parseSuggestions(sug.text, sug.truncated) : [],
+      todos: L.resolveTodos(todoRes, sug), // todos.txt 우선, 없거나 유효 항목이 없으면 suggestions.txt
       skills: L.mergeSkillNames(
         skillDirs(path.join(os.homedir(), '.claude', 'skills')),
         skillDirs(path.join(ROOT, '.claude', 'skills')),
@@ -149,7 +150,7 @@ function panels() {
     lastReflect: st.lastReflect || null,
     lastDream: st.lastDream || null,
     pendingSkillProposals: typeof st.pendingSkillProposals === 'number' ? st.pendingSkillProposals : 0,
-    quests: cache.quests,
+    todos: cache.todos,
     skills: cache.skills,
     briefing: cache.briefing,
     battery: cache.battery,
@@ -247,12 +248,14 @@ ipcMain.on('pty:resize', (e, cols, rows) => {
   try { term.resize(cols, rows); } catch { /* 종료 직후 */ }
 });
 ipcMain.handle('panels:get', (e) => (fromMain(e) ? panels() : null));
-// 렌더러가 화면에서 본 문장(shown)이 main 의 현재 목록과 같을 때만 처리. 쓰는 문장은 항상 main 의 것.
+// 렌더러가 본 항목(shown = 제목+"\n"+프롬프트)이 main 의 index 번 항목과 같을 때만 처리. 쓰는 문장은 항상 main 의 프롬프트.
 ipcMain.handle('quest:fill', (e, index, shown) => {
-  if (!fromMain(e) || !int(index, 0, cache.quests.length - 1)) return { ok: false, reason: 'invalid' };
-  if (cache.quests[index] !== shown) return { ok: false, reason: 'stale' };
+  if (!fromMain(e) || !int(index, 0, cache.todos.length - 1)) return { ok: false, reason: 'invalid' };
+  const item = L.matchTodo(cache.todos, index, shown);
+  if (!item) return { ok: false, reason: 'stale' };
+  if (!item.prompt) return { ok: false, reason: 'no-prompt' }; // 사용자가 직접 할 일
   if (!term) return { ok: false, reason: 'no-term' };
-  const text = L.cleanQuestText(cache.quests[index]);
+  const text = L.cleanQuestText(item.prompt);
   if (!text || !L.isSafeQuestStart(text)) return { ok: false, reason: 'unsafe-start' };
   if (!bracketed) return { ok: false, reason: 'not-ready' }; // 선택 프롬프트 등에서는 쓰지 않는다
   term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만

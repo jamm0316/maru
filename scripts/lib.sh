@@ -113,6 +113,8 @@ txn_end() { rm -rf "$1" "$1.A" "$1.B"; }
 mem_validate() {
   local mem=$1 before=$2 f n after name
   [ -s "$mem/MEMORY.md" ] || { echo "MEMORY.md 없음/비어 있음"; return 1; }
+  [ "$(wc -l < "$mem/MEMORY.md" | tr -d ' ')" -le 200 ] || { echo "MEMORY.md 가 200줄 초과"; return 1; }
+  [ "$(wc -c < "$mem/MEMORY.md" | tr -d ' ')" -le 25600 ] || { echo "MEMORY.md 가 25KB 초과"; return 1; }
   after=0
   for f in "$mem"/*.md; do
     [ -e "$f" ] || continue
@@ -211,7 +213,7 @@ apply_suggestions() {
 import os, stat, sys
 src, tmp = sys.argv[1:3]
 sys.path.insert(0, sys.argv[3])
-from textclean import has_bad   # 제어·서식·보이지 않는 문자 판정(apply_journal 과 공용)
+from textclean import has_bad, safe_start   # 제어·서식·보이지 않는 문자 판정(apply_journal 과 공용)
 MAX_BYTES, MAX_LINES, MAX_CHARS = 65536, 8, 120
 try:
     st = os.lstat(src)
@@ -226,7 +228,7 @@ for line in text.split("\n"):
     if line.endswith("\r"): line = line[:-1]
     line = line.strip(" ")
     if not line: continue
-    if len(line) > MAX_CHARS or has_bad(line):
+    if len(line) > MAX_CHARS or has_bad(line) or not safe_start(line):   # 숫자·!·/ 로 시작하는 줄은 선택 프롬프트·셸·슬래시 명령으로 오해될 수 있어 버림
         dropped += 1; continue
     if line in seen: continue
     seen.add(line); out.append(line)
@@ -241,8 +243,77 @@ PY
   return 0
 }
 
+# ---- 오늘 할 일: apply_todos <stage의 todos.txt>
+# 모델이 쓴 `<태그>|<중요도>|<제목>|<프롬프트>` 줄을 검증해 $MARU_DATA/todos.txt 로 원자적 교체한다. 항상 0을 반환한다(실패는 로그만, 기존 목록 유지).
+# 파일이 없으면 기존 목록을 그대로 둔다. 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 줄은 정확히 4칸(`|` 3개) /
+# 태그 1~12자 [0-9A-Za-z가-힣-], 중요도 1~10, 제목 1~60자, 프롬프트 0~120자(비면 사용자가 직접 할 일) / 제어·서식 문자 제거,
+# 제목·프롬프트는 neutralize_body 로 무해화(일지와 같은 함수) / 비밀값처럼 보이는 줄·제목 중복은 버림.
+# 7개를 넘으면 중요도 높은 순(안정)으로 7개만 남기고, 태그 묶음을 묶음 안 최고 중요도 내림차순으로, 묶음 안은 중요도 내림차순(안정)으로 정렬한다.
+# 유효한 줄이 하나도 없으면 기존 목록 유지. 성공하면 비어 있지 않은 프롬프트로 data/suggestions.txt 도 다시 만든다
+# (apply_suggestions 의 검증 규칙을 그대로 거친다; 프롬프트가 하나도 없으면 빈 파일).
+apply_todos() {
+  local src=$1 dst=$MARU_DATA/todos.txt tmp stg res
+  [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
+  mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "할 일 목록: data 폴더 없음 — 건너뜀"; return 0; }
+  tmp=$(mktemp "$MARU_DATA/.todos.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
+  stg=$(mktemp "$MARU_DATA/.todos-sug.XXXXXX" 2>/dev/null) || { rm -f "$tmp"; type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
+  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" <<'PY' 2>&1
+import os, re, stat, sys
+src, tmp, stg, libdir = sys.argv[1:5]
+sys.path.insert(0, libdir)
+from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, safe_start
+MAX_BYTES, MAX_ITEMS, MAX_TITLE, MAX_PROMPT = 32768, 7, 60, 120
+try:
+    st = os.lstat(src)
+    if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
+    if st.st_size > MAX_BYTES: print("거부: 크기 초과(%d바이트)" % st.st_size); sys.exit(1)
+    with open(src, "rb") as f: raw = f.read(MAX_BYTES + 1)
+    text = raw.decode("utf-8")
+except (OSError, UnicodeDecodeError) as e:
+    print("거부: 읽기 실패(%s)" % type(e).__name__); sys.exit(1)
+items, seen, dropped = [], set(), 0
+for line in text.split("\n"):
+    line = strip_bad(line.rstrip("\r")).strip(" ")
+    if not line: continue
+    parts = line.split("|")
+    if len(parts) != 4 or looks_secret(line): dropped += 1; continue
+    tag, imp, title, prompt = [p.strip(" ") for p in parts]
+    if not valid_tag(tag) or not re.fullmatch("[0-9]{1,2}", imp) or not 1 <= int(imp) <= 10: dropped += 1; continue
+    if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
+    title, prompt = neutralize_body(title), neutralize_body(prompt)
+    if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
+    if prompt and not safe_start(prompt): prompt = ""   # 숫자·!·/ 로 시작하는 프롬프트는 비운다(직접 할 일로 남김)
+    key = " ".join(title.split()).casefold()
+    if key in seen: continue
+    seen.add(key); items.append((tag, int(imp), title, prompt))
+if not items: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
+over = max(0, len(items) - MAX_ITEMS)
+keep = sorted(range(len(items)), key=lambda i: (-items[i][1], i))[:MAX_ITEMS]   # 중요도 높은 순(안정)으로 7개
+items = [items[i] for i in sorted(keep)]
+groups, order = {}, []
+for it in items:
+    if it[0] not in groups: groups[it[0]] = []; order.append(it[0])
+    groups[it[0]].append(it)
+order.sort(key=lambda t: -max(x[1] for x in groups[t]))                    # 안정 정렬: 동률이면 먼저 나온 묶음
+out = []
+for t in order: out.extend(sorted(groups[t], key=lambda x: -x[1]))         # 안정 정렬
+with open(tmp, "w", encoding="utf-8") as f: f.write("".join("%s|%d|%s|%s\n" % x for x in out))
+with open(stg, "w", encoding="utf-8") as f: f.write("".join(x[3] + "\n" for x in out if x[3]))
+print("ok %d줄(버린 줄 %d, 상한 초과 %d)" % (len(out), dropped, over))
+PY
+  ) && [ -s "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$dst" 2>/dev/null
+  if [ $? -eq 0 ]; then
+    type log >/dev/null 2>&1 && log "할 일 목록 갱신: $res"
+    if [ -s "$stg" ]; then apply_suggestions "$stg"
+    else : > "$stg" && chmod 600 "$stg" && mv -f "$stg" "$MARU_DATA/suggestions.txt" 2>/dev/null   # 프롬프트가 있는 할 일이 없으면 추천도 비운다
+    fi
+  else rm -f "$tmp"; type log >/dev/null 2>&1 && log "할 일 목록 유지(기존 목록 그대로): ${res:-반영 실패}"; fi
+  rm -f "$stg"
+  return 0
+}
+
 # ---- 일지(journal): apply_journal <stage의 journal.txt> <세션 id 앞 8자> <프로젝트 라벨(없으면 빈 문자열)>
-# 모델이 쓴 `<kind>|<중요도>|<문장>` 줄(kind=done|decision|todo, 중요도 1~10, 문장 160자 이하)을 검증해 $MEM/journal/YYYY-MM-DD.md
+# 모델이 쓴 `<kind>|<중요도>|<태그>|<문장>` 줄(kind=done|decision|todo, 중요도 1~10, 태그 1~12자 [0-9A-Za-z가-힣-], 없으면 빈 칸 — 정확히 4칸, 문장 160자 이하; 날짜 파일에는 `@태그 ` 접두로 기록)을 검증해 $MEM/journal/YYYY-MM-DD.md
 # 에 블록으로 덧붙인다(헤더는 셸이 쓴다). 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 제어·서식·보이지 않는 문자는 제거
 # (textclean.py, apply_suggestions 와 공용) / 문장은 neutralize_body 로 무해화(백틱 제거, < > [ ] 치환, 앞쪽 # 제거) /
 # 형식에 안 맞는 줄·비밀값처럼 보이는 줄(sk-…, 16진수 32자+, base64 40자+)·중복 줄은 버림 / 앞에서 8줄까지.
@@ -255,10 +326,11 @@ apply_journal() {
 import os, re, stat, sys, tempfile
 src, mem, day, hhmm, sid8, label, libdir = sys.argv[1:8]
 sys.path.insert(0, libdir)
-from textclean import strip_bad, neutralize_body, looks_secret
+from textclean import strip_bad, neutralize_body, looks_secret, TAG_CHARS
 MAX_BYTES, MAX_LINES, MAX_CHARS = 32768, 8, 160
 KINDS = {"done": "한 일", "decision": "결정", "todo": "남은 일"}
-LINE = re.compile(r"^(done|decision|todo)[ ]*\|[ ]*([0-9]{1,2})[ ]*\|[ ]*(.+?)[ ]*$")
+# 정확히 4칸 kind|중요도|태그|문장. 태그 칸은 비어도 되지만(태그 없음) 비어 있지 않은데 형식이 틀리면 줄을 버린다.
+LINE = re.compile(r"^(done|decision|todo)[ ]*\|[ ]*([0-9]{1,2})[ ]*\|[ ]*([" + TAG_CHARS + r"]{0,12})[ ]*\|[ ]*(.+?)[ ]*$")
 try:
     st = os.lstat(src)
     if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
@@ -273,21 +345,21 @@ for line in text.split("\n"):
     if not line: continue
     m = LINE.match(line)
     if not m: dropped += 1; continue
-    kind, imp, body = m.group(1), int(m.group(2)), m.group(3)
+    kind, imp, tag, body = m.group(1), int(m.group(2)), m.group(3) or "", m.group(4)
     if len(body) > MAX_CHARS or looks_secret(body): dropped += 1; continue   # 원문 기준: 길이·비밀값 모양
     body = neutralize_body(body)   # 백틱 제거, < > [ ] 치환, 앞쪽 # 제거(읽을 때도 같은 함수)
     if not 1 <= imp <= 10 or not body or len(body) > MAX_CHARS:
         dropped += 1; continue
     key = (kind, body)
     if key in seen: continue
-    seen.add(key); out.append((kind, imp, body))
+    seen.add(key); out.append((kind, imp, tag, body))
 if not out: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
 over = max(0, len(out) - MAX_LINES)
 out = out[:MAX_LINES]
 out.sort(key=lambda t: list(KINDS).index(t[0]))   # 안정 정렬: 한 일 → 결정 → 남은 일
 lab = re.sub(r"[^0-9A-Za-z가-힣._-]+", "-", label).strip("-._")[:24]
 header = "## %s %s(%s)" % (hhmm, lab + " " if lab else "", sid8)
-block = header + "\n" + "".join("- [%s] (%d) %s\n" % (KINDS[k], i, b) for k, i, b in out)
+block = header + "\n" + "".join("- [%s] (%d) %s%s\n" % (KINDS[k], i, "@" + t + " " if t else "", b) for k, i, t, b in out)
 jd = os.path.join(mem, "journal")
 try:
     if os.path.islink(jd) or (os.path.lexists(jd) and not os.path.isdir(jd)):
@@ -318,6 +390,46 @@ PY
   ); rc=$?
   type log >/dev/null 2>&1 && log "일지: ${res:-반영 실패}"
   return $((rc != 0))
+}
+
+# ---- 일지 보관: archive_journal [일수=14]
+# journal/ 최상위의 날짜 파일(YYYY-MM-DD.md) 중 오늘보다 일수를 넘게 오래된 것을 journal/archive/ 로 옮긴다(삭제 없음).
+# 심볼릭 링크·일반 파일이 아닌 것은 건드리지 않고, journal 이나 archive 가 링크/폴더가 아니면 거부한다. 폴더 700·파일 600.
+# 호출 쪽이 기억 쓰기 잠금을 쥔 상태에서, 모델 실행의 journal 변조 검사가 끝난 뒤에만 부른다(dream.sh). 항상 0.
+archive_journal() {
+  local res
+  res=$(python3 -I - "$MEM/journal" "${1:-14}" <<'PY' 2>&1
+import datetime, os, re, stat, sys
+jd, days = sys.argv[1], int(sys.argv[2])
+if not os.path.lexists(jd): sys.exit(0)
+if os.path.islink(jd) or not os.path.isdir(jd): print("거부: journal 이 심볼릭 링크이거나 폴더가 아님"); sys.exit(0)
+today = datetime.date.today(); ad = os.path.join(jd, "archive"); moved = refused = 0
+for n in sorted(os.listdir(jd)):
+    m = re.fullmatch(r"([0-9]{4}-[0-9]{2}-[0-9]{2})\.md", n)
+    if not m: continue
+    try: d = datetime.date.fromisoformat(m.group(1))
+    except ValueError: continue
+    if (today - d).days <= days: continue
+    p = os.path.join(jd, n)
+    try:
+        if not stat.S_ISREG(os.lstat(p).st_mode): refused += 1; continue   # 심볼릭 링크 등
+        if os.path.islink(ad) or (os.path.lexists(ad) and not os.path.isdir(ad)): print("거부: archive 가 심볼릭 링크이거나 폴더가 아님"); break
+        os.makedirs(ad, mode=0o700, exist_ok=True)
+        if not stat.S_ISDIR(os.lstat(ad).st_mode): print("거부: archive 가 폴더가 아님"); break
+        os.chmod(ad, 0o700)
+        dst, k = os.path.join(ad, n), 1
+        while os.path.lexists(dst):   # 이름이 겹치면 숫자 접미사(YYYY-MM-DD.1.md …)를 붙인다. 덮어쓰지도, 원본을 남겨 두지도 않는다
+            k += 1; dst = os.path.join(ad, "%s.%d.md" % (n[:-3], k - 1))
+        os.rename(p, dst)
+        if stat.S_ISREG(os.lstat(dst).st_mode): os.chmod(dst, 0o600)   # 링크를 따라가 chmod 하지 않는다
+        moved += 1
+    except OSError as e:
+        refused += 1
+print("보관 %d개 이동(거부·건너뜀 %d)" % (moved, refused) if moved or refused else "")
+PY
+  )
+  [ -z "$res" ] || { type log >/dev/null 2>&1 && log "일지 보관: $res"; }
+  return 0
 }
 
 # 프롬프트 템플릿의 {{키}} 를 값으로 치환(경로에 어떤 문자가 있어도 안전): render_template <파일> 키=값...
