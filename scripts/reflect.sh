@@ -98,7 +98,7 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 build_skills_view
 # 프롬프트의 경로 자리표시자를 실제 경로로 치환한다(템플릿에는 사용자 경로가 없다)
 # OPEN_PROJECTS(열린 프로젝트 목록, 앱이 완료·합침으로 둔 것은 뺌)는 값 안의 {{키}} 가 다시 치환되지 않게 맨 뒤에 둔다
-prompt="$(render_template "$MARU_HOME/prompts/reflect-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" SKILLS_DIR="$SKILLS_VIEW" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")
+prompt="$(render_template "$(maru_localized "$MARU_HOME/prompts/reflect-prompt.md")" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" SKILLS_DIR="$SKILLS_VIEW" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")
 
 ---
 다이제스트 파일: $dg"
@@ -207,7 +207,8 @@ after=$(mem_snap "$MEM")
 changed=$(comm -3 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | sed 's/^[[:space:]]*[0-9a-f]\{32\} //' | sort -u)
 paths=()
 while IFS= read -r f; do [ -n "$f" ] && paths+=("$MEM/${f#./}"); done <<< "$changed"
-[ -n "$journaled" ] && [ "${summary:-변경 없음}" = "변경 없음" ] && summary="일지 기록"
+# 모델의 "변경 없음" 표지는 언어별로 다르다(ko: 변경 없음 / en: No changes). 둘 다 같은 뜻으로 받는다.
+case "${summary:-변경 없음}" in "변경 없음"|"No changes") [ -n "$journaled" ] && summary="일지 기록";; esac
 if [ ${#paths[@]} -gt 0 ]; then hist_git add -A -- "${paths[@]}" >> "$LOG" 2>&1; fi
 if ! hist_git diff --cached --quiet -- "${paths[@]:-$MEM}" 2>/dev/null; then
   hist_git commit -q -m "reflect: $short — ${summary:-회고}" -- "${paths[@]}" >> "$LOG" 2>&1 && log "[$short] 커밋 완료"

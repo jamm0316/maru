@@ -1,4 +1,6 @@
 #!/bin/bash
+# T <한국어> <영어>: MARU_LANG 이 en 이면 영어, 아니면 한국어 문구(호출 시점에 읽는다)
+type T >/dev/null 2>&1 || T() { if [ "${MARU_LANG:-ko}" = en ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 # install.sh 가 쓰는 launchd plist 렌더·검증·교체 함수 (source 전용). 호출 전에 lib.sh 로 python3 가 동작하는 PATH 를 만들어 둔다.
 # 시험용 주입: MARU_PLIST_RENDER(렌더 함수 이름), MARU_LAUNCHCTL(launchctl 대체 명령), MARU_PLUTIL.
 MARU_PLIST_RENDER=${MARU_PLIST_RENDER:-render_plist}
@@ -22,17 +24,17 @@ PY
 
 # 렌더 결과 검증: 비어 있지 않음 + 치환 안 된 자리표시자 없음 + plutil -lint. 실패하면 이유를 출력하고 1.
 plist_validate() {
-  [ -s "$1" ] || { echo "렌더 결과가 비어 있음"; return 1; }
-  if grep -q '{{[A-Z_]*}}' "$1"; then echo "치환되지 않은 자리표시자가 남음"; return 1; fi
-  "$MARU_PLUTIL" -lint "$1" >/dev/null 2>&1 || { echo "plutil -lint 실패"; return 1; }
+  [ -s "$1" ] || { echo "$(T "렌더 결과가 비어 있음" "Rendered output is empty")"; return 1; }
+  if grep -q '{{[A-Z_]*}}' "$1"; then echo "$(T "치환되지 않은 자리표시자가 남음" "Unreplaced placeholders remain")"; return 1; fi
+  "$MARU_PLUTIL" -lint "$1" >/dev/null 2>&1 || { echo "$(T "plutil -lint 실패" "plutil -lint failed")"; return 1; }
   return 0
 }
 
 # 사전 검증(아무것도 바꾸지 않음): 템플릿이 렌더되고 검증을 통과하는지 임시 파일로만 본다: plist_preflight <템플릿>
 plist_preflight() {
   local tmp why
-  tmp=$(mktemp "${TMPDIR:-/tmp}/maru-plist.XXXXXX") || { echo "임시 파일을 만들 수 없음"; return 1; }
-  if ! "$MARU_PLIST_RENDER" "$1" > "$tmp" 2>/dev/null; then rm -f "$tmp"; echo "렌더 실패: $1"; return 1; fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/maru-plist.XXXXXX") || { echo "$(T "임시 파일을 만들 수 없음" "Cannot create a temporary file")"; return 1; }
+  if ! "$MARU_PLIST_RENDER" "$1" > "$tmp" 2>/dev/null; then rm -f "$tmp"; echo "$(T "렌더 실패: $1" "Render failed: $1")"; return 1; fi
   if ! why=$(plist_validate "$tmp"); then rm -f "$tmp"; echo "$why: $1"; return 1; fi
   rm -f "$tmp"; return 0
 }
@@ -43,28 +45,28 @@ plist_preflight() {
 install_launchd() {
   local label=$1 tpl=$2 plist=$3 dry=${4:-} bdir=${5:-} tmp new prev="" why uid i ok=""
   uid=$(id -u)
-  tmp=$(mktemp "${TMPDIR:-/tmp}/maru-plist.XXXXXX") || { echo "  임시 파일을 만들 수 없음"; return 1; }
+  tmp=$(mktemp "${TMPDIR:-/tmp}/maru-plist.XXXXXX") || { echo "$(T "  임시 파일을 만들 수 없음" "  Cannot create a temporary file")"; return 1; }
   if ! "$MARU_PLIST_RENDER" "$tpl" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp"; echo "  plist 렌더 실패: 기존 plist 와 launchd 작업은 그대로 둡니다"; return 1
+    rm -f "$tmp"; echo "$(T "  plist 렌더 실패: 기존 plist 와 launchd 작업은 그대로 둡니다" "  plist render failed: the existing plist and launchd job are left as they are")"; return 1
   fi
   if ! why=$(plist_validate "$tmp"); then
-    rm -f "$tmp"; echo "  plist 검증 실패($why): 기존 plist 와 launchd 작업은 그대로 둡니다"; return 1
+    rm -f "$tmp"; echo "$(T "  plist 검증 실패($why): 기존 plist 와 launchd 작업은 그대로 둡니다" "  plist validation failed ($why): the existing plist and launchd job are left as they are")"; return 1
   fi
   if [ -f "$plist" ] && cmp -s "$tmp" "$plist" && "$MARU_LAUNCHCTL" print "gui/$uid/$label" >/dev/null 2>&1; then
-    rm -f "$tmp"; echo "  이미 최신으로 로드됨(변경 없음)"; return 0
+    rm -f "$tmp"; echo "$(T "  이미 최신으로 로드됨(변경 없음)" "  Already loaded and up to date (no change)")"; return 0
   fi
   if [ -n "$dry" ]; then
-    rm -f "$tmp"; echo "  (dry-run) 렌더·검증 통과. 실제 실행 시 $plist 작성 후 launchctl bootstrap"; return 0
+    rm -f "$tmp"; echo "$(T "  (dry-run) 렌더·검증 통과. 실제 실행 시 $plist 작성 후 launchctl bootstrap" "  (dry-run) Render and validation passed. A real run writes $plist and runs launchctl bootstrap")"; return 0
   fi
-  mkdir -p "$(dirname "$plist")" || { rm -f "$tmp"; echo "  plist 폴더를 만들 수 없음"; return 1; }
+  mkdir -p "$(dirname "$plist")" || { rm -f "$tmp"; echo "$(T "  plist 폴더를 만들 수 없음" "  Cannot create the plist folder")"; return 1; }
   new=$plist.new.$$
   if ! cp "$tmp" "$new" || ! plist_validate "$new" >/dev/null; then
-    rm -f "$tmp" "$new"; echo "  plist 임시 사본 작성 실패: 기존 것은 그대로 둡니다"; return 1
+    rm -f "$tmp" "$new"; echo "$(T "  plist 임시 사본 작성 실패: 기존 것은 그대로 둡니다" "  Writing the temporary plist copy failed: the existing one is left as it is")"; return 1
   fi
   rm -f "$tmp"
   if [ -f "$plist" ]; then
     prev=$plist.prev.$$
-    cp -p "$plist" "$prev" || { rm -f "$new"; echo "  기존 plist 백업 실패: 중단"; return 1; }
+    cp -p "$plist" "$prev" || { rm -f "$new"; echo "$(T "  기존 plist 백업 실패: 중단" "  Backing up the existing plist failed: aborting")"; return 1; }
     if [ -n "$bdir" ] && mkdir -p "$bdir" 2>/dev/null; then cp -p "$plist" "$bdir/$label.plist.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true; fi
   fi
   "$MARU_LAUNCHCTL" bootout "gui/$uid/$label" >/dev/null 2>&1 || true
@@ -78,12 +80,12 @@ install_launchd() {
   fi
   if [ -n "$ok" ]; then
     [ -z "$prev" ] || rm -f "$prev"
-    echo "  등록: $plist"; return 0
+    echo "$(T "  등록: $plist" "  Registered: $plist")"; return 0
   fi
-  echo "  launchctl bootstrap 실패(5회 시도): $plist"
+  echo "$(T "  launchctl bootstrap 실패(5회 시도): $plist" "  launchctl bootstrap failed (5 attempts): $plist")"
   if [ -n "$prev" ] && mv -f "$prev" "$plist"; then
-    if "$MARU_LAUNCHCTL" bootstrap "gui/$uid" "$plist" 2>/dev/null; then echo "  이전 plist 로 되돌려 다시 올림"
-    else echo "  이전 plist 로 되돌렸지만 다시 올리지 못함: launchctl bootstrap gui/$uid $plist"; fi
+    if "$MARU_LAUNCHCTL" bootstrap "gui/$uid" "$plist" 2>/dev/null; then echo "$(T "  이전 plist 로 되돌려 다시 올림" "  Rolled back to the previous plist and reloaded")"
+    else echo "$(T "  이전 plist 로 되돌렸지만 다시 올리지 못함: launchctl bootstrap gui/$uid $plist" "  Rolled back to the previous plist but could not reload it: launchctl bootstrap gui/$uid $plist")"; fi
   fi
   return 1
 }

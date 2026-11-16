@@ -12,6 +12,11 @@
 """
 import argparse, json, os, re, shutil, sys, time
 
+
+def T(ko, en):
+    """MARU_LANG=en 이면 영어 문구(install.sh/uninstall.sh 가 lib.sh 의 해석 결과를 내보낸다), 아니면 한국어."""
+    return en if os.environ.get("MARU_LANG") == "en" else ko
+
 BEGIN, END = "<!-- maru:begin -->", "<!-- maru:end -->"
 
 
@@ -19,7 +24,7 @@ def backup(path, bdir, dry):
     if not os.path.exists(path):
         return
     dest = os.path.join(bdir, f"{os.path.basename(path)}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
-    print(f"  백업: {dest}")
+    print(T(f"  백업: {dest}", f"  Backup: {dest}"))
     if not dry:
         os.makedirs(bdir, exist_ok=True)
         shutil.copy2(path, dest)
@@ -71,12 +76,12 @@ def cmd_hook_add(a):
     # 멱등 기준 = 이벤트 + 명령. matcher 가 다르면 기존 항목을 새 matcher 로 교체한다(두 번째 항목을 만들지 않는다).
     same = [g for g in d.get("hooks", {}).get(ev, []) if isinstance(g, dict) and any(h.get("command") == a.command for h in hook_cmds(g))]
     if same and all(g.get("matcher") == a.matcher for g in same) and len(same) == 1 and len(hook_cmds(same[0])) == 1:
-        print(f"  {ev} 훅: 이미 등록됨(변경 없음)"); return
+        print(T(f"  {ev} 훅: 이미 등록됨(변경 없음)", f"  {ev} hook: already registered (no change)")); return
     if same: strip_hooks(d, lambda c: c == a.command, ev)
     grp = {"hooks": [{"type": "command", "command": a.command}]}
     if a.matcher: grp = {"matcher": a.matcher, **grp}
     d.setdefault("hooks", {}).setdefault(ev, []).append(grp)
-    print(f"  {ev} 훅 등록: {a.command}")
+    print(T(f"  {ev} 훅 등록: {a.command}", f"  {ev} hook registered: {a.command}"))
     if a.dry_run: return
     backup(a.settings, a.backup_dir, False)
     atomic_write(a.settings, dump_json(d, ind, nl))
@@ -87,8 +92,8 @@ def cmd_hook_remove(a):
     ev = a.event or "SessionEnd"
     n = strip_hooks(d, lambda c: a.match in c, ev)
     if not n:
-        print(f"  {ev} 훅: 해당 항목 없음"); return
-    print(f"  {ev} 훅 {n}개 제거")
+        print(T(f"  {ev} 훅: 해당 항목 없음", f"  {ev} hook: nothing to remove")); return
+    print(T(f"  {ev} 훅 {n}개 제거", f"  {ev} hook: {n} removed"))
     if a.dry_run: return
     backup(a.settings, a.backup_dir, False)
     atomic_write(a.settings, dump_json(d, ind, nl))
@@ -106,8 +111,8 @@ def cmd_claude_md(a):
     text = re.sub(r"\n{3,}", "\n\n", text).strip("\n")
     new = (text + "\n\n" if text else "") + block + "\n"
     if new == old:
-        print("  ~/.claude/CLAUDE.md 블록: 이미 최신(변경 없음)"); return
-    print("  ~/.claude/CLAUDE.md: maru 블록 추가/갱신")
+        print(T("  ~/.claude/CLAUDE.md 블록: 이미 최신(변경 없음)", "  ~/.claude/CLAUDE.md block: already up to date (no change)")); return
+    print(T("  ~/.claude/CLAUDE.md: maru 블록 추가/갱신", "  ~/.claude/CLAUDE.md: maru block added/updated"))
     if a.dry_run: return
     backup(a.file, a.backup_dir, False)
     os.makedirs(os.path.dirname(a.file), exist_ok=True)
@@ -115,12 +120,12 @@ def cmd_claude_md(a):
 
 
 def cmd_claude_md_remove(a):
-    if not os.path.exists(a.file): print("  CLAUDE.md 없음"); return
+    if not os.path.exists(a.file): print(T("  CLAUDE.md 없음", "  No CLAUDE.md")); return
     old = open(a.file, encoding="utf-8").read()
-    if BEGIN not in old: print("  CLAUDE.md: maru 블록 없음"); return
+    if BEGIN not in old: print(T("  CLAUDE.md: maru 블록 없음", "  CLAUDE.md: no maru block")); return
     new = re.sub(r"\n{3,}", "\n\n", strip_block(old)).strip("\n")
     new = new + "\n" if new else ""
-    print("  ~/.claude/CLAUDE.md: maru 블록 제거")
+    print(T("  ~/.claude/CLAUDE.md: maru 블록 제거", "  ~/.claude/CLAUDE.md: maru block removed"))
     if a.dry_run: return
     backup(a.file, a.backup_dir, False)
     atomic_write(a.file, new)
@@ -130,7 +135,7 @@ def cmd_local_settings(a):
     d, ind, nl = load_json(a.file)
     dirs = d.setdefault("permissions", {}).setdefault("additionalDirectories", [])
     if a.dir in dirs:
-        print("  .claude/settings.local.json: 이미 설정됨"); return
+        print(T("  .claude/settings.local.json: 이미 설정됨", "  .claude/settings.local.json: already set")); return
     dirs.append(a.dir)
     print(f"  .claude/settings.local.json: additionalDirectories += {a.dir}")
     if a.dry_run: return
@@ -139,14 +144,14 @@ def cmd_local_settings(a):
 
 
 def cmd_local_settings_remove(a):
-    if not os.path.exists(a.file): print("  .claude/settings.local.json 없음"); return
+    if not os.path.exists(a.file): print(T("  .claude/settings.local.json 없음", "  No .claude/settings.local.json")); return
     d, ind, nl = load_json(a.file)
     dirs = d.get("permissions", {}).get("additionalDirectories", [])
-    if a.dir not in dirs: print("  .claude/settings.local.json: 우리가 넣은 항목 없음"); return
+    if a.dir not in dirs: print(T("  .claude/settings.local.json: 우리가 넣은 항목 없음", "  .claude/settings.local.json: none of our entries")); return
     dirs.remove(a.dir)
     if not dirs: del d["permissions"]["additionalDirectories"]
     if not d["permissions"]: del d["permissions"]
-    print(f"  .claude/settings.local.json: additionalDirectories 에서 {a.dir} 제거" + ("(파일이 비어 삭제)" if not d else ""))
+    print(T(f"  .claude/settings.local.json: additionalDirectories 에서 {a.dir} 제거", f"  .claude/settings.local.json: removed {a.dir} from additionalDirectories") + (T("(파일이 비어 삭제)", " (file was empty, deleted)") if not d else ""))
     if a.dry_run: return
     if d: atomic_write(a.file, dump_json(d, ind, nl))
     else: os.remove(a.file)

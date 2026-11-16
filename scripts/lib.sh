@@ -801,7 +801,46 @@ _maru_resolve_env() {
   return 0
 }
 
+# ---- 언어(MARU_LANG = ko|en) 해석
+# 우선순위: 환경변수 MARU_LANG(정확히 ko 또는 en; data/maru.conf 에서 `MARU_LANG=${MARU_LANG:-en}` 으로 정해도 같다) >
+# $MARU_DATA/profile.json 의 lang(앱이 쓴다) > ko. 로캘은 보지 않는다(launchd 처럼 LANG 이 없는 환경에서 기존 한국어 사용자가 바뀌지 않게).
+# 프로필은 믿지 않는 입력: O_NOFOLLOW|O_NONBLOCK 으로 열어 일반 파일인지 fstat 로 확인하고(FIFO·링크에 멈추지 않는다) 4096바이트 이하만 읽는다.
+# MARU_LANG 이 이미 유효하면 python 을 띄우지 않는다.
+maru_resolve_lang() {
+  local l=""
+  case "${MARU_LANG:-}" in ko|en) return 0;; esac
+  l=$(python3 -I - "$MARU_DATA/profile.json" <<'PY' 2>/dev/null
+import json, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 4096: sys.exit(0)
+        raw = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    if len(raw) > 4096: sys.exit(0)
+    o = json.loads(raw.decode("utf-8"))
+    v = o.get("lang") if isinstance(o, dict) else None
+    if v in ("ko", "en"): print(v)
+except Exception:
+    pass
+PY
+  )
+  case "$l" in ko|en) MARU_LANG=$l;; *) MARU_LANG=ko;; esac
+  return 0
+}
+# T <한국어> <영어>: MARU_LANG 이 en 이면 영어, 아니면 한국어 문구(호출 시점에 읽는다)
+type T >/dev/null 2>&1 || T() { if [ "${MARU_LANG:-ko}" = en ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
+# 언어별 파일 고르기: maru_localized <경로.md> -> en 이고 <경로>.en.md 가 일반 파일이면 그것, 아니면 원래 파일
+maru_localized() {
+  local f=$1 e=${1%.md}.en.md
+  if [ "${MARU_LANG:-}" = en ] && [ -f "$e" ] && [ ! -L "$e" ]; then printf '%s' "$e"; else printf '%s' "$f"; fi
+}
+
 if _maru_resolve_env; then
+  maru_resolve_lang
+  export MARU_LANG
   # ~/.claude 아래 쓰기는 허용 규칙만으로는 막히므로, 헤드리스 실행에는 이 기억 폴더를 "자동 기억 폴더"로 지정해
   # 쓰기를 허용한다(실측: 이 설정 + cwd가 저장소 밖이면 memory 쓰기만 허용되고 다른 곳은 거부된다).
   MEM_SETTINGS=$(jq -nc --arg m "$MEM" '{autoMemoryDirectory:$m}' 2>/dev/null) || MEM_SETTINGS=""

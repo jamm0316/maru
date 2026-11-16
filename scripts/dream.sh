@@ -82,7 +82,7 @@ trap 'rm -rf "$RLOCK" "$DLOCK"; rotate_log "$LOG"' EXIT
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 TXN=$STATE/txn.dream
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
-prompt="$(render_template "$MARU_HOME/prompts/consolidate-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")"
+prompt="$(render_template "$(maru_localized "$MARU_HOME/prompts/consolidate-prompt.md")" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")"
 mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { env_fail "작업 폴더를 만들 수 없음: $MARU_WORK"; exit 1; }
 # 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
 txn_begin "$MEM" "$TXN" || { env_fail "기억 폴더 스냅샷 실패 — 정리 건너뜀(MEM 경로·권한 확인)"; txn_end "$TXN"; exit 1; }
@@ -138,7 +138,7 @@ rm -rf "$STAGE"
 summary=$(printf '%s\n' "$out" | grep -v '^Warning: this sign-in' | grep -v '^$' | head -1 \
   | python3 -c 'import sys;print(sys.stdin.read().strip()[:100])')
 # 일지 승격으로 만들거나 고친 기억 파일 목록(요약 출력의 `승격:` 줄, 모델이 쓴 그대로 — 검증하지 않은 로그용)
-promoted=$(printf '%s\n' "$out" | grep -m1 '^승격:' | cut -c1-300)
+promoted=$(printf '%s\n' "$out" | grep -m1 -E '^(승격|Promoted):' | cut -c1-300)
 [ -n "$promoted" ] && log "일지 승격 보고 — $promoted"
 hist_git add -A -- "$MEM" >> "$LOG" 2>&1
 if ! hist_git diff --cached --quiet -- "$MEM" 2>/dev/null; then
