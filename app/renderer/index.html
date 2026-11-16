@@ -21,6 +21,7 @@
         <div class="growth-row"><span id="growth-left">성장도 · 기억 0개</span><span id="growth-right"></span></div>
         <div class="bar"><div class="bar-fill" id="bar"></div></div>
       </div>
+      <button type="button" class="btn ghost mem-open" id="mem-open" data-i18n="mem.open" data-i18n-aria="mem.open.aria" aria-label="기억 보기 열기">기억 보기</button>
     </div>
     <div class="sys">
       <span class="sys-item"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF8A2A" stroke-width="2" aria-hidden="true"><rect x="2" y="7" width="18" height="10" rx="2"/><path d="M22 11v2"/><rect x="4" y="9" width="14" height="6" fill="#FF8A2A" stroke="none"/></svg><span id="batt">배터리 -</span></span>
@@ -83,6 +84,36 @@
         <div class="btn-row pd-actions" id="id-actions"></div>
         <div class="pd-note" id="id-note" role="status"></div>
         <div class="pd-body" id="id-body"></div>
+      </section>
+      <section id="mem-view" class="proj-detail mem-view" role="region" aria-labelledby="mv-title" hidden>
+        <div class="pd-top mv-top">
+          <button type="button" class="btn ghost" id="mv-close" data-i18n="mem.close" data-i18n-aria="mem.close.aria" aria-label="기억 보기 닫기">닫기</button>
+          <h2 class="pd-title" id="mv-title" tabindex="-1" data-i18n="mem.title">기억 보기</h2>
+          <span class="pill" id="mv-count"></span>
+          <div class="seg mv-seg" id="mv-mode" role="radiogroup" data-i18n-aria="mem.mode.aria" aria-label="보기 방식">
+            <button type="button" class="seg-b on" role="radio" aria-checked="true" data-mode="list" data-i18n="mem.mode.list">목록</button>
+            <button type="button" class="seg-b" role="radio" aria-checked="false" data-mode="graph" data-i18n="mem.mode.graph">그래프</button>
+          </div>
+        </div>
+        <div class="mv-tools">
+          <input id="mv-q" class="mv-q" type="search" autocomplete="off" spellcheck="false" maxlength="100" data-i18n-aria="mem.search.aria" aria-label="기억 검색">
+          <select id="mv-tag" class="mv-tag" data-i18n-aria="mem.tag.aria" aria-label="태그로 모아 보기"></select>
+          <span class="hint" id="mv-note" role="status"></span>
+        </div>
+        <div class="mv-empty" id="mv-empty" hidden><p id="mv-empty-t"></p><p class="hint" id="mv-empty-h"></p></div>
+        <div class="mv-body" id="mv-body">
+          <div class="mv-main" id="mv-main">
+            <div class="mv-list" id="mv-list" role="group" data-i18n-aria="mem.list.aria" aria-label="기억 목록"></div>
+            <div class="mv-graph" id="mv-graph" hidden>
+              <svg id="mv-svg" class="mv-svg" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet" role="img" data-i18n-aria="mem.graph.aria" aria-label="기억 연결 그래프"></svg>
+              <div class="mv-ghint" id="mv-hint"></div>
+              <div class="mv-tip" id="mv-tip" hidden></div>
+              <div class="mv-zoom"><button type="button" class="btn" id="mv-zin" data-i18n-aria="mem.graph.zin" aria-label="확대">+</button><button type="button" class="btn" id="mv-zout" data-i18n-aria="mem.graph.zout" aria-label="축소">−</button><button type="button" class="btn" id="mv-zreset" data-i18n-aria="mem.graph.reset" aria-label="처음 위치">⟲</button></div>
+              <div class="mv-legend" id="mv-legend" role="group" data-i18n-aria="mem.legend.aria" aria-label="범례"></div>
+            </div>
+          </div>
+          <aside class="mv-detail" id="mv-detail" data-i18n-aria="mem.detail.aria" aria-label="기억 내용"></aside>
+        </div>
       </section>
       <div id="term-empty" class="term-empty" hidden>
         <p data-i18n="ws.empty">열린 작업 공간이 없습니다</p>
@@ -201,6 +232,7 @@
 <script src="../node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
 <script src="../lib.js"></script>
 <script src="../i18n.js"></script>
+<script src="memview.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>

@@ -46,7 +46,7 @@
   }
   function focusTerm() {
     if (modalOpen()) return;
-    if (detailOpen) { (detailMode === 'inbox' ? $('id-title') : $('pd-title')).focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
+    if (detailOpen) { (detailMode === 'inbox' ? $('id-title') : detailMode === 'memory' ? $('mv-title') : $('pd-title')).focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
     const e = terms.get(activeId); if (e && e.opened) e.term.focus();
   }
   // Tab 순환(모달 안에서만)
@@ -62,6 +62,7 @@
 
   // ---- 터미널: 작업 공간마다 xterm 하나를 살려 두고 활성만 보인다 ----
   // WebGL 은 활성 터미널에만 붙이고, 숨길 때 dispose 한다(컨텍스트 수 제한 회피). 비활성 터미널은 DOM 렌더러 없이도 버퍼만 유지한다.
+  let memView = null; // 기억 보기(memview.js). 가운데 영역을 차지하는 세 번째 상세
   let detailMode = 'project'; // 'project' | 'inbox': 가운데 상세가 무엇인지(둘 다 detailOpen 으로 터미널을 가린다)
   let detailOpen = false; let detailKey = null; let detail = null; let detailSig = ''; let detailSeq = 0; // 프로젝트 상세(아래 '프로젝트' 절). 열려 있으면 터미널은 숨기기만 한다
   const terms = new Map(); // id -> { id, term, fit, host, gl, opened, started, starting }
@@ -560,7 +561,7 @@
   async function openInboxDetail(kind, slug) {
     detailMode = 'inbox'; detailOpen = true; detailKey = null; detail = null; detailSig = ''; detailSeq++;
     inboxDet = { kind, slug, loading: true }; const my = ++inboxDetSeq;
-    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = false;
+    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = false; if (memView) memView.hide();
     $('id-note').textContent = '';
     if (lastPanels) renderProjects(lastPanels.projects);
     renderInboxDetail(true);
@@ -799,7 +800,7 @@
   });
 
   function openDetail(key) {
-    detailMode = 'project'; inboxDet = null; inboxDetSeq++; $('inbox-detail').hidden = true;
+    detailMode = 'project'; inboxDet = null; inboxDetSeq++; $('inbox-detail').hidden = true; if (memView) memView.hide();
     detailKey = key; detailOpen = true; detail = null; detailSig = '';
     $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = false;
     $('pd-note').textContent = '';
@@ -815,7 +816,7 @@
   function closeDetail(refocus) {
     if (!detailOpen) return;
     detailOpen = false; detailKey = null; detail = null; detailSig = ''; detailSeq++; inboxDet = null; inboxDetSeq++;
-    $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
+    $('proj-detail').hidden = true; $('inbox-detail').hidden = true; if (memView) memView.hide(); $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
     if (lastPanels) renderProjects(lastPanels.projects);
     showActive(false); // 숨겨 둔 동안 바뀐 크기를 다시 맞추고 그린다(pty 는 그대로 살아 있다)
     if (refocus) focusTerm();
@@ -1007,6 +1008,7 @@
     wsKey = null; renderWs();
     if (detailOpen && detailMode === 'project' && detail) renderDetail(false);
     if (detailOpen && detailMode === 'inbox' && inboxDet) renderInboxDetail(false);
+    if (memView) memView.relabel();
     if (setRows) renderSettings();
     if (!$('pop-update').hidden) renderUpdate();
     renderLangSeg();
@@ -1372,7 +1374,12 @@
       if (top.closable()) top.close();
     } else if (menuOpen) { e.preventDefault(); closeMenu(true); }
     else if (updOpen) { e.preventDefault(); closeUpdate(true); }
-    else if (detailOpen) { e.preventDefault(); closeDetail(true); } // 프로젝트 상세 -> 터미널 복귀
+    else if (detailOpen) {
+      e.preventDefault();
+      // 기억 보기에서 검색창에 글자가 있으면 Esc 는 검색만 지우고, 아니면 화면을 닫는다
+      if (detailMode === 'memory' && memView && document.activeElement === $('mv-q') && memView.clearSearch()) return;
+      closeDetail(true); // 프로젝트 상세 -> 터미널 복귀
+    }
   }, true);
   document.addEventListener('mousedown', (e) => {
     const t = e.target;
@@ -1389,6 +1396,17 @@
   for (const ev of ['pointermove', 'mousedown']) document.addEventListener(ev, (e) => { if (!e.metaKey) setMod(false); }, true);
   window.addEventListener('blur', () => setMod(false));
   document.addEventListener('visibilitychange', () => { if (document.hidden) setMod(false); });
+
+  // ---- 기억 보기: 터미널 자리를 차지하는 읽기 전용 화면(목록·그래프) ----
+  memView = window.MaruMemView.create({ T, $, el, Lib, onClose: () => closeDetail(true) });
+  function openMemory(initialMode) {
+    if (detailOpen && detailMode === 'memory') return;
+    detailMode = 'memory'; inboxDet = null; inboxDetSeq++; detailKey = null; detail = null; detailSig = ''; detailSeq++; detailOpen = true;
+    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true;
+    if (lastPanels) renderProjects(lastPanels.projects);
+    memView.show(initialMode).then(() => $('mv-title').focus());
+  }
+  $('mem-open').addEventListener('click', () => openMemory('list'));
 
   // ---- 시작 ----
   async function boot() {
@@ -1407,7 +1425,7 @@
     else if (init && init.uiOpen === 'settings') openSettings();
     else if (init && init.uiOpen === 'update') openUpdate();
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
     setInterval(() => { if (lastPanels) renderInbox(lastPanels.inbox); }, 30000); // 상대 시각(N분 전)을 갱신
     setInterval(syncWs, 1000); // 상태 파일은 이벤트가 없으므로 주기적으로 읽는다

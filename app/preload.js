@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('maru', {
   renameProject: (key, title) => ipcRenderer.invoke('projects:rename', String(key).slice(0, 40), String(title).slice(0, 400)),
   mergeProject: (key, into) => ipcRenderer.invoke('projects:merge', String(key).slice(0, 40), String(into).slice(0, 40)),
   continueProject: (id, key, shown) => ipcRenderer.invoke('projects:continue', String(id), String(key).slice(0, 40), String(shown).slice(0, 200)),
+  // 기억 보기(읽기 전용): 인자 없음. main 이 읽어 정리한 목록만 받는다.
+  getMemories: () => ipcRenderer.invoke('memories:list'),
   // 알림과 승인함: 종류('squad'|'skill')와 slug 문자열만 싣는다(내용·경로는 받지 않는다). main 이 자기 목록과 대조하고 설치·거절은 네이티브 확인 창을 띄운다.
   inboxDetail: (kind, slug) => ipcRenderer.invoke('inbox:detail', String(kind).slice(0, 8), String(slug).slice(0, 48)),
   inboxInstallSquad: (slug, digest) => ipcRenderer.invoke('inbox:install-squad', String(slug).slice(0, 48), typeof digest === 'string' ? digest.slice(0, 80) : ''), // digest: 화면에 보인 검증 결과의 것(main 이 64 hex 와 새 검사 결과를 대조한다)

@@ -33,7 +33,7 @@ const ROOT = found ? found.root : null; // null 이면 저장소를 못 찾은 �
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
@@ -1201,6 +1201,48 @@ ipcMain.handle('inbox:request-skill', (e, id, slug) => inboxAction(e, async () =
   if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' }; // 묻는 동안 바뀌었을 수 있다
   return writePrompt(w, text);
 }));
+// ---- 기억 보기(읽기 전용) ----
+// 시험 전용(MARU_APP_UI=memory|memgraph): 지어낸 중립 기억 25개. 실제 기억 폴더는 읽지 않는다.
+function fakeMemories() {
+  const day = 86400000; const base = Date.UTC(2026, 5, 20);
+  const M = (slug, type, name, description, tags, links, body, ago) => ({ slug, type, name, description, tags, links, body, modified: base - ago * day });
+  return L.buildMemoryModel([
+    M('likes-short-answers', 'user', 'Prefers short answers', 'Wants the conclusion first and details only when asked', ['style'], ['reply-format'], 'Lead with the result.\nKeep explanations to a few lines unless asked for more.\nSee [[reply-format]] for the layout.', 2),
+    M('works-night-hours', 'user', 'Works in the evening', 'Most sessions happen after dinner, so avoid morning-only schedules', ['routine'], ['weekly-review-habit'], 'Sessions are usually between 20:00 and 24:00.\nRelated: [[weekly-review-habit]].', 9),
+    M('knows-typescript', 'user', 'Comfortable with TypeScript', 'Skip basic explanations of types and tooling', ['style', 'tooling'], [], 'Strong with TypeScript and Node.\nLess familiar with native build chains.', 30),
+    M('uses-two-monitors', 'user', 'Uses two monitors', 'Terminal on the left screen, browser on the right', ['routine'], [], 'Keep terminal output narrow enough for half a screen.', 41),
+    M('weekly-review-habit', 'user', 'Reviews the week on Fridays', 'A short written review every Friday afternoon', ['routine', 'notes'], ['works-night-hours', 'note-template'], 'Friday review: what shipped, what slipped, what next.\nTemplate lives in [[note-template]].', 12),
+    M('reply-format', 'feedback', 'Reply format', 'Plain paragraphs, no heavy headings in chat answers', ['style'], ['likes-short-answers'], 'Use plain paragraphs.\nAvoid nested bullets.\nWhy: long structured replies were skipped.\nSee [[likes-short-answers]].', 3),
+    M('ask-before-delete', 'feedback', 'Ask before deleting', 'Never remove files without confirmation', ['safety'], ['dry-run-first'], 'Deleting needs an explicit yes.\nPrefer moving to trash.\nRelated: [[dry-run-first]].', 5),
+    M('dry-run-first', 'feedback', 'Dry run first', 'Show what a bulk change would do before doing it', ['safety', 'tooling'], ['ask-before-delete', 'backup-before-migrate'], 'For bulk edits print a dry run.\nHow to apply: run the same command with the apply flag.', 7),
+    M('no-emoji', 'feedback', 'No emoji in commits', 'Commit messages stay plain text', ['style', 'git'], ['commit-style'], 'Plain text only in commit messages.\nSee [[commit-style]].', 16),
+    M('test-before-claim', 'feedback', 'Test before claiming done', 'Run the suite and report the exact result', ['testing'], ['flaky-test-notes'], 'Never say it works without running it.\nQuote the count printed by the runner.\nSee [[flaky-test-notes]].', 1),
+    M('small-commits', 'feedback', 'Small commits', 'One logical change per commit', ['git'], ['commit-style'], 'Split unrelated changes.\nSee [[commit-style]].', 22),
+    M('commit-style', 'reference', 'Commit message style', 'Imperative subject under 60 characters, body explains why', ['git', 'style'], ['small-commits', 'no-emoji'], 'Subject: imperative mood.\nBody: why, not what.\nRelated: [[small-commits]], [[no-emoji]].', 25),
+    M('note-template', 'reference', 'Note template', 'Headings used for weekly and project notes', ['notes'], [], 'Sections: Goal, Done, Open, Next.\nKeep each under five lines.', 33),
+    M('flaky-test-notes', 'reference', 'Flaky test notes', 'Known intermittent tests and how to rerun them', ['testing'], ['ci-pipeline-overview'], 'Two timing tests fail under load.\nRerun once before investigating.\nPipeline: [[ci-pipeline-overview]].', 11),
+    M('ci-pipeline-overview', 'reference', 'CI pipeline overview', 'Stages: lint, unit tests, package, publish', ['testing', 'tooling'], ['flaky-test-notes', 'release-checklist'], 'Stages run in order.\nPublishing is manual.\nSee [[release-checklist]].', 14),
+    M('backup-before-migrate', 'reference', 'Backup before migrating', 'Copy the data folder aside before any format change', ['safety', 'tooling'], ['dry-run-first'], 'cp the data folder to a dated copy first.\nSee [[dry-run-first]].', 19),
+    M('release-checklist', 'reference', 'Release checklist', 'Steps to cut a release candidate', ['release'], ['ci-pipeline-overview', 'changelog-rules'], 'Bump the version, run tests, write notes.\nSee [[changelog-rules]].', 8),
+    M('changelog-rules', 'reference', 'Changelog rules', 'User-facing wording, grouped by added/changed/fixed', ['release', 'notes'], ['release-checklist'], 'Write for users.\nGroup entries.\nRelated: [[release-checklist]].', 27),
+    M('garden-app-redesign', 'project', 'Garden app redesign', 'Moving the plant tracker to a calendar-first layout', ['garden', 'design'], ['garden-watering-model', 'design-tokens'], 'Goal: calendar-first home screen.\nDepends on [[garden-watering-model]] and [[design-tokens]].', 4),
+    M('garden-watering-model', 'project', 'Watering schedule model', 'Per-plant intervals with seasonal adjustment', ['garden'], ['garden-app-redesign'], 'Intervals are stored per plant.\nSeasonal factor applies in summer.\nUsed by [[garden-app-redesign]].', 6),
+    M('design-tokens', 'project', 'Design tokens', 'Shared colours and spacing for the apps', ['design', 'tooling'], ['garden-app-redesign', 'recipe-site-launch'], 'Tokens exported as JSON.\nConsumers: [[garden-app-redesign]], [[recipe-site-launch]].', 10),
+    M('recipe-site-launch', 'project', 'Recipe site launch', 'Static recipe site, target launch next month', ['recipes', 'release'], ['design-tokens', 'recipe-import-script'], 'Static generator, no server.\nImport recipes with [[recipe-import-script]].', 13),
+    M('recipe-import-script', 'project', 'Recipe import script', 'Converts plain text recipes to the site format', ['recipes', 'tooling'], ['recipe-site-launch', 'dry-run-first'], 'Reads text files, writes JSON.\nAlways dry run first: [[dry-run-first]].\nMissing target: [[no-such-memory]].', 17),
+    M('budget-tracker', 'project', 'Budget tracker', 'Monthly budget spreadsheet with category charts', ['finance'], [], 'Three tabs: income, spending, summary.\nCharts refresh on open.', 35),
+    M('travel-plan-autumn', 'project', 'Autumn trip plan', 'Rough itinerary and packing list', ['travel'], ['note-template'], 'Itinerary draft in progress.\nUses [[note-template]].', 44),
+  ]);
+}
+let fakeMemCache = null;
+// 비동기 읽기: 캐시에는 Promise 가 들어가므로 읽는 중에 온 요청은 같은 Promise 를 나눠 쓴다(중복 읽기 없음). 실패해도 거부하지 않고 빈 목록을 준다.
+const memListCache = L.ttlCache(L.MEMV_CACHE_TTL_MS, () => { const md = memDir(); return (md ? L.readMemoryFiles(md) : Promise.resolve({ items: [], skipped: 0 })).catch(() => ({ items: [], skipped: 0 })); });
+// 화면은 이 목록만 받는다(경로·파일 이름은 보내지 않는다). 기억 내용은 로그에 남기지 않는다.
+ipcMain.handle('memories:list', (e) => {
+  if (!fromMain(e)) return null;
+  if (TEST_UI === 'memory' || TEST_UI === 'memgraph') { if (!fakeMemCache) fakeMemCache = fakeMemories(); return { items: fakeMemCache, skipped: 0 }; }
+  return memListCache.get();
+});
 // ---- 프로젝트 IPC: 키는 main 의 요약 목록과 대조하고, 문장·이름·상태는 main 이 가진 값으로 다시 만든다 ----
 ipcMain.handle('projects:detail', (e, key) => {
   if (!fromMain(e)) return null;

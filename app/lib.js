@@ -1168,20 +1168,38 @@ function ttlCache(ttlMs, load, now = Date.now) {
   };
 }
 
+// 기억 파일 한 줄의 길이 상한. 모든 정규식·문자열 처리 전에 먼저 자른다(공백만 수만 개인 줄에서 정규식이 느려지는 것을 막는다).
+const MEM_LINE_MAX = 4096;
+const memCapLine = (l) => (l.length > MEM_LINE_MAX ? l.slice(0, MEM_LINE_MAX) : l);
+// 파일 이름 규칙(새 읽기와 옛 읽기가 같이 쓴다): 소문자·숫자로 시작, 소문자·숫자·_·-, 최대 80자 + .md
+const MEM_FILE_RE = /^[a-z0-9][a-z0-9_-]{0,79}\.md$/;
+// YAML 블록 스칼라 표시(> | >- |+ >2 ...): 값이 아니라 표지이므로 빈 값으로 본다
+const isBlockScalar = (v) => /^[>|][-+0-9]{0,2}$/.test(v);
+// 'key: 값' 한 줄에서 값(앞뒤 공백 제거, 블록 스칼라 표지는 빈 값). key 가 다르면 null. 정규식 없이 선형으로 읽는다.
+function memKeyValue(l, key, allowIndent) {
+  const s = allowIndent ? l.trimStart() : l;
+  if (!s.startsWith(key + ':')) return null;
+  const v = s.slice(key.length + 1).trim();
+  return isBlockScalar(v) ? '' : v;
+}
+// 한 줄 목록 '[a, b]' 의 안쪽. 대괄호로 감싼 값이 아니면 null
+function memInlineList(v) { return v.length >= 2 && v[0] === '[' && v[v.length - 1] === ']' ? v.slice(1, -1) : null; }
+
 // 기억 frontmatter(앞부분만) -> { name, description, tags } | null. 이름은 필수.
 function parseMemoryMeta(text) {
   if (typeof text !== 'string') return null;
-  const lines = text.split(/\r?\n/);
+  const lines = text.replace(/^\uFEFF/, '').split(/\r\n?|\n/);
   if (lines[0] !== '---') return null;
   let name = ''; let desc = ''; let tags = [];
   for (let i = 1; i < lines.length; i++) {
-    const l = lines[i];
-    if (/^---\s*$/.test(l)) break;
-    let m;
-    if ((m = /^name:\s*(.+?)\s*$/.exec(l))) name = m[1];
-    else if ((m = /^description:\s*(.+?)\s*$/.exec(l))) desc = m[1];
-    else if ((m = /^\s+tags:\s*\[(.*)\]\s*$/.exec(l))) {
-      tags = m[1].split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter((x) => TODO_TAG_RE.test(x)).slice(0, 4);
+    const l = memCapLine(lines[i]);
+    if (l.trimEnd() === '---') break;
+    let v;
+    if ((v = memKeyValue(l, 'name', false)) !== null) { if (v) name = v; }
+    else if ((v = memKeyValue(l, 'description', false)) !== null) { if (v) desc = v; }
+    else if (/^[ \t]/.test(l) && (v = memKeyValue(l, 'tags', true)) !== null) {
+      const inner = memInlineList(v);
+      if (inner !== null) tags = inner.split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter((x) => TODO_TAG_RE.test(x)).slice(0, 4);
     }
   }
   const clean = (s, max) => [...neutralizeBody(s)].slice(0, max).join('');
@@ -1197,18 +1215,291 @@ function relatedMemories(metas, tag, max = PROJ_MEM_MAX) {
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).slice(0, max)
     .map((m) => ({ name: m.name, description: m.description }));
 }
-// <기억 폴더>/*.md(MEMORY.md 제외) 의 frontmatter 읽기(Node 전용). 일반 파일만, 앞 8KB 만, 최대 500개.
+// 기억 폴더를 읽어도 되는가(동기): 폴더도, 그 바로 위 프로젝트 폴더도 심볼릭 링크가 아니어야 한다.
+function memDirSafeSync(memDir) {
+  const fs = require('fs'); const path = require('path');
+  try {
+    const st = fs.lstatSync(memDir); if (!st.isDirectory() || st.isSymbolicLink()) return false;
+    return !fs.lstatSync(path.dirname(memDir)).isSymbolicLink();
+  } catch { return false; }
+}
+// <기억 폴더>/*.md(MEMORY.md 제외) 의 frontmatter 읽기(Node 전용). 일반 파일만(하드링크 제외), 앞 8KB 만, 최대 500개.
 function readMemoryMetas(memDir) {
   const fs = require('fs'); const path = require('path');
+  if (!memDirSafeSync(memDir)) return [];
   let names = [];
-  try { const st = fs.lstatSync(memDir); if (!st.isDirectory() || st.isSymbolicLink()) return []; names = fs.readdirSync(memDir); } catch { return []; }
+  try { names = fs.readdirSync(memDir); } catch { return []; }
   const out = [];
   for (const n of names.sort()) {
     if (out.length >= MEM_FILES_MAX) break;
-    if (!/^[a-z0-9][a-z0-9-]*\.md$/.test(n) || n === 'MEMORY.md') continue;
-    const r = readRegular(path.join(memDir, n), MEM_HEAD_BYTES, false);
+    if (!MEM_FILE_RE.test(n) || n === 'MEMORY.md') continue;
+    const p = path.join(memDir, n);
+    try { if (fs.lstatSync(p).nlink !== 1) continue; } catch { continue; }
+    const r = readRegular(p, MEM_HEAD_BYTES, false);
     const m = r ? parseMemoryMeta(r.text) : null;
     if (m) out.push(m);
+  }
+  return out;
+}
+
+// ---- 기억 보기(읽기 전용): 기억 파일 전체 읽기·링크 해석·그래프·배치·검색 ----
+// 기억 파일의 이름·본문은 LLM 이 쓴 신뢰할 수 없는 글이다. 여기서 제어·bidi 문자를 걷고 길이를 자르며, 화면은 textContent 로만 그린다.
+const MEMV_FILES_MAX = 500; // 읽을 파일 수 상한
+const MEMV_FILE_MAX_BYTES = 64 * 1024; // 파일 하나 상한(넘으면 건너뜀)
+const MEMV_TOTAL_MAX_BYTES = 2 * 1024 * 1024; // 읽은 바이트 합 상한
+const MEMV_NAME_MAX = 80;
+const MEMV_DESC_MAX = 240;
+const MEMV_BODY_MAX = 6000; // 화면·검색에 쓰는 본문 글자 수(코드포인트)
+const MEMV_BODY_LINES_MAX = 300;
+const MEMV_LINKS_MAX = 40; // 파일 하나가 가리킬 수 있는 [[링크]] 수
+const MEMV_TAGS_MAX = 6;
+const MEMV_TYPES = ['user', 'feedback', 'project', 'reference'];
+const MEMV_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,79}$/; // MEM_FILE_RE(.md 앞부분)와 같은 규칙
+const MEMV_DIR_SCAN_MAX = 5000; // 폴더에서 훑는 항목 수 상한(넘으면 더 읽지 않고 건너뜀으로 센다)
+const MEMV_CACHE_TTL_MS = 20000; // main 의 목록 캐시 유효 시간
+const MEMV_TAG_RE = /^[0-9A-Za-z가-힣_-]{1,24}$/;
+const MEMV_TAG_EDGE_MEMBERS_MAX = 8; // 이보다 많은 기억이 가진 태그는 '같은 태그' 선을 긋지 않는다(헤어볼 방지)
+const MEMV_EDGES_MAX = 1200; // 그래프 전체 선 상한(링크 선 먼저)
+const MEMV_TAG_EDGES_MAX = 500;
+const MEMV_QUERY_MAX = 100;
+
+const memvCut = (s, max) => [...s].slice(0, max).join('');
+// 한 줄 글: 탭은 공백으로, 나머지 제어·bidi·보이지 않는 문자는 지우고 공백을 접는다
+function memvLine(s, max) {
+  if (typeof s !== 'string') return '';
+  return memvCut(s.replace(/\t/g, ' ').replace(BAD_CHARS_G, '').replace(/\s+/g, ' ').trim(), max);
+}
+// 본문: 줄바꿈은 살리고 줄마다 같은 규칙으로 걷는다
+function memvBody(s) {
+  if (typeof s !== 'string') return '';
+  const lines = s.replace(/\r\n?/g, '\n').split('\n').slice(0, MEMV_BODY_LINES_MAX).map((l) => memCapLine(l).replace(/\t/g, '  ').replace(BAD_CHARS_G, '').trimEnd());
+  return memvCut(lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(), MEMV_BODY_MAX);
+}
+function memvUnquote(v) {
+  let s = v.trim();
+  const m = /^(["'])([\s\S]*)\1$/.exec(s);
+  if (m) s = m[1] === '"' ? m[2].replace(/\\(["\\])/g, '$1') : m[2].replace(/''/g, "'");
+  return s;
+}
+// 기억 파일 한 개의 원문 -> { slug, name, description, type, tags, body, links, modified } | null
+// frontmatter 가 없거나 닫히지 않으면 기억이 아닌 것으로 본다. 이름이 없으면 slug 를 쓴다. links 는 본문 [[slug]] 의 원문(중복 제거·상한, 해석은 buildMemoryModel).
+function parseMemoryFile(text, slug, modifiedMs) {
+  if (typeof text !== 'string' || typeof slug !== 'string' || !MEMV_SLUG_RE.test(slug)) return null;
+  const lines = text.replace(/^\uFEFF/, '').split(/\r\n?|\n/).map(memCapLine); // 줄 단위로 먼저 자른다(CRLF·단독 CR 모두 줄바꿈)
+  if (lines[0] !== '---') return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) if (lines[i].trimEnd() === '---') { end = i; break; }
+  if (end < 0) return null;
+  let name = ''; let desc = ''; let type = ''; let tags = []; let inTags = false;
+  for (let i = 1; i < end; i++) {
+    const l = lines[i]; let v;
+    if (inTags) {
+      const ts = l.trimStart();
+      if (ts[0] === '-' && (ts[1] === ' ' || ts[1] === '\t') && ts.slice(2).trim()) { tags.push(memvUnquote(ts.slice(2).trim())); continue; }
+      inTags = false;
+    }
+    if ((v = memKeyValue(l, 'name', false)) !== null) { if (v) name = memvUnquote(v); }
+    else if ((v = memKeyValue(l, 'description', false)) !== null) desc = memvUnquote(v);
+    else if ((v = memKeyValue(l, 'type', true)) !== null) { const w = memvUnquote(v).toLowerCase(); if (MEMV_TYPES.includes(w)) type = w; }
+    else if ((v = memKeyValue(l, 'tags', true)) !== null) {
+      const inner = memInlineList(v);
+      if (inner !== null) tags = tags.concat(inner.split(',').map((x) => memvUnquote(x)));
+      else if (v === '' && !isBlockScalar(l.trimStart().slice(5).trim())) inTags = true;
+    }
+  }
+  const seen = new Set(); const cleanTags = [];
+  for (const t of tags) {
+    const c = memvLine(t, 40);
+    if (MEMV_TAG_RE.test(c) && !seen.has(c.toLowerCase())) { seen.add(c.toLowerCase()); cleanTags.push(c); }
+    if (cleanTags.length >= MEMV_TAGS_MAX) break;
+  }
+  const raw = lines.slice(end + 1, end + 1 + MEMV_BODY_LINES_MAX * 4).join('\n');
+  const links = [];
+  for (const m of raw.matchAll(/\[\[([^\[\]\n|#]{1,80}?)\s*(?:[|#][^\[\]\n]*)?\]\]/g)) {
+    const t = m[1].trim().toLowerCase();
+    if (t && !links.includes(t)) links.push(t);
+    if (links.length >= MEMV_LINKS_MAX) break;
+  }
+  const mod = Number.isFinite(modifiedMs) && modifiedMs > 0 ? Math.floor(modifiedMs) : 0;
+  return { slug, name: memvLine(name, MEMV_NAME_MAX) || slug, description: memvLine(desc, MEMV_DESC_MAX), type: type || 'reference', tags: cleanTags, body: memvBody(raw), links, modified: mod };
+}
+// 파싱된 파일들 -> 화면용 목록. 링크는 main 이 가진 목록(slug, 없으면 이름)으로만 해석한다: 없는 대상·자기 자신·중복은 버린다.
+// id 는 main 이 매긴 것('m0', 'm1', ...)이고 화면은 이것으로만 기억을 가리킨다.
+function buildMemoryModel(files) {
+  const list = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.slug === 'string').slice(0, MEMV_FILES_MAX);
+  const bySlug = new Map(); const byName = new Map();
+  list.forEach((f, i) => { if (!bySlug.has(f.slug)) bySlug.set(f.slug, i); const k = String(f.name).toLowerCase(); if (!byName.has(k)) byName.set(k, i); });
+  const outs = list.map((f, i) => {
+    const o = [];
+    for (const t of Array.isArray(f.links) ? f.links : []) {
+      const j = bySlug.has(t) ? bySlug.get(t) : byName.get(t);
+      if (j !== undefined && j !== i && !o.includes(j)) o.push(j);
+    }
+    return o;
+  });
+  const ins = list.map(() => []);
+  outs.forEach((o, i) => o.forEach((j) => ins[j].push(i)));
+  return list.map((f, i) => ({
+    id: 'm' + i, slug: f.slug, name: f.name, description: f.description, type: f.type, tags: f.tags.slice(), body: f.body, modified: f.modified,
+    out: outs[i].map((j) => 'm' + j), in: ins[i].map((j) => 'm' + j),
+  }));
+}
+const memvYield = () => new Promise((r) => setImmediate(r)); // 파일 사이에 main 의 다른 일(입력·IPC)이 끼어들 틈을 준다
+// 읽기 전용 파일 읽기(비동기). 일반 파일만(심볼릭 링크·FIFO 거부), 하드링크(nlink !== 1)는 거부. 한도보다 크면 truncated.
+async function memvReadFile(file, maxBytes) {
+  const fsp = require('fs').promises; const C = require('fs').constants;
+  let fh = null;
+  try {
+    fh = await fsp.open(file, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+    const st = await fh.stat();
+    if (!st.isFile() || st.nlink !== 1) return null;
+    if (st.size > maxBytes) return { text: '', size: st.size, mtimeMs: st.mtimeMs, truncated: true };
+    const buf = Buffer.alloc(st.size);
+    const { bytesRead } = await fh.read(buf, 0, st.size, 0);
+    return { text: buf.toString('utf8', 0, bytesRead), size: st.size, mtimeMs: st.mtimeMs, truncated: false };
+  } catch { return null; } finally { if (fh) try { await fh.close(); } catch { /* 무시 */ } }
+}
+// <기억 폴더>/*.md(MEMORY.md 제외) 전체 -> Promise<{ items, skipped }> (거부하지 않는다).
+// 폴더나 그 위 프로젝트 폴더가 링크이면 비운다. 개수·크기·합계 상한을 넘는 파일, 링크·하드링크·특수 파일은 건너뜀으로 센다.
+// 폴더는 MEMV_DIR_SCAN_MAX 개까지만 훑고(넘으면 건너뜀 1 추가), .md 인데 이름 규칙에 안 맞는 것도 건너뜀으로 센다.
+// limits 는 시험용(files, fileBytes, totalBytes, scanMax).
+async function readMemoryFiles(memDir, limits) {
+  const fs = require('fs'); const fsp = fs.promises; const path = require('path');
+  const lim = { files: MEMV_FILES_MAX, fileBytes: MEMV_FILE_MAX_BYTES, totalBytes: MEMV_TOTAL_MAX_BYTES, scanMax: MEMV_DIR_SCAN_MAX, ...(limits || {}) };
+  const empty = { items: [], skipped: 0 };
+  const names = []; let skipped = 0;
+  try {
+    const st = await fsp.lstat(memDir); if (!st.isDirectory() || st.isSymbolicLink()) return empty;
+    if ((await fsp.lstat(path.dirname(memDir))).isSymbolicLink()) return empty;
+    const dir = await fsp.opendir(memDir);
+    let scanned = 0;
+    try {
+      for await (const ent of dir) {
+        if (++scanned > lim.scanMax) { skipped++; break; }
+        const n = ent.name;
+        if (n === 'MEMORY.md') continue;
+        if (MEM_FILE_RE.test(n)) names.push(n); else if (n.endsWith('.md')) skipped++;
+      }
+    } finally { try { await dir.close(); } catch { /* 이미 닫힘 */ } }
+  } catch { return empty; }
+  const files = []; let total = 0;
+  for (const n of names.sort()) {
+    if (files.length >= lim.files) { skipped++; continue; }
+    await memvYield();
+    const p = path.join(memDir, n);
+    let st; try { st = await fsp.lstat(p); } catch { continue; }
+    if (!st.isFile() || st.nlink !== 1 || st.size > lim.fileBytes || total + st.size > lim.totalBytes) { skipped++; continue; } // 링크·하드링크·특수 파일·큰 파일
+    const r = await memvReadFile(p, lim.fileBytes);
+    if (!r || r.truncated) { skipped++; continue; }
+    const f = parseMemoryFile(r.text, n.slice(0, -3), r.mtimeMs);
+    if (!f) { skipped++; continue; }
+    total += r.size; files.push(f);
+  }
+  return { items: buildMemoryModel(files), skipped };
+}
+// 그래프 선: 링크 선(양방향이어도 하나) -> '같은 태그' 선(멤버 2~8개인 태그만, 사슬로 잇는다). 같은 쌍은 한 번만, 전체 상한을 넘기지 않는다.
+// items: buildMemoryModel 결과. 반환 [{ a, b, kind: 'link'|'tag', tag? }] (a, b 는 items 의 위치, a < b)
+function buildMemoryGraph(items, opts) {
+  const o = { tagMembersMax: MEMV_TAG_EDGE_MEMBERS_MAX, tagEdgesMax: MEMV_TAG_EDGES_MAX, edgesMax: MEMV_EDGES_MAX, ...(opts || {}) };
+  const list = Array.isArray(items) ? items : [];
+  const idx = new Map(list.map((m, i) => [m.id, i]));
+  const seen = new Set(); const edges = [];
+  const add = (i, j, kind, tag) => {
+    if (i === j || edges.length >= o.edgesMax) return false;
+    const a = Math.min(i, j); const b = Math.max(i, j); const k = a * 100000 + b;
+    if (seen.has(k)) return false;
+    seen.add(k); edges.push(tag ? { a, b, kind, tag } : { a, b, kind }); return true;
+  };
+  list.forEach((m, i) => { for (const t of m.out || []) if (idx.has(t)) add(i, idx.get(t), 'link'); });
+  const byTag = new Map();
+  list.forEach((m, i) => { for (const t of m.tags || []) { const k = t.toLowerCase(); if (!byTag.has(k)) byTag.set(k, []); byTag.get(k).push(i); } });
+  let tagEdges = 0;
+  for (const [tag, members] of [...byTag.entries()].sort((x, y) => (x[0] < y[0] ? -1 : 1))) {
+    if (members.length < 2 || members.length > o.tagMembersMax) continue;
+    for (let q = 1; q < members.length && tagEdges < o.tagEdgesMax; q++) if (add(members[q - 1], members[q], 'tag', tag)) tagEdges++;
+  }
+  return edges;
+}
+// 결정적 힘 기반 배치(Fruchterman-Reingold): 같은 입력이면 같은 좌표. 시드·반복 횟수 고정, 애니메이션 없음.
+// 두 단계로 나눈다: simulateGraph(힘 계산, 한 번) -> 원시 좌표, fitGraph(칸 크기에 맞추기, 칸 크기가 바뀔 때마다 다시). 크기가 바뀌어도 다시 시뮬레이션하지 않는다.
+// 시뮬레이션은 width x height 의 가로세로 비율을 쓴다: 처음에 타원으로 흩뿌리고, 중심으로 당기는 힘도 짧은 축 쪽이 더 세다.
+function simulateGraph(n, edges, opts) {
+  const o = { width: 1000, height: 700, iterations: 220, seed: 12345, ...(opts || {}) };
+  const W = o.width; const H = o.height; const cx = W / 2; const cy = H / 2;
+  if (!(n > 0)) return [];
+  if (n === 1) return [{ x: cx, y: cy }];
+  let s = o.seed >>> 0;
+  const rnd = () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const x = new Float64Array(n); const y = new Float64Array(n);
+  const rx = W * 0.35; const ry = H * 0.35; // 타원으로 시작: 가로로 긴 칸이면 가로로 넓게
+  for (let i = 0; i < n; i++) { const a = (2 * Math.PI * i) / n + (rnd() - 0.5) * 0.6; const r = 0.3 + 0.7 * rnd(); x[i] = cx + rx * r * Math.cos(a); y[i] = cy + ry * r * Math.sin(a); }
+  const k = Math.sqrt((W * H) / n) * 0.7;
+  const m = Math.min(W, H); const gx = 0.09 * (m / W); const gy = 0.09 * (m / H); // 비율을 맞춘 중력: 긴 축은 약하게 당긴다
+  const ax = Math.sqrt(W / m); const ay = Math.sqrt(H / m); // 밀어내는 힘도 긴 축 쪽으로 더 세게: 가로로 긴 칸에서는 가로로 넓게 퍼진다
+  const es = (Array.isArray(edges) ? edges : []).filter((e) => e && e.a >= 0 && e.b >= 0 && e.a < n && e.b < n && e.a !== e.b);
+  const dx = new Float64Array(n); const dy = new Float64Array(n);
+  for (let it = 0; it < o.iterations; it++) {
+    const temp = (Math.max(W, H) / 8) * (1 - it / o.iterations) + 0.5;
+    dx.fill(0); dy.fill(0);
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let ex = x[i] - x[j]; let ey = y[i] - y[j]; let d2 = ex * ex + ey * ey;
+        if (d2 < 0.01) { ex = ((i * 7 + j * 3) % 11) - 5.5; ey = ((i * 5 + j * 13) % 9) - 4.5; d2 = ex * ex + ey * ey + 0.01; } // 겹친 두 점은 정해진 방향으로 밀어낸다
+        const d = Math.sqrt(d2); const f = (k * k) / d / d;
+        dx[i] += ex * f * ax; dy[i] += ey * f * ay; dx[j] -= ex * f * ax; dy[j] -= ey * f * ay;
+      }
+    }
+    for (const e of es) {
+      const ex = x[e.a] - x[e.b]; const ey = y[e.a] - y[e.b]; const d = Math.sqrt(ex * ex + ey * ey) || 0.01;
+      const w = e.kind === 'tag' ? 0.35 : 1; const f = (d / k) * w;
+      dx[e.a] -= ex * f; dy[e.a] -= ey * f; dx[e.b] += ex * f; dy[e.b] += ey * f;
+    }
+    for (let i = 0; i < n; i++) {
+      dx[i] -= (x[i] - cx) * gx; dy[i] -= (y[i] - cy) * gy; // 중심으로 약하게 당겨 떨어진 점이 멀리 날아가지 않게 한다
+      const len = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]) || 1; const step = Math.min(len, temp);
+      x[i] += (dx[i] / len) * step; y[i] += (dy[i] / len) * step;
+    }
+  }
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(Number.isFinite(x[i]) && Number.isFinite(y[i]) ? { x: x[i], y: y[i] } : { x: cx, y: cy });
+  return out;
+}
+const GRAPH_MAX_DISTORT = 2.5; // 가로·세로를 따로 늘릴 때 두 배율의 비가 이 값을 넘지 않게 한다
+const GRAPH_FEW_SPAN = 0.5; // 노드 2~3개는 칸(안쪽 여백 제외)의 이 비율보다 넓게 퍼지지 않는다(양 끝 가장자리로 날아가지 않게)
+// 원시 좌표 -> width x height 칸의 pad 안쪽에 맞춘 좌표. 가로·세로 배율을 따로 쓰되 비를 GRAPH_MAX_DISTORT 로 제한한다. 원시 좌표는 바꾸지 않는다.
+function fitGraph(raw, opts) {
+  const o = { width: 1000, height: 700, pad: 40, ...(opts || {}) };
+  const W = o.width; const H = o.height; const cx = W / 2;
+  const padT = Number.isFinite(o.padTop) ? o.padTop : o.pad; const padB = Number.isFinite(o.padBottom) ? o.padBottom : o.pad; // 위·아래는 따로 둘 수 있다(안내 글·범례 자리)
+  const cy = padT + (H - padT - padB) / 2;
+  const list = Array.isArray(raw) ? raw : []; const n = list.length;
+  if (!n) return [];
+  if (n === 1) return [{ x: cx, y: cy }];
+  let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
+  for (const p of list) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
+  const aw = Math.max(W - 2 * o.pad, 1); const ah = Math.max(H - padT - padB, 1);
+  const rw = Math.max(maxX - minX, 1e-6); const rh = Math.max(maxY - minY, 1e-6);
+  let sx = Math.min(aw / rw, 1e4); let sy = Math.min(ah / rh, 1e4);
+  if (n <= 3) { sx = Math.min(sx, (aw * GRAPH_FEW_SPAN) / rw); sy = Math.min(sy, (ah * GRAPH_FEW_SPAN) / rh); }
+  if (sx > sy * GRAPH_MAX_DISTORT) sx = sy * GRAPH_MAX_DISTORT; else if (sy > sx * GRAPH_MAX_DISTORT) sy = sx * GRAPH_MAX_DISTORT;
+  const mx = (minX + maxX) / 2; const my = (minY + maxY) / 2;
+  return list.map((p) => ({ x: Math.min(W - o.pad, Math.max(o.pad, cx + (p.x - mx) * sx)), y: Math.min(H - padB, Math.max(padT, cy + (p.y - my) * sy)) }));
+}
+// n: 노드 수, edges: buildMemoryGraph 결과 -> [{x, y}] (모두 유한수, pad 안쪽 width x height 안)
+function layoutGraph(n, edges, opts) { return fitGraph(simulateGraph(n, edges, opts), opts); }
+// 검색: 이름·설명·태그·본문에서 대소문자 무시 부분 일치. 빈 검색어는 전부. -> 일치한 항목의 id 배열(원래 순서)
+// texts: memorySearchText 를 미리 계산해 둔 배열(items 와 같은 순서). 주면 글자를 다시 이어 붙이지 않는다.
+const memorySearchText = (m) => (m.name + '\n' + m.description + '\n' + (m.tags || []).join(' ') + '\n' + m.body).toLowerCase();
+function filterMemories(items, query, tag, texts) {
+  const q = typeof query === 'string' ? memvCut(query.trim().toLowerCase(), MEMV_QUERY_MAX) : '';
+  const tg = typeof tag === 'string' && tag ? tag.toLowerCase() : '';
+  const out = [];
+  const list = Array.isArray(items) ? items : [];
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    if (tg && !(m.tags || []).some((x) => x.toLowerCase() === tg)) continue;
+    if (q && !(Array.isArray(texts) && typeof texts[i] === 'string' ? texts[i] : memorySearchText(m)).includes(q)) continue;
+    out.push(m.id);
   }
   return out;
 }
@@ -1735,6 +2026,7 @@ const api = {
   validateProjectState, projectStateFits, parseProjectState, readProjectStateFile, saveProjectState, projectRoot, daysBetween, buildProjects, groupProjects, canMerge,
   stateWithStatus, stateWithTitle, stateWithMerge,
   PROJ_UI_MAX_BYTES, PROJ_UI_MAX_TAGS, PROJ_UI_MAX_PER_TAG, GOTO_MAX, defaultProjectUi, validateProjectUi, parseProjectUi, readProjectUiFile, projectUiFits, pruneProjectUi, saveProjectUi, applyOrder, applyProjectUi, moveInOrder, visibleProjectKeys, numberTargets, parseMemoryMeta, relatedMemories, readMemoryMetas, buildProjectDetail,
+  MEMV_FILES_MAX, MEMV_FILE_MAX_BYTES, MEMV_TOTAL_MAX_BYTES, MEMV_TYPES, MEMV_TAG_EDGE_MEMBERS_MAX, MEMV_EDGES_MAX, parseMemoryFile, buildMemoryModel, readMemoryFiles, buildMemoryGraph, simulateGraph, fitGraph, layoutGraph, filterMemories, memorySearchText, MEMV_CACHE_TTL_MS, MEMV_DIR_SCAN_MAX, MEM_FILE_RE, MEM_LINE_MAX,
   PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

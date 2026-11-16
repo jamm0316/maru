@@ -3,6 +3,8 @@ const assert = require('assert');
 const L = require('./lib');
 const I = require('./i18n');
 let n = 0;
+const pending = []; // 비동기 시험: 모든 동기 시험이 끝난 뒤 차례로 돈다
+function ta(name, fn) { pending.push(async () => { try { await fn(); n++; console.log('ok   ' + name); } catch (e) { console.log('FAIL ' + name + '\n  ' + e.message); process.exitCode = 1; } }); }
 function t(name, fn) { try { fn(); n++; console.log('ok   ' + name); } catch (e) { console.log('FAIL ' + name + '\n  ' + e.message); process.exitCode = 1; } }
 
 t('levelInfo 35개', () => { const r = L.levelInfo(35); assert.deepStrictEqual([r.level, r.toNext, r.ratio], [1, 15, 0.7]); });
@@ -1112,7 +1114,8 @@ t('journal·memory 읽기: 기억 폴더가 링크여도 둘 다 읽지 않는�
 });
 t('화면 시험 모드·상세와 터미널 전환 정적 검사', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
-  assert.ok(/!app\.isPackaged && \['menu', 'settings', 'update', 'project', 'party', 'inbox'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main)); // 패키징 빌드에서는 무시
+  const uiList = /!app\.isPackaged && \[([^\]]*)\]\.includes\(process\.env\.MARU_APP_UI\)/.exec(main); // 패키징 빌드에서는 무시
+  assert.ok(uiList); for (const k of ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph']) assert.ok(uiList[1].includes("'" + k + "'"), k); // 목록 순서에는 기대지 않는다
   assert.ok(/uiOpen === 'project'\) openFirstProject/.test(rd) && /x\.kind === 'project'\) \|\| all\[0\]/.test(rd));
   assert.ok(/closeDetail\(false\); showActive\(true\)/.test(rd)); // 작업 공간이 바뀌면 상세를 닫고 나서 그린다
   assert.ok(/function showActive\(focus\) \{\s*if \(detailOpen\) return;/.test(rd)); // 숨은 컨테이너에서 xterm open 금지
@@ -1719,12 +1722,210 @@ t('inbox: 정적 검사 — IPC 송신자 검사·고정 argv·slug 재검증·t
   assert.ok(/id="inbox-badge"/.test(html) && !/id="briefing"/.test(html) && /id="inbox-detail"/.test(html));
   for (const k of ['inbox.title', 'inbox.sec.approvals', 'inbox.sec.notifs', 'inbox.approvals.empty', 'inbox.notifs.empty', 'inbox.act.view', 'inbox.act.install', 'inbox.act.request', 'inbox.act.reject', 'inbox.skillRequest', 'dlg.sqInstall.title', 'dlg.sqInstall.detail', 'dlg.reject.title', 'dlg.reject.detail.squad', 'dlg.reject.detail.skill', 'dlg.skRequest.title', 'dlg.skRequest.detail', 'inbox.err.risky', 'inbox.err.exists', 'inbox.err.changed', 'inbox.ago.min', 'inbox.ago.hour', 'inbox.ago.day', 'inbox.ago.now', 'inbox.members']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
   for (const lg of I.LANGS) assert.ok(I.t(lg, 'dlg.sqInstall.detail', { slug: 'x', n: 2, roster: 'lead (sonnet): Agent, Read' }).includes('lead (sonnet): Agent, Read'));
-  assert.ok(/MARU_APP_UI/.test(main) && /'inbox'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main) && /TEST_UI === 'inbox'\) return \{ ok: false, reason: 'invalid' \}/.test(sec)); // 시험 모드는 동작을 하지 않는다
+  assert.ok(/MARU_APP_UI/.test(main) && /\[[^\]]*'memgraph'[^\]]*\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main) && /TEST_UI === 'inbox'\) return \{ ok: false, reason: 'invalid' \}/.test(sec)); // 시험 모드는 동작을 하지 않는다
 });
 t('inbox: parseSquadCheck 는 existsBuiltin 을 그대로 싣고 형식을 요구한다', () => {
   assert.strictEqual(L.parseSquadCheck(sqCheck({ existsBuiltin: true }), 'team').existsBuiltin, true);
   assert.strictEqual(L.parseSquadCheck(sqCheck({ existsBuiltin: false }), 'team').existsBuiltin, false);
   assert.strictEqual(L.parseSquadCheck(sqCheck({ existsBuiltin: 'yes' }), 'team'), null);
 });
-fs.rmSync(tmp, { recursive: true, force: true });
-console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));
+// ---- 기억 보기(읽기 전용) ----
+const mfile = (name, extra, body) => '---\nname: ' + name + '\ndescription: "설명 ' + name + '"\nmetadata:\n  type: ' + (extra.type || 'project') + '\n' + (extra.tags ? '  tags: [' + extra.tags + ']\n' : '') + '---\n' + (body || '');
+t('parseMemoryFile: 정상·종류·태그·링크(중복·대소문자)·날짜', () => {
+  const f = L.parseMemoryFile(mfile('Alpha', { type: 'feedback', tags: 'one, "two", bad tag!, one' }, 'x [[beta]] y [[Beta|별칭]] [[gamma#h]] [[beta]]'), 'alpha', 1700000000000);
+  assert.strictEqual(f.name, 'Alpha'); assert.strictEqual(f.type, 'feedback'); assert.strictEqual(f.description, '설명 Alpha');
+  assert.deepStrictEqual(f.tags, ['one', 'two']); assert.deepStrictEqual(f.links, ['beta', 'gamma']); assert.strictEqual(f.modified, 1700000000000);
+});
+t('parseMemoryFile: 깨진 frontmatter·잘못된 종류·이름 없음', () => {
+  assert.strictEqual(L.parseMemoryFile('name: x\n', 'a', 0), null); // --- 없음
+  assert.strictEqual(L.parseMemoryFile('---\nname: x\nno close', 'a', 0), null); // 닫히지 않음
+  assert.strictEqual(L.parseMemoryFile('---\nname: x\n---\n', 'Bad Slug', 0), null);
+  assert.strictEqual(L.parseMemoryFile(42, 'a', 0), null);
+  const f = L.parseMemoryFile('---\ndescription: d\nmetadata:\n  type: weird\n  tags:\n    - a\n    - b\n---\nbody', 'no-name', NaN);
+  assert.strictEqual(f.name, 'no-name'); assert.strictEqual(f.type, 'reference'); assert.deepStrictEqual(f.tags, ['a', 'b']); assert.strictEqual(f.modified, 0);
+});
+t('parseMemoryFile: 제어·bidi 제거와 길이 상한', () => {
+  const f = L.parseMemoryFile('---\nname: "N‮am\u0007e' + 'x'.repeat(200) + '"\n---\nline​1\x1b[31m\n' + 'y'.repeat(9000), 'a', 1);
+  assert.ok(!/[‮\u0007​\u001b]/.test(f.name + f.body)); assert.ok([...f.name].length <= 80); assert.ok([...f.body].length <= 6000);
+  assert.ok(f.body.startsWith('line1'));
+  const many = '---\nname: n\n---\n' + Array.from({ length: 100 }, (_, i) => '[[t' + i + ']]').join(' ');
+  assert.strictEqual(L.parseMemoryFile(many, 'n', 1).links.length, 40);
+});
+const mk = (slug, name, tags, links) => ({ slug, name, description: '', type: 'user', tags, body: '', links, modified: 1 });
+t('buildMemoryModel: 없는 대상·자기 링크·중복 제거, 들어오는 링크', () => {
+  const m = L.buildMemoryModel([mk('a', 'Alpha', [], ['b', 'a', 'zzz', 'b', 'gamma name']), mk('b', 'Beta', [], ['a']), mk('c', 'Gamma Name', [], [])]);
+  assert.deepStrictEqual(m[0].out, ['m1', 'm2']); assert.deepStrictEqual(m[0].in, ['m1']); assert.deepStrictEqual(m[1].in, ['m0']); assert.deepStrictEqual(m[2].in, ['m0']);
+  assert.strictEqual(m[1].id, 'm1');
+});
+ta('readMemoryFiles: 심볼릭 링크·큰 파일·MEMORY.md·개수·합계 상한(비동기)', async () => {
+  const d = path.join(tmp, 'memv'); fs.mkdirSync(d);
+  fs.writeFileSync(path.join(d, 'ok-one.md'), mfile('One', {}, 'body')); fs.writeFileSync(path.join(d, 'MEMORY.md'), '- index');
+  fs.writeFileSync(path.join(d, 'big.md'), mfile('Big', {}, 'z'.repeat(70000)));
+  fs.writeFileSync(path.join(tmp, 'outside.md'), mfile('Out', {})); fs.symlinkSync(path.join(tmp, 'outside.md'), path.join(d, 'link.md'));
+  fs.writeFileSync(path.join(d, 'no-fm.md'), 'just text');
+  const p0 = L.readMemoryFiles(d); assert.ok(p0 && typeof p0.then === 'function'); // 비동기
+  const r = await p0;
+  assert.deepStrictEqual(r.items.map((x) => x.name), ['One']); assert.strictEqual(r.skipped, 3); assert.ok(r.items[0].modified > 0);
+  fs.writeFileSync(path.join(d, 'ok-two.md'), mfile('Two', {})); fs.writeFileSync(path.join(d, 'ok-three.md'), mfile('Three', {}));
+  assert.strictEqual((await L.readMemoryFiles(d, { files: 2 })).items.length, 2);
+  assert.strictEqual((await L.readMemoryFiles(d, { totalBytes: 120 })).items.length, 1);
+  const dl = path.join(tmp, 'memv-link'); fs.symlinkSync(d, dl);
+  assert.deepStrictEqual(await L.readMemoryFiles(dl), { items: [], skipped: 0 }); // 폴더 링크는 따라가지 않는다
+  assert.deepStrictEqual(await L.readMemoryFiles(path.join(tmp, 'none')), { items: [], skipped: 0 });
+  assert.strictEqual(L.MEMV_FILES_MAX, 500);
+});
+ta('readMemoryFiles: 하드링크·위 폴더 링크·이름 규칙·폴더 훑기 상한', async () => {
+  const real = path.join(tmp, 'memv2-real'); const d = path.join(real, 'memory'); fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'solo.md'), mfile('Solo', {})); fs.writeFileSync(path.join(tmp, 'hl-src.md'), mfile('Hard', {}));
+  fs.linkSync(path.join(tmp, 'hl-src.md'), path.join(d, 'hard.md')); // nlink 2
+  fs.writeFileSync(path.join(d, 'Bad Name.md'), mfile('Bad', {})); fs.writeFileSync(path.join(d, 'notes.txt'), 'x');
+  fs.writeFileSync(path.join(d, 'under_score.md'), mfile('Under', {}));
+  const r = await L.readMemoryFiles(d);
+  assert.deepStrictEqual(r.items.map((x) => x.name).sort(), ['Solo', 'Under']); assert.strictEqual(r.skipped, 2); // hard.md, Bad Name.md (notes.txt 는 세지 않는다)
+  assert.deepStrictEqual(L.readMemoryMetas(d).map((x) => x.name).sort(), ['Solo', 'Under']); // 옛 읽기도 같은 이름 규칙·하드링크 거부
+  const plink = path.join(tmp, 'memv2-plink'); fs.symlinkSync(real, plink); // 프로젝트 폴더가 링크
+  assert.deepStrictEqual(await L.readMemoryFiles(path.join(plink, 'memory')), { items: [], skipped: 0 });
+  assert.deepStrictEqual(L.readMemoryMetas(path.join(plink, 'memory')), []);
+  const lim = await L.readMemoryFiles(d, { scanMax: 2 }); assert.ok(lim.items.length <= 2 && lim.skipped >= 1); // 훑기 상한을 넘으면 건너뜀으로 센다
+  assert.ok(L.MEM_FILE_RE.test('a_b-c.md') && !L.MEM_FILE_RE.test('A.md') && !L.MEM_FILE_RE.test('_a.md') && !L.MEM_FILE_RE.test('a'.repeat(81) + '.md'));
+});
+const SP = ' '.repeat(60000);
+t('기억 파싱: 공백 6만 개 줄에서도 선형(ReDoS 회귀)', () => {
+  const body = '---\nname: A' + SP + 'b\ndescription:' + SP + 'd\nmetadata:\n  tags:' + SP + '\n  - ' + SP + 'x\n  type:' + SP + 'user\n---\n' + SP + 'tail' + SP + '\n[[a]]' + SP;
+  let t0 = process.hrtime.bigint(); const f = L.parseMemoryFile(body, 'a', 1); let ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(f && ms < 50, 'parseMemoryFile ' + ms); console.log('     60k 공백 줄 parseMemoryFile: ' + ms.toFixed(2) + 'ms');
+  t0 = process.hrtime.bigint(); const m = L.parseMemoryMeta(body); ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(m && ms < 50, 'parseMemoryMeta ' + ms); console.log('     60k 공백 줄 parseMemoryMeta: ' + ms.toFixed(2) + 'ms');
+  for (const bad of ['---\nname:' + SP + '\n---\n', '---\n' + SP + 'x\n---\n', '---\n- ' + SP + '\n---' + SP]) {
+    t0 = process.hrtime.bigint(); L.parseMemoryFile(bad, 'a', 1); L.parseMemoryMeta(bad); assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 50);
+  }
+  assert.ok([...f.name].length <= 80 && f.name.startsWith('A'));
+});
+t('기억 파싱: CRLF·BOM·단독 CR·중복 tags·__proto__ 태그', () => {
+  const crlf = L.parseMemoryFile('---\r\nname: Win\r\ndescription: d\r\ntags: [x, y]\r\n---\r\nline1\r\nline2\r\n', 'w', 1);
+  assert.strictEqual(crlf.name, 'Win'); assert.deepStrictEqual(crlf.tags, ['x', 'y']); assert.strictEqual(crlf.body, 'line1\nline2');
+  const bom = L.parseMemoryFile('\uFEFF---\nname: Bom\n---\nb', 'b', 1); assert.strictEqual(bom.name, 'Bom');
+  assert.strictEqual(L.parseMemoryMeta('\uFEFF---\nname: Bom\n---\nb').name, 'Bom');
+  const cr = L.parseMemoryFile('---\rname: Old\rtags: [q]\r---\rbody here', 'c', 1); assert.strictEqual(cr.name, 'Old'); assert.deepStrictEqual(cr.tags, ['q']); assert.strictEqual(cr.body, 'body here');
+  const dup = L.parseMemoryFile('---\nname: D\ntags: [a, b]\nmetadata:\n  tags: [b, c]\ntags:\n  - d\n---\n', 'd', 1);
+  assert.deepStrictEqual(dup.tags, ['a', 'b', 'c', 'd']);
+  const pr = L.parseMemoryFile('---\nname: P\ntags: [__proto__, constructor, toString]\n---\n', 'p', 1);
+  assert.deepStrictEqual(pr.tags, ['__proto__', 'constructor', 'toString']);
+  const q = L.parseMemoryFile('---\nname: Q\ntags: [__proto__]\n---\n', 'q', 1);
+  const items = L.buildMemoryModel([pr, q]); const edges = L.buildMemoryGraph(items);
+  assert.deepStrictEqual(edges.map((e) => e.tag), ['__proto__']); assert.deepStrictEqual(L.filterMemories(items, '', '__proto__'), ['m0', 'm1']);
+  assert.strictEqual({}.polluted, undefined); assert.strictEqual(Object.getPrototypeOf(items[0].tags), Array.prototype);
+});
+t('기억 파싱: YAML 블록 스칼라(>, |)는 빈 값', () => {
+  for (const mark of ['>', '|', '>-', '|+', '>2']) {
+    const f = L.parseMemoryFile('---\nname: B\ndescription: ' + mark + '\n  folded text\n---\nx', 'b', 1);
+    assert.strictEqual(f.description, '', mark);
+    assert.strictEqual(L.parseMemoryMeta('---\nname: B\ndescription: ' + mark + '\n  folded\n---\n').description, '', mark);
+  }
+  assert.strictEqual(L.parseMemoryFile('---\nname: >\n---\n', 'slug-name', 1).name, 'slug-name'); // 이름이 블록 표지면 slug
+  assert.strictEqual(L.parseMemoryFile('---\nname: B\ndescription: a > b\n---\n', 'b', 1).description, 'a > b'); // 일반 글자는 그대로
+});
+const gItems = () => L.buildMemoryModel([
+  mk('a', 'A', ['t1', 'big'], ['b']), mk('b', 'B', ['t1'], ['a']), mk('c', 'C', ['t1', 'big'], ['a']), mk('d', 'D', ['big'], []),
+  ...Array.from({ length: 10 }, (_, i) => mk('x' + i, 'X' + i, ['big', 'solo'], [])),
+]);
+t('buildMemoryGraph: 양방향 링크는 선 하나, 링크가 있는 쌍은 태그 선 없음, 큰 태그는 선 없음', () => {
+  const it = gItems(); const e = L.buildMemoryGraph(it);
+  assert.strictEqual(e.filter((x) => x.kind === 'link').length, 2); // a-b(양방향 하나), c-a
+  const tagE = e.filter((x) => x.kind === 'tag');
+  assert.ok(tagE.every((x) => x.tag === 't1')); // 'big'(13명)·'solo'(10명)는 상한을 넘어 선이 없다. t1 의 a-b 는 링크가 이미 있다
+  assert.deepStrictEqual(tagE.map((x) => [x.a, x.b]), [[1, 2]]);
+  assert.ok(e.every((x) => x.a < x.b)); assert.strictEqual(new Set(e.map((x) => x.a + ',' + x.b)).size, e.length);
+});
+t('buildMemoryGraph: 전체·태그 선 상한', () => {
+  const many = L.buildMemoryModel(Array.from({ length: 60 }, (_, i) => mk('n' + i, 'N' + i, ['g' + (i % 30)], [])));
+  assert.strictEqual(L.buildMemoryGraph(many, { tagEdgesMax: 5 }).length, 5);
+  assert.strictEqual(L.buildMemoryGraph(many, { edgesMax: 3 }).length, 3);
+});
+t('layoutGraph: 같은 입력이면 같은 좌표, 유한수, 범위 안', () => {
+  const it = gItems(); const e = L.buildMemoryGraph(it);
+  const a = L.layoutGraph(it.length, e, { width: 800, height: 500, pad: 30 }); const b = L.layoutGraph(it.length, e, { width: 800, height: 500, pad: 30 });
+  assert.deepStrictEqual(a, b); assert.strictEqual(a.length, it.length);
+  for (const p of a) { assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y)); assert.ok(p.x >= 30 && p.x <= 770 && p.y >= 30 && p.y <= 470); }
+  assert.notDeepStrictEqual(L.layoutGraph(it.length, e, { seed: 7 }), L.layoutGraph(it.length, e, { seed: 8 }));
+  assert.deepStrictEqual(L.layoutGraph(0, []), []); assert.deepStrictEqual(L.layoutGraph(1, []), [{ x: 500, y: 350 }]);
+  const big = Array.from({ length: 300 }, (_, i) => ({ id: 'm' + i, tags: [], out: i ? ['m' + (i >> 1)] : [] }));
+  const t0 = Date.now(); const pb = L.layoutGraph(300, L.buildMemoryGraph(big)); assert.ok(Date.now() - t0 < 800, '300 nodes ' + (Date.now() - t0) + 'ms'); assert.ok(pb.every((p) => Number.isFinite(p.x)));
+});
+const spread = (n, tree) => L.buildMemoryModel(Array.from({ length: n }, (_, i) => ({ ...mk('n' + i, 'N' + i, ['g' + (i % 6), 'g' + ((i * 5) % 6)], tree ? (i ? ['n' + (i >> 1)] : []) : (i % 3 === 0 && i + 1 < n ? ['n' + (i + 1)] : [])) })));
+t('layoutGraph: 칸을 채운다(1000x500·1000x1500, 25·120개: 두 축 모두 75% 이상)', () => {
+  for (const [W, H] of [[1000, 500], [1000, 1500]]) for (const n of [25, 120]) for (const tree of [true, false]) {
+    const it = spread(n, tree); const p = L.layoutGraph(n, L.buildMemoryGraph(it), { width: W, height: H });
+    const xs = p.map((q) => q.x); const ys = p.map((q) => q.y);
+    const cx = (Math.max(...xs) - Math.min(...xs)) / W; const cy = (Math.max(...ys) - Math.min(...ys)) / H;
+    assert.ok(cx >= 0.75 && cy >= 0.75, W + 'x' + H + ' n=' + n + ' cover ' + cx.toFixed(2) + ',' + cy.toFixed(2));
+    assert.deepStrictEqual(p, L.layoutGraph(n, L.buildMemoryGraph(it), { width: W, height: H })); // 결정적
+  }
+});
+t('simulateGraph/fitGraph: 크기가 바뀌어도 원시 좌표는 그대로, 맞추기만 다시, 일그러짐 비 상한', () => {
+  const it = spread(30, true); const e = L.buildMemoryGraph(it);
+  const raw = L.simulateGraph(30, e, { width: 1000, height: 600 }); const copy = JSON.parse(JSON.stringify(raw));
+  const f1 = L.fitGraph(raw, { width: 1000, height: 600 }); const f2 = L.fitGraph(raw, { width: 1000, height: 1400 });
+  assert.deepStrictEqual(raw, copy); assert.notDeepStrictEqual(f1, f2); assert.deepStrictEqual(L.fitGraph(raw, { width: 1000, height: 600 }), f1);
+  const sc = (f, a, b) => Math.abs(f[a].x - f[b].x) > 1e-9 && Math.abs(f[a].y - f[b].y) > 1e-9 ? Math.abs((f[a].x - f[b].x) / (raw[a].x - raw[b].x)) / Math.abs((f[a].y - f[b].y) / (raw[a].y - raw[b].y)) : 1;
+  for (const [a, b] of [[0, 5], [1, 20], [3, 29]]) for (const f of [f1, f2]) { const r = sc(f, a, b); assert.ok(r <= 2.5001 && r >= 1 / 2.5001 || f.some((q) => q.x <= 40.01 || q.x >= 959.99 || q.y <= 40.01), 'ratio ' + r); }
+  assert.strictEqual(L.layoutGraph(30, e, { width: 1000, height: 600 }).length, 30);
+});
+t('layoutGraph: 노드 2~3개는 양 끝 가장자리로 날아가지 않는다', () => {
+  for (const n of [2, 3]) {
+    const p = L.layoutGraph(n, n === 2 ? [{ a: 0, b: 1, kind: 'link' }] : [{ a: 0, b: 1, kind: 'link' }, { a: 1, b: 2, kind: 'link' }], { width: 1000, height: 500, pad: 40 });
+    const xs = p.map((q) => q.x); const ys = p.map((q) => q.y);
+    assert.ok(Math.max(...xs) - Math.min(...xs) <= 0.5 * 920 + 1e-6 && Math.max(...ys) - Math.min(...ys) <= 0.5 * 420 + 1e-6);
+    assert.ok(p.every((q) => q.x > 200 && q.x < 800));
+  }
+});
+t('filterMemories: 이름·설명·태그·본문, 대소문자 무시, 태그 필터', () => {
+  const it = L.buildMemoryModel([{ ...mk('a', 'Apple Pie', ['fruit'], []), description: 'Sweet', body: 'bake slowly' }, { ...mk('b', 'Beta', ['Veg'], []), body: 'RAW carrots' }]);
+  assert.deepStrictEqual(L.filterMemories(it, ''), ['m0', 'm1']); assert.deepStrictEqual(L.filterMemories(it, 'apple'), ['m0']);
+  assert.deepStrictEqual(L.filterMemories(it, 'SWEET'), ['m0']); assert.deepStrictEqual(L.filterMemories(it, 'veg'), ['m1']);
+  assert.deepStrictEqual(L.filterMemories(it, 'carrots'), ['m1']); assert.deepStrictEqual(L.filterMemories(it, 'nothing'), []);
+  assert.deepStrictEqual(L.filterMemories(it, '', 'VEG'), ['m1']); assert.deepStrictEqual(L.filterMemories(it, 'apple', 'veg'), []);
+  assert.deepStrictEqual(L.filterMemories(null, 'x'), []);
+});
+t('기억 보기 IPC 는 보낸 창을 확인하고 렌더러는 innerHTML 을 쓰지 않는다', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const mv = fs.readFileSync(path.join(__dirname, 'renderer', 'memview.js'), 'utf8');
+  assert.ok(/ipcMain\.handle\('memories:list', \(e\) => \{\s*if \(!fromMain\(e\)\) return null;/.test(main));
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML/.test(mv));
+});
+t('memview.js 정적 검사: HTML 문자열·href·자료로 만든 style 없음', () => {
+  const mv = fs.readFileSync(path.join(__dirname, 'renderer', 'memview.js'), 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/.test(mv));
+  assert.ok(!/setAttribute\(\s*['"](xlink:)?href|xlink:href|\.href\s*=|\.src\s*=/.test(mv));
+  assert.ok(!/setAttribute\(\s*['"]style|cssText|style\s*=/.test(mv.replace(/\.style\.(left|top)\s*=/g, ''))); // 쓰는 style 은 계산한 좌표(숫자)뿐
+  assert.ok(!/\.style\.(?!left|top)/.test(mv));
+  assert.ok(!/mv-hull-o/.test(mv) && !/mv-hull-o/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8')));
+});
+t('기억 보기: 접근성·Esc·검색 최적화·캐시 정적 검사', () => {
+  const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const mv = fs.readFileSync(path.join(__dirname, 'renderer', 'memview.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8'); const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(!/role="list"/.test(html.split('id="mem-view"')[1].split('</section>')[0]) && !/'listitem'/.test(mv)); // 목록 역할 + h3 / button listitem 구조를 쓰지 않는다
+  assert.ok(/id="mv-hint"/.test(html) && /T\('mem\.graph\.hint'\)/.test(mv));
+  assert.ok(/memView\.clearSearch\(\)/.test(rd) && /document\.activeElement === \$\('mv-q'\)/.test(rd));
+  assert.ok(/setTag\(''\)/.test(mv.split('function select(')[1].split('function setTag')[0])); // 링크로 이동해 필터를 풀 때 태그 <select> 도 되돌린다
+  assert.ok(/SEARCH_DEBOUNCE_MS/.test(mv) && /Lib\.memorySearchText/.test(mv) && /Lib\.filterMemories\(items, query, tag, texts\)/.test(mv));
+  assert.ok(/Lib\.fitGraph\(graph\.raw/.test(mv) && !/simulateGraph/.test(mv.split('function refit')[1].split('function setMode')[0]));
+  assert.ok(/L\.MEMV_CACHE_TTL_MS/.test(main) && L.MEMV_CACHE_TTL_MS >= 20000);
+});
+t('기억 보기 문구: ko/en 키·형식 일치, 중복 키 없음, 쓰는 키는 모두 있음', () => {
+  const keys = (lg) => Object.keys(I.STR[lg]).filter((k) => k.startsWith('mem.')).sort();
+  assert.deepStrictEqual(keys('ko'), keys('en'));
+  const ph = (v) => [...new Set([].concat(v).join(' ').match(/\{\w+\}/g) || [])].sort().join(','); // 자리표시자({n} 등)가 두 언어에서 같아야 한다(ko 는 복수형 배열이 없어도 된다)
+  for (const k of keys('ko')) assert.strictEqual(ph(I.STR.ko[k]), ph(I.STR.en[k]), k);
+  const src = fs.readFileSync(path.join(__dirname, 'i18n.js'), 'utf8'); const secs = src.split(/^const en = \{/m);
+  for (const sec of secs) { const ks = [...sec.matchAll(/'(mem\.[\w.]+)':/g)].map((m) => m[1]); assert.strictEqual(new Set(ks).size, ks.length, 'duplicate: ' + ks.filter((k, i) => ks.indexOf(k) !== i)); }
+  const used = new Set();
+  for (const f of ['memview.js', 'renderer.js', 'index.html']) { const txt = fs.readFileSync(path.join(__dirname, 'renderer', f), 'utf8'); for (const m of txt.matchAll(/(?:T\(|data-i18n(?:-aria)?=")'?(mem\.[\w.]+)/g)) used.add(m[1]); }
+  used.delete('mem.type.'); used.delete('mem.journal.'); // 동적으로 이어 붙이는 접두사는 위에서 따로 더했다
+  for (const k of used) for (const lg of I.LANGS) assert.ok(I.STR[lg][k] !== undefined, lg + ' ' + k);
+});
+
+(async () => {
+  for (const f of pending) await f();
+  fs.rmSync(tmp, { recursive: true, force: true });
+  console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));
+})();
