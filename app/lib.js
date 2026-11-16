@@ -120,9 +120,17 @@ function cleanQuestText(s) {
 function isSafeQuestStart(s) { return typeof s === 'string' && s.length > 0 && !/^[0-9!\/]/.test(s); }
 
 // 터미널 단축키: keydown 이벤트 -> pty 에 보낼 시퀀스(없으면 null). IME 조합 중에는 가로채지 않는다.
+// Shift+Enter(다른 보조키 없음)인지. keydown 뿐 아니라 keypress·keyup 도 같은 판정으로 삼킨다
+function isNewlineKey(e) {
+  return !!e && e.key === 'Enter' && !!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
+}
+
 function keyToSeq(e) {
-  if (!e || e.type !== 'keydown' || e.key !== 'Backspace') return null;
+  if (!e || e.type !== 'keydown') return null;
   if (e.isComposing || e.keyCode === 229) return null;
+  // Shift+Enter: 줄바꿈(ESC+CR. Claude Code 가 Option+Enter 로 받는 입력과 같다). 전송하지 않는다
+  if (e.key === 'Enter') return isNewlineKey(e) ? '\x1b\r' : null;
+  if (e.key !== 'Backspace') return null;
   if (e.ctrlKey || e.shiftKey) return null;
   if (e.metaKey && !e.altKey) return '\x15'; // Cmd+Backspace: 줄 앞부분 삭제(Ctrl+U)
   if (e.altKey && !e.metaKey) return '\x17'; // Option+Backspace: 앞 단어 삭제(Ctrl+W)
@@ -1052,7 +1060,7 @@ function parseCalendarOutput(text, now = new Date()) {
 
 const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, isNewlineKey, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,

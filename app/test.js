@@ -93,6 +93,16 @@ t('keyToSeq 단축키', () => {
   assert.strictEqual(k({ ctrlKey: true, metaKey: true }), null);
   assert.strictEqual(L.keyToSeq({ type: 'keyup', key: 'Backspace', metaKey: true }), null);
   assert.strictEqual(L.keyToSeq({ type: 'keydown', key: 'a', metaKey: true }), null);
+  const en = (o) => L.keyToSeq({ type: 'keydown', key: 'Enter', ...o });
+  assert.strictEqual(en({ shiftKey: true }), '\x1b\r');           // Shift+Enter: 줄바꿈
+  assert.strictEqual(en({}), null);                                 // Enter 는 xterm 기본(전송)
+  assert.strictEqual(en({ shiftKey: true, isComposing: true }), null); // 한글 조합 중에는 건드리지 않음
+  assert.strictEqual(en({ shiftKey: true, keyCode: 229 }), null);
+  assert.strictEqual(en({ shiftKey: true, metaKey: true }), null);
+  assert.strictEqual(L.keyToSeq({ type: 'keyup', key: 'Enter', shiftKey: true }), null);
+  assert.strictEqual(L.isNewlineKey({ type: 'keypress', key: 'Enter', shiftKey: true }), true);
+  assert.strictEqual(L.isNewlineKey({ type: 'keypress', key: 'Enter' }), false);
+  assert.strictEqual(L.isNewlineKey({ type: 'keydown', key: 'Enter', shiftKey: true, isComposing: true }), false);
 });
 t('resolveRoot 순서와 검증', () => {
   const good = new Set(['/e/x', '/cfg/y', '/app', '/h/maru']);

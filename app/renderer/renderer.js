@@ -82,7 +82,7 @@
     term.attachCustomKeyEventHandler((e) => {
       if (modalOpen()) return false;
       const seq = Lib.keyToSeq(e);
-      if (seq === null) return true;
+      if (seq === null) return !Lib.isNewlineKey(e); // Shift+Enter 의 keypress 가 Enter(전송)로 새지 않게 삼킨다
       if (e.type === 'keydown') window.maru.ptyWrite(id, seq);
       return false;
     });
