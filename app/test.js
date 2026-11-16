@@ -279,9 +279,12 @@ t('parseTodos 길이 상한(제목 60·프롬프트 120)', () => {
   assert.deepStrictEqual(L.parseTodos('a|5|t|' + '나'.repeat(121)), []);
   assert.deepStrictEqual(L.parseTodos('a|5|t|' + 'x'.repeat(500)), []);
 });
-t('parseTodos 최대 7개·잘림', () => {
-  const lines = Array.from({ length: 10 }, (_, i) => 'a|5|t' + i + '|');
-  assert.deepStrictEqual(L.parseTodos(lines.join('\n')).map((x) => x.title), ['t0', 't1', 't2', 't3', 't4', 't5', 't6']);
+t('parseTodos 최대 12개(셸 apply_todos 병합 결과 상한과 같음)·잘림', () => {
+  assert.strictEqual(L.TODO_MAX, 12);
+  const lines = Array.from({ length: 15 }, (_, i) => 'a|5|t' + i + '|');
+  assert.deepStrictEqual(L.parseTodos(lines.join('\n')).map((x) => x.title), Array.from({ length: 12 }, (_, i) => 't' + i));
+  assert.strictEqual(L.parseTodos(lines.slice(0, 12).join('\n')).length, 12);
+  assert.strictEqual(L.parseTodos('a|0||\nb|5|x|').length, 1); // 비우기 표지(중요도 0·빈 제목)는 목록에 안 들어간다
   assert.deepStrictEqual(L.parseTodos('a|5|x|\nb|5|y|p', true).map((x) => x.title), ['x']);
 });
 t('parseTodos 보이지 않는 문자 제거·빈 제목 거부', () => {
@@ -301,7 +304,7 @@ t('resolveTodos 대체(suggestions)', () => {
   assert.deepStrictEqual(L.resolveTodos({ text: '', truncated: false }, sug), fb);
   assert.strictEqual(L.resolveTodos({ text: 'a|5|t|', truncated: false }, sug).length, 1);
   assert.deepStrictEqual(L.resolveTodos(null, null), []);
-  assert.strictEqual(L.resolveTodos(null, { text: Array.from({ length: 12 }, (_, i) => 's' + i).join('\n') }).length, 7);
+  assert.strictEqual(L.resolveTodos(null, { text: Array.from({ length: 15 }, (_, i) => 's' + i).join('\n') }).length, 12);
 });
 t('matchTodo index·shown 일치', () => {
   const items = L.parseTodos('a|5|제목1|프롬프트1\nb|9|제목2|');

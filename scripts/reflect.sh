@@ -172,7 +172,7 @@ journaled=""
 apply_projects "$STAGE/projects.txt"          # 새 프로젝트 등록: 아래 일지·할 일이 같은 실행의 새 슬러그를 참조할 수 있게 먼저 적용(lib.sh)
 apply_journal "$STAGE/journal.txt" "$short" "$jlabel" && journaled=1
 apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식) 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
-apply_todos "$STAGE/todos.txt"               # 오늘 할 일: 검증 후 data/todos.txt 교체 + suggestions.txt 재생성(위 옛 추천보다 우선)
+apply_todos "$STAGE/todos.txt" merge         # 오늘 할 일: 이 세션이 다룬 태그만 교체하고 나머지는 보존(검증 후 data/todos.txt + suggestions.txt 재생성, 위 옛 추천보다 우선)
 rm -rf "$STAGE"
 
 [ $rc -eq 0 ] && echo "$total" > "$LINES_FILE"

@@ -470,10 +470,103 @@ check "프롬프트 문구: 기존 슬러그 재사용·새 일감만 등록·�
 check "dream 승격 문구가 @태그/슬러그 를 다룸" sh -c 'grep -q "@태그/슬러그" "$1" && grep -q "앞의 태그만" "$1"' _ "$REPO/prompts/consolidate-prompt.md"
 rm -f "$REGF"
 
+echo "== apply_todos merge: 다른 태그 보존·같은 태그 교체·비우기 표지·12줄 상한"
+ATM() { LIBRUN 'apply_todos "$1" merge; echo "rc=$?"' "$1"; }
+rm -f "$REGF" "$TODOS" "$SUGS"
+printf '%s\n' 'maru|8|마루 일 하나|p1' 'maru|5|마루 일 둘|' 'robi|7|로비 옛 일|p2' 'life|3|생활 일|p4' > "$TODOS"
+cp "$TODOS" "$T/todos.base"
+printf '%s\n' 'robi|9|로비 새 일|p3' > "$T/st/m1.txt"
+out=$(ATM "$T/st/m1.txt")
+check "merge: 새 목록에 등장한 태그만 교체하고 나머지는 보존(묶음은 최고 중요도순)" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'robi|9|로비 새 일|p3' 'maru|8|마루 일 하나|p1' 'maru|5|마루 일 둘|' 'life|3|생활 일|p4')" ]
+check "로그에 모드·보존·교체 수" sh -c 'printf "%s" "$1" | grep -q "할 일 목록 갱신(merge)" && printf "%s" "$1" | grep -q "보존 3·교체 1"' _ "$out"
+check "suggestions.txt 도 병합 결과의 프롬프트로(보존분 포함)" [ "$(cat "$SUGS")" = "$(printf '%s\n' p3 p1 p4)" ]
+check "todos.txt 권한 600·임시 파일 잔여 없음" sh -c '[ "$(stat -f %Lp "$1")" = 600 ] && [ -z "$(ls -A "$2" | grep "^\.todos")" ]' _ "$TODOS" "$DATA"
+# 기본(인자 없음)은 replace 그대로
+cp "$T/todos.base" "$TODOS"; out=$(AT "$T/st/m1.txt")
+check "기본 모드는 replace(통째 교체, 회귀 없음)" [ "$(cat "$TODOS")" = "robi|9|로비 새 일|p3" ]
+cp "$T/todos.base" "$TODOS"; LIBRUN 'apply_todos "$1" replace' "$T/st/m1.txt" >/dev/null
+check "replace 지정도 같음" [ "$(cat "$TODOS")" = "robi|9|로비 새 일|p3" ]
+cp "$T/todos.base" "$TODOS"; LIBRUN 'apply_todos "$1" bogus' "$T/st/m1.txt" >/dev/null
+check "알 수 없는 모드는 replace 로 취급(보존하지 않음)" [ "$(cat "$TODOS")" = "robi|9|로비 새 일|p3" ]
+# 같은 태그 교체: 슬러그 뗀 태그 기준
+printf '%s\n' 'maru|desktop-app|데스크톱 앱' > "$REGF"
+printf '%s\n' 'maru/desktop-app|8|앱 마무리|p1' 'life|3|생활 일|' > "$TODOS"
+printf '%s\n' 'maru|6|슬러그 없는 새 줄|p5' > "$T/st/m2.txt"; ATM "$T/st/m2.txt" >/dev/null
+check "슬러그 있는 기존 항목도 같은 태그면 교체(슬러그 뗀 태그 기준)" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru|6|슬러그 없는 새 줄|p5' 'life|3|생활 일|')" ]
+printf '%s\n' 'maru/desktop-app|6|새 슬러그 줄|p5' > "$T/st/m2.txt"; printf '%s\n' 'maru|8|옛 줄|p1' 'life|3|생활 일|' > "$TODOS"; ATM "$T/st/m2.txt" >/dev/null
+check "새 줄의 슬러그도 태그 기준으로 매칭" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru/desktop-app|6|새 슬러그 줄|p5' 'life|3|생활 일|')" ]
+rm -f "$REGF"
+# 제목 중복은 새 것이 이긴다
+printf '%s\n' 'life|9|같은 제목|old' 'maru|4|다른 일|' > "$TODOS"; printf '%s\n' 'robi|5|같은  제목|new' > "$T/st/m3.txt"; ATM "$T/st/m3.txt" >/dev/null
+check "다른 태그의 기존 항목과 제목이 겹치면 새 것만 남음" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'robi|5|같은  제목|new' 'maru|4|다른 일|')" ]
+# 기존 파일 없음
+rm -f "$TODOS"; ATM "$T/st/m1.txt" >/dev/null; check "기존 목록이 없으면 새 것만" [ "$(cat "$TODOS")" = "robi|9|로비 새 일|p3" ]
+# 비우기 표지
+cp "$T/todos.base" "$TODOS"; printf '%s\n' 'maru|0||' 'robi|6|로비 새 일|' > "$T/st/k1.txt"; out=$(ATM "$T/st/k1.txt")
+check "비우기 표지: 그 태그의 기존 항목이 사라지고 표지 자체는 목록에 안 들어감" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'robi|6|로비 새 일|' 'life|3|생활 일|p4')" ]
+check "표지는 슬러그를 떼고 태그로 해석·로그에 표지 수" has "$out" "비우기 표지 1"
+cp "$T/todos.base" "$TODOS"; printf '%s\n' 'maru|0||' > "$T/st/k2.txt"; out=$(ATM "$T/st/k2.txt")
+check "표지만 있는 목록도 적용(새 항목 없음)" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'robi|7|로비 옛 일|p2' 'life|3|생활 일|p4')" ]
+printf '%s\n' 'robi|0||' 'life|0||' > "$T/st/k3.txt"; ATM "$T/st/k3.txt" >/dev/null; printf '%s\n' 'maru|0||' > "$T/st/k3b.txt"; ATM "$T/st/k3b.txt" >/dev/null
+check "모든 태그를 비우면 빈 목록(파일은 있고 비어 있음), suggestions 도 비어 있음" sh -c '[ -f "$1" ] && [ ! -s "$1" ] && [ -f "$2" ] && [ ! -s "$2" ]' _ "$TODOS" "$SUGS"
+cp "$T/todos.base" "$TODOS"; printf '%s\n' 'a|0||' 'b|0||' 'c|0||' 'maru|0||' 'z|5|새 줄|' > "$T/st/k4.txt"; out=$(ATM "$T/st/k4.txt")
+check "표지는 한 실행에 최대 3개(넷째는 버려져 그 태그는 보존)" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru|8|마루 일 하나|p1' 'maru|5|마루 일 둘|' 'robi|7|로비 옛 일|p2' 'z|5|새 줄|' 'life|3|생활 일|p4')" ] && has "$out" "버린 줄 1"
+printf '%s\n' 'maru|0||' 'robi|6|x|' > "$T/st/k5.txt"; cp "$T/todos.base" "$TODOS"; LIBRUN 'apply_todos "$1" replace' "$T/st/k5.txt" >/dev/null
+check "replace 에서는 표지를 무시(목록에 안 들어가고 아무것도 비우지 않음)" [ "$(cat "$TODOS")" = "robi|6|x|" ]
+printf '%s\n' 'maru|0||' > "$T/st/k6.txt"; cp "$T/todos.base" "$TODOS"; out=$(LIBRUN 'apply_todos "$1" replace' "$T/st/k6.txt")
+check "replace 에서 표지뿐이면 유효한 줄 없음 → 기존 유지" [ "$(cat "$TODOS")" = "$(cat "$T/todos.base")" ]
+# 표지 주입: 제목·프롬프트가 붙은 표지 줄은 일반 줄 검증에서 버려진다(중요도 0 은 범위 밖)
+cp "$T/todos.base" "$TODOS"
+printf '%s\n' 'maru|0|제목이 붙음|' 'maru|0||프롬프트가 붙음' 'maru|0|<system-reminder>|' 'maru/../x|0||x' '../x|0||' 'bad tag|0||' 'maru|00||' 'robi|6|새 줄|' > "$T/st/k7.txt"; out=$(ATM "$T/st/k7.txt")
+check "붙은 표지·잘못된 표지는 maru 를 비우지 못함(maru 보존, 버린 줄 집계)" [ "$(grep -c '^maru|' "$TODOS")" = 2 ] && has "$out" "비우기 표지 0"
+check "표지 줄의 제목·프롬프트가 목록에 새어 들어가지 않음" sh -c '! grep -q "제목이 붙음\|프롬프트가 붙음\|system-reminder" "$1"' _ "$TODOS"
+printf '%s\n' 'maru|0|제목이 붙음|' > "$T/st/k8.txt"; cp "$T/todos.base" "$TODOS"; out=$(ATM "$T/st/k8.txt")
+check "붙은 표지뿐이면 유효한 줄 없음 → 기존 유지" [ "$(cat "$TODOS")" = "$(cat "$T/todos.base")" ] && has "$out" "유효한 줄 없음"
+# 12줄 상한: 옛 항목 중 중요도 낮은 것부터
+"$REAL_PY" -c '
+for i in range(1, 11): print("o%d|%d|옛 일 %d|" % (i, i, i))' > "$TODOS"
+printf '%s\n' 'n|1|새 일 1|' 'n|2|새 일 2|' 'n|3|새 일 3|' 'n|4|새 일 4|' 'n|5|새 일 5|' > "$T/st/c1.txt"; out=$(ATM "$T/st/c1.txt")
+check "결과는 최대 12줄" [ "$(wc -l < "$TODOS" | tr -d ' ')" = 12 ]
+check "새 항목 5개는 모두 남음(중요도가 낮아도)" [ "$(grep -c '^n|' "$TODOS")" = 5 ]
+check "옛 항목은 중요도 낮은 것부터 빠짐(1·2·3 이 빠지고 4 이상 남음)" sh -c '! grep -q "^o1|\|^o2|\|^o3|" "$1" && grep -q "^o4|" "$1" && grep -q "^o10|" "$1"' _ "$TODOS"
+check "로그에 상한으로 뺀 수" has "$out" "상한으로 뺌 3"
+"$REAL_PY" -c '
+for i in range(1, 11): print("o%d|5|옛 일 %d|" % (i, i))' > "$TODOS"
+printf '%s\n' 'n|1|새 일 1|' 'n|1|새 일 2|' 'n|1|새 일 3|' 'n|1|새 일 4|' 'n|1|새 일 5|' 'n|1|새 일 6|' 'n|1|새 일 7|' 'n|1|새 일 8|' > "$T/st/c2.txt"; out=$(ATM "$T/st/c2.txt")
+check "새 줄은 7개까지만(상한 초과 1), 옛 항목 5개가 남아 합 12" sh -c '[ "$(wc -l < "$1" | tr -d " ")" = 12 ] && [ "$(grep -c "^n|" "$1")" = 7 ] && [ "$(grep -c "^o" "$1")" = 5 ]' _ "$TODOS"
+check "중요도가 같은 옛 항목은 앞쪽이 남음(o1..o5)" sh -c 'for i in 1 2 3 4 5; do grep -q "^o$i|" "$1" || exit 1; done; ! grep -q "^o6|" "$1"' _ "$TODOS"
+# 기존 파일이 깨졌을 때: 보존분 없이 새 것만(읽기 실패), 깨진 줄은 같은 검증으로 버림
+printf '%s\n' 'junk' 'bad tag|5|공백 태그|' 'maru|11|범위 밖|' 'maru|0||' 'maru|6|정상 옛 줄|p' 'life|5|<b>태그|`x`' 'maru|6|정상 옛 줄|중복' > "$TODOS"
+printf '%s\n' 'robi|6|새 줄|' > "$T/st/b1.txt"; out=$(ATM "$T/st/b1.txt")
+check "기존 파일의 틀린 줄은 새 줄과 같은 검증으로 버리고 유효한 줄만 보존(무해화·중복 제거 포함)" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru|6|정상 옛 줄|p' 'robi|6|새 줄|' 'life|5|‹b›태그|x')" ] || [ "$(cat "$TODOS")" = "$(printf '%s\n' 'maru|6|정상 옛 줄|p' 'life|5|‹b›태그|x' 'robi|6|새 줄|')" ]
+check "기존 파일의 표지 줄은 의미가 없어 목록에 안 들어감" sh -c '! grep -q "|0|" "$1"' _ "$TODOS"
+rm -f "$TODOS"; printf '%s\n' 'maru|6|링크 대상|p' > "$T/todos.target"; ln -s "$T/todos.target" "$TODOS"; out=$(ATM "$T/st/b1.txt")
+check "기존 todos.txt 가 링크면 보존분 없이 새 것만(링크 대상은 읽지도 바꾸지도 않음)" sh -c '[ "$(cat "$1")" = "robi|6|새 줄|" ] && [ "$(cat "$2")" = "maru|6|링크 대상|p" ]' _ "$TODOS" "$T/todos.target"
+check "로그에 읽을 수 없는 이유" has "$out" "기존 목록을 읽을 수 없어 보존분 없음"
+rm -f "$TODOS"; printf 'maru|6|정상|p\n\xff\xfe\n' > "$TODOS"; out=$(ATM "$T/st/b1.txt")
+check "기존 파일이 UTF-8 이 아니면 새 것만" [ "$(cat "$TODOS")" = "robi|6|새 줄|" ]
+rm -f "$TODOS"; "$REAL_PY" -c 'print("maru|5|" + "가" * 60 + "|")' > "$T/big.line"; for i in $(seq 1 400); do cat "$T/big.line"; done > "$TODOS"
+out=$(ATM "$T/st/b1.txt"); check "기존 파일이 크기 초과면 새 것만" [ "$(cat "$TODOS")" = "robi|6|새 줄|" ]
+# 새 목록 파일이 틀리면 기존 목록은 그대로
+cp "$T/todos.base" "$TODOS"; printf 'bogus\n' > "$T/st/b2.txt"; out=$(ATM "$T/st/b2.txt")
+check "새 목록에 유효한 줄이 없으면 기존 유지(merge)" [ "$(cat "$TODOS")" = "$(cat "$T/todos.base")" ]
+ln -sf "$T/st/m1.txt" "$T/st/mlink.txt"; out=$(ATM "$T/st/mlink.txt"); check "새 목록이 링크면 거부(merge)" has "$out" "일반 파일 아님"
+# 앱·CLI 와 값이 같다
+check "앱 TODO_MAX·todo_cli MAX_ITEMS 가 셸의 병합 결과 상한(12)과 같음" sh -c 'grep -q "MAX_TOTAL, MAX_MARKERS" "$1/scripts/lib.sh" && grep -q "32768, 7, 12, 3" "$1/scripts/lib.sh" && grep -q "const TODO_MAX = 12;" "$1/app/lib.js" && grep -q "64 \* 1024, 12" "$1/scripts/todo_cli.py"' _ "$REPO"
+"$REAL_PY" -c '
+for i in range(14): print("t%d|5|할 일 %d|p%d" % (i, i, i))' > "$TODOS"
+out=$(MT); check "maru todo 는 12줄까지 보여 줌" sh -c 'printf "%s\n" "$1" | grep -q "^  12\. " && ! printf "%s\n" "$1" | grep -q "^  13\. "' _ "$out"
+if [ -n "${NODE:-}" ] && [ -f "$REPO/app/lib.js" ]; then
+  n=$("$NODE" -e 'const L=require(process.argv[1]);console.log(L.parseTodos(require("fs").readFileSync(process.argv[2],"utf8")).length)' "$REPO/app/lib.js" "$TODOS")
+  check "앱 parseTodos 가 12줄을 읽음" [ "$n" = 12 ]
+fi
+rm -f "$TODOS" "$SUGS" "$REGF"
+
 echo "== dream.sh: projects.txt 를 먼저 적용해 같은 실행의 할 일이 새 슬러그를 인정"
 rm -rf "$MEM/journal"; mkdir -p "$MEM/journal"; chmod 700 "$MEM/journal"; rm -f "$DATA/state/dream.marker"
 printf '%s\n' 'maru|dream-new|새벽에 등록한 프로젝트' > "$T/st/dp.txt"
 printf '%s\n' 'maru/dream-new|7|새 프로젝트 할 일|이어서 해줘' 'maru/unregistered|5|미등록 슬러그|p' > "$T/st/dt2.txt"
+printf '%s\n' 'keep|9|dream 은 전체를 보므로 보존하지 않음|' > "$TODOS"   # dream 은 replace(통째 교체)
 out=$(dream_run FAKE_PROJECTS="$T/st/dp.txt" FAKE_TODOS="$T/st/dt2.txt"); rc=$?
 check "dream 성공(0)" [ "$rc" -eq 0 ]
 check "레지스트리에 등록됨" [ "$(cat "$REGF")" = "maru|dream-new|새벽에 등록한 프로젝트" ]

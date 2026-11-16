@@ -43,7 +43,7 @@ function parseSuggestions(text, truncated = false) {
 
 // todos.txt 본문 -> [{tag, importance, title, prompt}]  (스크립트가 모델 출력으로 쓰는 신뢰 못 할 파일: 엄격 파싱)
 // 줄 형식: <tag>|<importance>|<title>|<prompt>  (| 정확히 3개)
-const TODO_MAX = 7;
+const TODO_MAX = 12; // 셸 apply_todos 의 병합 결과 상한(MAX_TOTAL)과 같다. 패널은 스크롤된다
 const TODO_LINE_MAX_CHARS = 400;
 const TODO_TITLE_MAX = 60;
 const TODO_PROMPT_MAX = 120;

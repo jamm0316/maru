@@ -66,6 +66,7 @@ cat > "$T/fakemodel.sh" <<'EOF'
 [ -n "${FAKE_ENVLOG:-}" ] && echo "AGENT_REFLECTING=${AGENT_REFLECTING:-}" >> "$FAKE_ENVLOG"
 [ -n "${FAKE_JOURNAL:-}" ] && cp "$FAKE_JOURNAL" "$FAKE_STAGE/journal.txt"
 [ -n "${FAKE_PROJECTS:-}" ] && cp "$FAKE_PROJECTS" "$FAKE_STAGE/projects.txt"
+[ -n "${FAKE_TODOS:-}" ] && cp "$FAKE_TODOS" "$FAKE_STAGE/todos.txt"
 [ -n "${FAKE_TOUCH_JOURNAL:-}" ] && { mkdir -p "$FAKE_MEM/journal"; echo x > "$FAKE_MEM/journal/2000-01-01.md"; }
 [ -n "${FAKE_JOURNAL_FILE:-}" ] && echo x > "$FAKE_MEM/journal"
 echo "${FAKE_OUT:-변경 없음}"
@@ -574,6 +575,17 @@ printf '%s\n' 'maru|rolled-back|되돌려질 프로젝트' > "$T/pr2.txt"
 out=$(reflect_run FAKE_PROJECTS="$T/pr2.txt" FAKE_RC=1); rc=$?
 check "모델 실패(11)면 프로젝트 등록도 없음" sh -c '[ "$1" -eq 11 ] && cmp -s "$2" "$3"' _ "$rc" "$REGF" "$T/reg.before"
 rm -f "$REGF"
+
+echo "== reflect.sh: 오늘 할 일은 merge(이 세션이 다룬 태그만 교체, 다른 태그는 보존)"
+printf '%s\n' 'maru|8|마루 일|p1' 'robi|5|옛 로비 일|' 'life|3|생활 일|' > "$DATA/todos.txt"
+SID=$(mk_session 23)
+printf '%s\n' 'robi|7|새 로비 일|p2' 'life|0||' > "$T/td1.txt"
+out=$(reflect_run FAKE_TODOS="$T/td1.txt"); rc=$?
+check "reflect 성공(0)" [ "$rc" -eq 0 ]
+check "robi 는 새 것으로 교체·life 는 표지로 비움·maru 는 보존" [ "$(cat "$DATA/todos.txt")" = "$(printf '%s\n' 'maru|8|마루 일|p1' 'robi|7|새 로비 일|p2')" ]
+check "suggestions.txt 도 병합 결과로" [ "$(cat "$DATA/suggestions.txt")" = "$(printf '%s\n' p1 p2)" ]
+check "로그에 merge 모드" sh -c 'grep -q "할 일 목록 갱신(merge)" "$1"' _ "$DATA/logs/reflect.log"
+rm -f "$DATA/todos.txt" "$DATA/suggestions.txt"
 
 echo "== 가드"
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.

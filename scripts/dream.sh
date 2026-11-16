@@ -128,7 +128,7 @@ txn_end "$TXN"
 if [ -z "$reason" ]; then   # 추천·할 일 목록: 기억 트랜잭션과 독립(lib.sh)
   apply_projects "$STAGE/projects.txt"         # 새 프로젝트 등록: 아래 할 일이 새 슬러그를 참조할 수 있게 먼저(lib.sh)
   apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식)
-  apply_todos "$STAGE/todos.txt"               # 옛 추천보다 우선
+  apply_todos "$STAGE/todos.txt" replace       # 정리는 전체를 보고 전체 목록을 내므로 통째로 교체(옛 추천보다 우선)
 fi
 rm -rf "$STAGE"
 [ -n "$reason" ] && exit 0

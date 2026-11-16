@@ -243,58 +243,101 @@ PY
   return 0
 }
 
-# ---- 오늘 할 일: apply_todos <stage의 todos.txt>
-# 모델이 쓴 `<태그>|<중요도>|<제목>|<프롬프트>` 줄을 검증해 $MARU_DATA/todos.txt 로 원자적 교체한다. 항상 0을 반환한다(실패는 로그만, 기존 목록 유지).
+# ---- 오늘 할 일: apply_todos <stage의 todos.txt> [merge|replace]
+# 모델이 쓴 `<태그>|<중요도>|<제목>|<프롬프트>` 줄을 검증해 $MARU_DATA/todos.txt 로 원자적으로 반영한다. 항상 0을 반환한다(실패는 로그만, 기존 목록 유지).
 # 파일이 없으면 기존 목록을 그대로 둔다. 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 줄은 정확히 4칸(`|` 3개) /
 # 태그 1~12자 [0-9A-Za-z가-힣-](뒤에 `/슬러그` 를 붙여 프로젝트를 가리킬 수 있다: 슬러그 [0-9a-z가-힣-]{1,24}, 형식이 틀리거나
 # data/projects.txt 에 없으면 줄은 두고 슬러그만 뗀다), 중요도 1~10, 제목 1~60자, 프롬프트 0~120자(비면 사용자가 직접 할 일) / 제어·서식 문자 제거,
 # 제목·프롬프트는 neutralize_body 로 무해화(일지와 같은 함수) / 비밀값처럼 보이는 줄·제목 중복은 버림.
-# 7개를 넘으면 중요도 높은 순(안정)으로 7개만 남기고, 태그 묶음을 묶음 안 최고 중요도 내림차순으로, 묶음 안은 중요도 내림차순(안정)으로 정렬한다.
-# 유효한 줄이 하나도 없으면 기존 목록 유지. 성공하면 비어 있지 않은 프롬프트로 data/suggestions.txt 도 다시 만든다
+# 모드(기본 replace):
+#  - replace(dream.sh: 전체를 보고 목록 전체를 낸다): 7개를 넘으면 중요도 높은 순(안정)으로 7개만 남기고 기존 목록을 통째로 교체한다. 유효한 줄이 없으면 기존 목록 유지.
+#  - merge(reflect.sh: 한 세션만 본다): 새 목록(최대 7줄)에 등장한 태그(슬러그 뗀 태그 기준)의 기존 항목은 새 것으로 바꾸고, 없는 태그의 기존 항목은 보존한다.
+#    기존 data/todos.txt 는 신뢰하지 않고 같은 검증을 다시 거쳐 읽는다(읽기 실패·링크·크기 초과면 보존분 없이 새 것만). 제목이 겹치면 새 것이 이긴다.
+#    `<태그>|0||`(중요도 0·빈 제목·빈 프롬프트)는 "그 태그의 할 일을 비운다" 표지로만 해석한다(목록에 안 들어감, 한 실행에 최대 3개, 태그 검증 동일; replace 에서는 무시).
+#    표지 줄에 제목·프롬프트가 붙으면 중요도 0 이 범위 밖이라 일반 줄 검증에서 버려진다. 병합 결과는 최대 12줄이고 넘으면 보존된(옛) 항목 중 중요도 낮은 것부터 뺀다(새 항목은 안 뺀다).
+# 정렬: 태그 묶음을 묶음 안 최고 중요도 내림차순으로, 묶음 안은 중요도 내림차순(안정). 성공하면 비어 있지 않은 프롬프트로 data/suggestions.txt 도 병합 결과로 다시 만든다
 # (apply_suggestions 의 검증 규칙을 그대로 거친다; 프롬프트가 하나도 없으면 빈 파일).
 apply_todos() {
-  local src=$1 dst=$MARU_DATA/todos.txt tmp stg res
+  local src=$1 mode=${2:-replace} dst=$MARU_DATA/todos.txt tmp stg res
+  [ "$mode" = merge ] || mode=replace
   [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
   mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "할 일 목록: data 폴더 없음 — 건너뜀"; return 0; }
   tmp=$(mktemp "$MARU_DATA/.todos.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
   stg=$(mktemp "$MARU_DATA/.todos-sug.XXXXXX" 2>/dev/null) || { rm -f "$tmp"; type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
-  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" "$MARU_DATA/projects.txt" <<'PY' 2>&1
+  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" "$MARU_DATA/projects.txt" "$mode" "$dst" <<'PY' 2>&1
 import os, re, stat, sys
-src, tmp, stg, libdir, regpath = sys.argv[1:6]
+src, tmp, stg, libdir, regpath, mode, dstpath = sys.argv[1:8]
 sys.path.insert(0, libdir)
 from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, safe_start, split_project, read_projects
-MAX_BYTES, MAX_ITEMS, MAX_TITLE, MAX_PROMPT = 32768, 7, 60, 120
+MAX_BYTES, MAX_NEW, MAX_TOTAL, MAX_MARKERS, MAX_TITLE, MAX_PROMPT = 32768, 7, 12, 3, 60, 120
+merge = mode == "merge"
 registry = {(t, s) for t, s, _ in read_projects(regpath)}   # 등록된 프로젝트만 참조할 수 있다
+
+def read_text(path):
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode): raise ValueError("일반 파일 아님(심볼릭 링크 등)")
+    if st.st_size > MAX_BYTES: raise ValueError("크기 초과(%d바이트)" % st.st_size)
+    with open(path, "rb") as f: return f.read(MAX_BYTES + 1).decode("utf-8")
+
+def why(e):
+    return str(e) if type(e) is ValueError else "읽기 실패(%s)" % type(e).__name__
+
+def parse(text, markers_ok):
+    """검증을 통과한 줄 -> (항목 [(태그, 슬러그, 중요도, 제목, 프롬프트)], 비우기 표지 태그 목록, 버린 줄 수). 제목 중복은 먼저 나온 것만."""
+    items, markers, seen, dropped = [], [], set(), 0
+    for line in text.split("\n"):
+        line = strip_bad(line.rstrip("\r")).strip(" ")
+        if not line: continue
+        parts = line.split("|")
+        if len(parts) != 4: dropped += 1; continue
+        tag, imp, title, prompt = [p.strip(" ") for p in parts]
+        tag, slug = split_project(tag)
+        if looks_secret("|".join((tag, imp, title, prompt))): dropped += 1; continue   # 틀린 슬러그(길면 비밀값처럼 보일 수 있다)는 이미 떼었으므로 줄을 버리지 않는다
+        if imp == "0" and not title and not prompt:   # `태그|0||` = 그 태그 비우기 표지(merge 에서만 의미)
+            if not markers_ok: continue
+            if not valid_tag(tag) or len(markers) >= MAX_MARKERS: dropped += 1; continue
+            if tag not in markers: markers.append(tag)
+            continue
+        if not valid_tag(tag) or not re.fullmatch("[0-9]{1,2}", imp) or not 1 <= int(imp) <= 10: dropped += 1; continue
+        if slug and (tag, slug) not in registry: slug = None
+        if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
+        title, prompt = neutralize_body(title), neutralize_body(prompt)
+        if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
+        if prompt and not safe_start(prompt): prompt = ""   # 숫자·!·/ 로 시작하는 프롬프트는 비운다(직접 할 일로 남김)
+        key = " ".join(title.split()).casefold()
+        if key in seen: continue
+        seen.add(key); items.append((tag, slug, int(imp), title, prompt))
+    return items, markers, dropped
+
 try:
-    st = os.lstat(src)
-    if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
-    if st.st_size > MAX_BYTES: print("거부: 크기 초과(%d바이트)" % st.st_size); sys.exit(1)
-    with open(src, "rb") as f: raw = f.read(MAX_BYTES + 1)
-    text = raw.decode("utf-8")
-except (OSError, UnicodeDecodeError) as e:
-    print("거부: 읽기 실패(%s)" % type(e).__name__); sys.exit(1)
-items, seen, dropped = [], set(), 0
-for line in text.split("\n"):
-    line = strip_bad(line.rstrip("\r")).strip(" ")
-    if not line: continue
-    parts = line.split("|")
-    if len(parts) != 4: dropped += 1; continue
-    tag, imp, title, prompt = [p.strip(" ") for p in parts]
-    tag, slug = split_project(tag)
-    if looks_secret("|".join((tag, imp, title, prompt))): dropped += 1; continue   # 틀린 슬러그(길면 비밀값처럼 보일 수 있다)는 이미 떼었으므로 줄을 버리지 않는다
-    if not valid_tag(tag) or not re.fullmatch("[0-9]{1,2}", imp) or not 1 <= int(imp) <= 10: dropped += 1; continue
-    if slug and (tag, slug) not in registry: slug = None
-    if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
-    title, prompt = neutralize_body(title), neutralize_body(prompt)
-    if not title or len(title) > MAX_TITLE or len(prompt) > MAX_PROMPT: dropped += 1; continue
-    if prompt and not safe_start(prompt): prompt = ""   # 숫자·!·/ 로 시작하는 프롬프트는 비운다(직접 할 일로 남김)
-    key = " ".join(title.split()).casefold()
-    if key in seen: continue
-    seen.add(key); items.append((tag, slug, int(imp), title, prompt))
-if not items: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
-over = max(0, len(items) - MAX_ITEMS)
-keep = sorted(range(len(items)), key=lambda i: (-items[i][2], i))[:MAX_ITEMS]   # 중요도 높은 순(안정)으로 7개
+    text = read_text(src)
+except (OSError, UnicodeDecodeError, ValueError) as e:
+    print("거부: %s" % why(e)); sys.exit(1)
+items, markers, dropped = parse(text, merge)
+if not items and not markers: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
+over = max(0, len(items) - MAX_NEW)
+keep = sorted(range(len(items)), key=lambda i: (-items[i][2], i))[:MAX_NEW]   # 중요도 높은 순(안정)으로 7개
 items = [items[i] for i in sorted(keep)]
+note = ""
+if merge:
+    old, oldnote = [], "기존 목록 없음"
+    try:
+        old = parse(read_text(dstpath), False)[0]
+        oldnote = ""
+    except FileNotFoundError: pass
+    except (OSError, UnicodeDecodeError, ValueError) as e: oldnote = "기존 목록을 읽을 수 없어 보존분 없음(%s)" % why(e)
+    newtags = {x[0] for x in items} | set(markers)
+    newtitles = {" ".join(x[3].split()).casefold() for x in items}
+    kept = [x for x in old if x[0] not in newtags and " ".join(x[3].split()).casefold() not in newtitles]
+    replaced = len(old) - len(kept)
+    room = MAX_TOTAL - len(items)
+    trimmed = 0
+    if len(kept) > room:   # 보존된(옛) 항목 중 중요도 낮은 것부터 뺀다(같으면 뒤쪽부터). 새 항목은 빼지 않는다
+        keepidx = sorted(sorted(range(len(kept)), key=lambda i: (-kept[i][2], i))[:max(room, 0)])
+        trimmed = len(kept) - len(keepidx)
+        kept = [kept[i] for i in keepidx]
+    items = kept + items
+    note = ", 보존 %d·교체 %d·상한으로 뺌 %d·비우기 표지 %d%s" % (len(kept), replaced, trimmed, len(markers), (", " + oldnote) if oldnote else "")
 groups, order = {}, []
 for it in items:
     if it[0] not in groups: groups[it[0]] = []; order.append(it[0])
@@ -304,11 +347,11 @@ out = []
 for t in order: out.extend(sorted(groups[t], key=lambda x: -x[2]))         # 안정 정렬
 with open(tmp, "w", encoding="utf-8") as f: f.write("".join("%s|%d|%s|%s\n" % (x[0] + ("/" + x[1] if x[1] else ""), x[2], x[3], x[4]) for x in out))
 with open(stg, "w", encoding="utf-8") as f: f.write("".join(x[4] + "\n" for x in out if x[4]))
-print("ok %d줄(버린 줄 %d, 상한 초과 %d)" % (len(out), dropped, over))
+print("ok %d줄(버린 줄 %d, 상한 초과 %d%s)" % (len(out), dropped, over, note))
 PY
-  ) && [ -s "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$dst" 2>/dev/null
+  ) && [ -f "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$dst" 2>/dev/null
   if [ $? -eq 0 ]; then
-    type log >/dev/null 2>&1 && log "할 일 목록 갱신: $res"
+    type log >/dev/null 2>&1 && log "할 일 목록 갱신($mode): $res"
     if [ -s "$stg" ]; then apply_suggestions "$stg"
     else : > "$stg" && chmod 600 "$stg" && mv -f "$stg" "$MARU_DATA/suggestions.txt" 2>/dev/null   # 프롬프트가 있는 할 일이 없으면 추천도 비운다
     fi

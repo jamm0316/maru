@@ -12,7 +12,7 @@ sys.path.insert(0, HERE)
 from textclean import has_bad, valid_tag, safe_start, split_project   # noqa: E402
 from maru_ui import copy_suggestion        # noqa: E402
 
-MAX_BYTES, MAX_ITEMS = 64 * 1024, 7
+MAX_BYTES, MAX_ITEMS = 64 * 1024, 12   # apply_todos 의 병합 결과 상한과 같다
 
 
 def load_todos(path):
