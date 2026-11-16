@@ -7,10 +7,10 @@ const path = require('path');
 
 // 로고 도안은 lib.js 의 LOGO·logoShapesSvg 하나에만 있다(앱 아이콘·헤더·트레이 공용). 로고를 바꿀 때는 거기만 고친다.
 const { LOGO, logoShapesSvg } = require('../lib');
-// 앱 아이콘: 1024 캔버스, 여백 64·모서리 200(예전과 같음), 안쪽 896 타일에 135 단위 도안을 맞춘다.
+// 앱 아이콘: 1024 정사각형 전체를 타일 색으로 꽉 채운다(여백·둥근 모서리·테두리 없음; macOS 가 자기 마스크를 씌운다).
+// 도안은 예전과 같은 절대 크기(896px 안에 135 단위 → 배율 896/135)로 가운데에 둔다.
 const appIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-<rect x="64" y="64" width="896" height="896" rx="200" fill="${LOGO.tileColor}"/>
-<rect x="64" y="64" width="896" height="896" rx="200" fill="none" stroke="#2B2119" stroke-width="6"/>
+<rect width="1024" height="1024" fill="${LOGO.tileColor}"/>
 <g transform="translate(64 64) scale(${896 / LOGO.tile})">${logoShapesSvg(LOGO.color, 'mark')}</g></svg>`;
 // 트레이 템플릿 이미지: 검정 도형 + 투명 배경(macOS 가 메뉴 막대 색에 맞춰 칠한다). 144px 로 그린 뒤 줄인다.
 const traySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 ${LOGO.tile} ${LOGO.tile}">${logoShapesSvg('#000000', 'tray')}</svg>`;
@@ -30,9 +30,9 @@ function makeIcns(png, icns) {
   finally { fs.rmSync(path.dirname(set), { recursive: true, force: true }); }
 }
 
-async function render(svg, size, transparent) {
+async function render(svg, size, transparent, bg) {
   const win = new BrowserWindow({ show: false, width: size, height: size, useContentSize: true, transparent: !!transparent, frame: false, webPreferences: { offscreen: true, sandbox: true } });
-  await win.loadURL('data:text/html,' + encodeURIComponent('<body style="margin:0;background:transparent;overflow:hidden">' + svg + '</body>'));
+  await win.loadURL('data:text/html,' + encodeURIComponent('<body style="margin:0;background:' + (bg || 'transparent') + ';overflow:hidden">' + svg + '</body>'));
   await new Promise((r) => setTimeout(r, 400));
   const img = await win.webContents.capturePage({ x: 0, y: 0, width: size, height: size });
   win.close();
@@ -41,7 +41,7 @@ async function render(svg, size, transparent) {
 
 app.whenReady().then(async () => {
   const out = path.join(__dirname, '..', 'build');
-  if (!process.argv.includes('--tray-only')) fs.writeFileSync(path.join(out, 'icon.png'), (await render(appIconSvg, 1024, false)).toPNG());
+  if (!process.argv.includes('--tray-only')) fs.writeFileSync(path.join(out, 'icon.png'), (await render(appIconSvg, 1024, false, LOGO.tileColor)).toPNG());
   if (!process.argv.includes('--tray-only')) makeIcns(path.join(out, 'icon.png'), path.join(out, 'icon.icns'));
   const big = await render(traySvg, 144, true);
   for (const [name, px] of [['trayTemplate.png', 18], ['trayTemplate@2x.png', 36]]) {
