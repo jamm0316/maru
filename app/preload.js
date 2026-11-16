@@ -73,5 +73,15 @@ contextBridge.exposeInMainWorld('maru', {
   updateInstall: () => ipcRenderer.invoke('update:install'),
   updatePull: () => ipcRenderer.invoke('update:pull'),
   onUpdateProgress: (cb) => { ipcRenderer.on('update:progress', (_e, p) => cb(Number(p) || 0)); },
+  // 첫 설정·첫 만남: 경로는 받지 않는다(이름·언어 문자열, 작업 공간 id 만)
+  setupGet: () => ipcRenderer.invoke('setup:get'),
+  setupPrereqs: () => ipcRenderer.invoke('setup:prereqs'),
+  setupCreateHome: (name, lang) => ipcRenderer.invoke('setup:create-home', { name: String(name).slice(0, 200), lang: String(lang).slice(0, 8) }),
+  setupConnectLater: () => ipcRenderer.invoke('setup:connect-later'),
+  setupFinish: () => ipcRenderer.invoke('setup:finish'),
+  meetGet: () => ipcRenderer.invoke('meet:get'),
+  meetStart: (id) => ipcRenderer.invoke('meet:start', String(id)),
+  meetDismiss: () => ipcRenderer.invoke('meet:dismiss'),
+  onMeet: (cb) => { ipcRenderer.on('ui:meet', () => cb()); },
   onOpenSettings: (cb) => { ipcRenderer.on('ui:open-settings', () => cb()); },
 });

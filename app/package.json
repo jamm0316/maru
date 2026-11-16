@@ -76,6 +76,111 @@
       {
         "from": "build/trayTemplate@2x.png",
         "to": "tray/trayTemplate@2x.png"
+      },
+      {
+        "from": "../scripts",
+        "to": "payload/scripts",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store",
+          "!test-*.sh"
+        ]
+      },
+      {
+        "from": "../prompts",
+        "to": "payload/prompts",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../squads",
+        "to": "payload/squads",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../squads-en",
+        "to": "payload/squads-en",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../launchd",
+        "to": "payload/launchd",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../bin",
+        "to": "payload/bin",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../install.sh",
+        "to": "payload/install.sh"
+      },
+      {
+        "from": "../uninstall.sh",
+        "to": "payload/uninstall.sh"
+      },
+      {
+        "from": "../CLAUDE.md",
+        "to": "payload/CLAUDE.md"
+      },
+      {
+        "from": "../CLAUDE.en.md",
+        "to": "payload/CLAUDE.en.md"
+      },
+      {
+        "from": "../README.md",
+        "to": "payload/README.md"
+      },
+      {
+        "from": "../.claude/agents",
+        "to": "payload/.claude/agents",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../.claude/skills",
+        "to": "payload/.claude/skills",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../.claude/settings.json",
+        "to": "payload/.claude/settings.json"
       }
     ]
   }

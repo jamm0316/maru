@@ -683,7 +683,7 @@ t('트레이 아이콘 파일: 18·36px PNG, 패키징 설정에 포함', () => 
   assert.deepStrictEqual(png('trayTemplate.png'), [18, 18]);
   assert.deepStrictEqual(png('trayTemplate@2x.png'), [36, 36]);
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
-  const to = pkg.build.extraResources.map((r) => r.to).sort();
+  const to = pkg.build.extraResources.map((r) => r.to).filter((x) => x.startsWith('tray/')).sort();
   assert.deepStrictEqual(to, ['tray/trayTemplate.png', 'tray/trayTemplate@2x.png']);
   for (const r of pkg.build.extraResources) assert.ok(fs.existsSync(path.join(__dirname, r.from)));
 });
@@ -1922,6 +1922,321 @@ t('기억 보기 문구: ko/en 키·형식 일치, 중복 키 없음, 쓰는 키
   for (const f of ['memview.js', 'renderer.js', 'index.html']) { const txt = fs.readFileSync(path.join(__dirname, 'renderer', f), 'utf8'); for (const m of txt.matchAll(/(?:T\(|data-i18n(?:-aria)?=")'?(mem\.[\w.]+)/g)) used.add(m[1]); }
   used.delete('mem.type.'); used.delete('mem.journal.'); // 동적으로 이어 붙이는 접두사는 위에서 따로 더했다
   for (const k of used) for (const lg of I.LANGS) assert.ok(I.STR[lg][k] !== undefined, lg + ' ' + k);
+});
+
+// ---- 관리형 홈·첫 설정·첫 만남 ----
+t('resolveRoot: managed 후보는 ~/maru 뒤, 소스 이름 managed', () => {
+  const good = new Set(['/h/maru', '/h/.maru', '/m/x']);
+  const mk = (o) => L.resolveRoot({ env: {}, home: '/h', isPackaged: true, appDir: '/app/app', io: { readConfig: () => null, isRepo: (d) => good.has(d) }, ...o });
+  assert.deepStrictEqual(mk({}), { root: '/h/maru', source: 'home' }); // 기존 사용자 우선
+  good.delete('/h/maru');
+  assert.deepStrictEqual(mk({}), { root: '/h/.maru', source: 'managed' });
+  assert.deepStrictEqual(mk({ managedHome: '/m/x' }), { root: '/m/x', source: 'managed' });
+  assert.strictEqual(mk({ io: { readConfig: () => null, isRepo: () => false } }), null);
+  assert.deepStrictEqual(mk({ env: { MARU_HOME: '/m/x' } }), { root: '/m/x', source: 'env' }); // env 가 managed 보다 먼저
+});
+const mkPayload = (extra) => {
+  const d = fs.mkdtempSync(path.join(tmp, 'pl-'));
+  const w = (rel, txt, mode) => { const f = path.join(d, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, txt, { mode: mode || 0o644 }); fs.chmodSync(f, mode || 0o644); };
+  w('VERSION', '1.2.3\n'); w('CLAUDE.md', '한국어 지침'); w('CLAUDE.en.md', 'english rules');
+  w('scripts/maru-status.sh', '#!/bin/bash\n', 0o775); w('scripts/lib.sh', 'x'); w('prompts/a.txt', 'a'); w('.claude/settings.json', '{}');
+  if (extra) extra(w, d);
+  return { d, w };
+};
+const newHome = () => path.join(fs.mkdtempSync(path.join(tmp, 'hm-')), '.maru');
+const rd = (home, rel) => fs.readFileSync(path.join(home, rel), 'utf8');
+t('syncPayload: 새로 만들기(모드·실행 비트·마커·CLAUDE.md 언어)', () => {
+  const { d } = mkPayload(); const home = newHome();
+  const r = L.syncPayload({ payloadDir: d, home, lang: 'ko' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.version, '1.2.3');
+  assert.strictEqual(fs.statSync(home).mode & 0o777, 0o700);
+  assert.strictEqual(rd(home, 'CLAUDE.md'), '한국어 지침');
+  assert.ok(!fs.existsSync(path.join(home, 'CLAUDE.en.md')));
+  assert.strictEqual(fs.statSync(path.join(home, 'scripts/maru-status.sh')).mode & 0o777, 0o755);
+  assert.strictEqual(fs.statSync(path.join(home, 'scripts/lib.sh')).mode & 0o777, 0o644);
+  const mk = L.readMarker(home);
+  assert.strictEqual(mk.version, '1.2.3'); assert.strictEqual(mk.lang, 'ko');
+  assert.ok(mk.manifest.includes('scripts/lib.sh') && mk.manifest.includes('CLAUDE.md') && mk.manifest.includes('VERSION'));
+  assert.ok(!mk.manifest.some((p) => p.startsWith('data/')));
+  assert.strictEqual(fs.statSync(path.join(home, L.MANAGED_MARKER)).mode & 0o022, 0);
+  assert.deepStrictEqual(fs.readdirSync(home).filter((n) => n.endsWith('.tmp')), []);
+});
+t('syncPayload: 업데이트(없어진 파일 제거, data/ 와 settings.local.json 은 그대로, 언어 전환)', () => {
+  const { d } = mkPayload(); const home = newHome();
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true);
+  fs.mkdirSync(path.join(home, 'data'), { recursive: true }); fs.writeFileSync(path.join(home, 'data', 'mine.txt'), 'private');
+  fs.writeFileSync(path.join(home, '.claude', 'settings.local.json'), '{"x":1}');
+  fs.writeFileSync(path.join(home, 'user-note.txt'), 'u'); // 매니페스트에 없는 사용자 파일
+  fs.rmSync(path.join(d, 'prompts'), { recursive: true }); fs.writeFileSync(path.join(d, 'VERSION'), '1.3.0\n');
+  const r = L.syncPayload({ payloadDir: d, home, lang: 'en' });
+  assert.strictEqual(r.ok, true); assert.ok(r.removed >= 1);
+  assert.ok(!fs.existsSync(path.join(home, 'prompts', 'a.txt')) && !fs.existsSync(path.join(home, 'prompts')));
+  assert.strictEqual(rd(home, 'data/mine.txt'), 'private'); assert.strictEqual(rd(home, '.claude/settings.local.json'), '{"x":1}'); assert.strictEqual(rd(home, 'user-note.txt'), 'u');
+  assert.strictEqual(rd(home, 'CLAUDE.md'), 'english rules');
+  assert.strictEqual(L.readMarker(home).version, '1.3.0'); assert.strictEqual(L.readMarker(home).lang, 'en');
+  const s = L.syncClaudeMd({ payloadDir: d, home, lang: 'ko' });
+  assert.strictEqual(s.ok, true); assert.strictEqual(rd(home, 'CLAUDE.md'), '한국어 지침'); assert.strictEqual(L.readMarker(home).lang, 'ko'); assert.strictEqual(L.readMarker(home).version, '1.3.0');
+});
+t('syncPayload: en 인데 CLAUDE.en.md 가 없으면 CLAUDE.md 로 대체', () => {
+  const { d } = mkPayload(); fs.unlinkSync(path.join(d, 'CLAUDE.en.md'));
+  const home = newHome(); const r = L.syncPayload({ payloadDir: d, home, lang: 'en' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.claudeFallback, true); assert.strictEqual(rd(home, 'CLAUDE.md'), '한국어 지침');
+});
+t('syncPayload: 마커 없는 비어 있지 않은 폴더·심볼릭 홈·넓은 권한은 거부(아무것도 쓰지 않음)', () => {
+  const { d } = mkPayload();
+  const h1 = newHome(); fs.mkdirSync(h1, { mode: 0o700 }); fs.writeFileSync(path.join(h1, 'foreign.txt'), 'x');
+  assert.deepStrictEqual(L.syncPayload({ payloadDir: d, home: h1, lang: 'ko' }), { ok: false, reason: 'not-managed' });
+  assert.deepStrictEqual(fs.readdirSync(h1), ['foreign.txt']);
+  const h2 = newHome(); fs.mkdirSync(path.dirname(h2), { recursive: true }); const target = fs.mkdtempSync(path.join(tmp, 'tg-')); fs.symlinkSync(target, h2);
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home: h2, lang: 'ko' }).reason, 'home-symlink'); assert.deepStrictEqual(fs.readdirSync(target), []);
+  const h3 = newHome(); fs.mkdirSync(h3, { mode: 0o700 }); fs.chmodSync(h3, 0o777);
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home: h3, lang: 'ko' }).reason, 'home-mode');
+  const h4 = newHome(); fs.mkdirSync(h4, { mode: 0o700 });
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home: h4, lang: 'ko', io: { fs, uid: process.getuid() + 1 } }).reason, 'home-owner');
+  assert.strictEqual(L.syncClaudeMd({ payloadDir: d, home: h1, lang: 'en' }).reason, 'not-managed'); // 마커 없는 홈에는 CLAUDE.md 만도 쓰지 않는다
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home: 'relative', lang: 'ko' }).reason, 'args');
+  assert.strictEqual(L.syncPayload({ payloadDir: path.join(tmp, 'nope'), home: newHome(), lang: 'ko' }).reason, 'payload-missing');
+  const empty = newHome(); fs.mkdirSync(empty, { mode: 0o700 }); assert.strictEqual(L.syncPayload({ payloadDir: d, home: empty, lang: 'ko' }).ok, true); // 빈 폴더는 채택
+});
+t('syncPayload: payload 안 심볼릭 링크 거부, 홈 안 링크(목적지·중간 폴더)는 쓰지 않고 거부', () => {
+  const { d } = mkPayload((w, dir) => fs.symlinkSync('/etc/hosts', path.join(dir, 'scripts', 'evil')));
+  const home = newHome();
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).reason, 'payload-symlink'); assert.ok(!fs.existsSync(home));
+  const { d: d2 } = mkPayload(); const h2 = newHome();
+  assert.strictEqual(L.syncPayload({ payloadDir: d2, home: h2, lang: 'ko' }).ok, true);
+  const outside = path.join(tmp, 'outside.txt'); fs.writeFileSync(outside, 'keep');
+  fs.unlinkSync(path.join(h2, 'scripts/lib.sh')); fs.symlinkSync(outside, path.join(h2, 'scripts/lib.sh')); // 목적지에 심은 링크
+  assert.strictEqual(L.syncPayload({ payloadDir: d2, home: h2, lang: 'ko' }).reason, 'dest-symlink');
+  assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'keep'); assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'keep');
+  const h3 = newHome(); L.syncPayload({ payloadDir: d2, home: h3, lang: 'ko' });
+  const outDir = fs.mkdtempSync(path.join(tmp, 'od-'));
+  fs.rmSync(path.join(h3, 'prompts'), { recursive: true }); fs.symlinkSync(outDir, path.join(h3, 'prompts')); // 중간 폴더가 링크
+  assert.strictEqual(L.syncPayload({ payloadDir: d2, home: h3, lang: 'ko' }).reason, 'dest-symlink'); assert.deepStrictEqual(fs.readdirSync(outDir), []);
+});
+t('syncPayload: payload 에 data/·.git 이 있어도 복사하지 않는다', () => {
+  const { d } = mkPayload((w) => { w('data/secret.txt', 's'); w('.git/config', 'g'); });
+  const home = newHome(); assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true);
+  assert.ok(!fs.existsSync(path.join(home, 'data')) && !fs.existsSync(path.join(home, '.git')));
+});
+t('매니페스트 경로 검증: ../x·절대경로·data/·마커는 무시, 이전 매니페스트가 오염돼도 밖은 지우지 않는다', () => {
+  for (const bad of ['../x', '/etc/passwd', 'a/../../x', 'data/x', 'data', '.claude/settings.local.json', L.MANAGED_MARKER, '', 'a//b', './a', 'a\\b', 'a\0b', 5, null, '.git/config']) assert.strictEqual(L.safeManifestPath(bad), null, String(bad));
+  assert.strictEqual(L.safeManifestPath('scripts/a.sh'), 'scripts/a.sh');
+  const { d } = mkPayload(); const home = newHome(); L.syncPayload({ payloadDir: d, home, lang: 'ko' });
+  const victim = path.join(path.dirname(home), 'victim.txt'); fs.writeFileSync(victim, 'v'); fs.mkdirSync(path.join(home, 'data'), { recursive: true }); fs.writeFileSync(path.join(home, 'data', 'keep'), 'k');
+  const mk = JSON.parse(fs.readFileSync(path.join(home, L.MANAGED_MARKER), 'utf8'));
+  mk.manifest.push('../victim.txt', victim, 'data/keep', '.claude/settings.local.json');
+  fs.writeFileSync(path.join(home, L.MANAGED_MARKER), JSON.stringify(mk));
+  assert.ok(!L.readMarker(home).manifest.some((p) => p.includes('victim') || p.startsWith('data')));
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true);
+  assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'v'); assert.strictEqual(rd(home, 'data/keep'), 'k');
+  assert.strictEqual(L.parseMarker('x'.repeat(600000)), null); assert.strictEqual(L.parseMarker('{"version":3}'), null); assert.strictEqual(L.parseMarker('nope'), null);
+});
+t('동기화 실패: 새 홈은 생기지 않고(임시 폴더 정리) 재시도 가능, 기존 홈은 진행 중 표시가 남는다', () => {
+  const { d } = mkPayload(); const home = newHome();
+  const real = fs.renameSync; const calls = [];
+  const failMarker = { fs: Object.assign(Object.create(fs), { renameSync: (x, y) => { calls.push(path.basename(y)); if (path.basename(y) === L.MANAGED_MARKER) throw new Error('boom'); return real(x, y); } }), uid: process.getuid() };
+  const r = L.syncPayload({ payloadDir: d, home, lang: 'ko', io: failMarker });
+  assert.deepStrictEqual([r.ok, r.reason], [false, 'marker']);
+  assert.ok(!fs.existsSync(home)); assert.deepStrictEqual(fs.readdirSync(path.dirname(home)), []); // 홈도 임시 폴더도 남지 않는다
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true); // 곧바로 재시도 성공(not-managed 로 막히지 않는다)
+  assert.strictEqual(L.readSyncing(home), false); assert.deepStrictEqual(fs.readdirSync(path.dirname(home)), [path.basename(home)]);
+  // 기존 홈 갱신 중 마커 쓰기가 실패하면: 이전 마커 그대로 + 진행 중 표시
+  fs.writeFileSync(path.join(d, 'VERSION'), '9.9.9\n'); calls.length = 0;
+  const r2 = L.syncPayload({ payloadDir: d, home, lang: 'ko', io: failMarker });
+  assert.deepStrictEqual([r2.ok, r2.reason], [false, 'marker']);
+  assert.strictEqual(L.readMarker(home).version, '1.2.3'); assert.strictEqual(L.readSyncing(home), true);
+  assert.strictEqual(L.managedAction(L.readMarker(home), '9.9.9', 'ko', L.readSyncing(home)), 'sync');
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true); // 재시도하면 표시가 사라진다
+  assert.strictEqual(L.readSyncing(home), false); assert.strictEqual(L.readMarker(home).version, '9.9.9');
+  assert.deepStrictEqual(fs.readdirSync(home).filter((n) => n.endsWith('.tmp')), []);
+});
+t('중간에 복사가 실패한 새 홈: 반쯤 만든 홈이 남지 않는다', () => {
+  const { d } = mkPayload(); const home = newHome(); let n = 0;
+  const io = { fs: Object.assign(Object.create(fs), { openSync: (f, ...rest) => { if (String(f).includes('lib.sh') && String(f).endsWith('.tmp')) throw new Error('disk'); return fs.openSync(f, ...rest); } }), uid: process.getuid() };
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko', io }).ok, false);
+  assert.ok(!fs.existsSync(home)); assert.deepStrictEqual(fs.readdirSync(path.dirname(home)), []); n++;
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true);
+});
+t('cleanStaleTmp: 진행 중 표시가 있고 충분히 오래된 내 임시 폴더만 지운다', () => {
+  const { d } = mkPayload(); const home = newHome(); fs.mkdirSync(path.dirname(home), { recursive: true });
+  const mk = (suffix, withMarker, mode) => { const p = home + '.tmp-' + suffix; fs.mkdirSync(p, { mode: 0o700 }); if (withMarker) fs.writeFileSync(path.join(p, L.SYNC_MARKER), '{}'); return p; };
+  const a1 = mk('0123456789', true); const a2 = mk('abcdefabcd', false);
+  const tgt = fs.mkdtempSync(path.join(tmp, 'tl-')); fs.writeFileSync(path.join(tgt, L.SYNC_MARKER), '{}'); fs.symlinkSync(tgt, home + '.tmp-ffffffffff');
+  assert.strictEqual(L.cleanStaleTmp(home, null), 0); assert.ok(fs.existsSync(a1)); // 방금 만든 것은 다른 동기화일 수 있어 둔다
+  assert.strictEqual(L.cleanStaleTmp(home, null, 0), 1);
+  assert.ok(!fs.existsSync(a1) && fs.existsSync(a2) && fs.existsSync(tgt) && fs.lstatSync(home + '.tmp-ffffffffff').isSymbolicLink());
+  assert.ok(d);
+});
+t('managedAction: 버전 비교(숫자)·다운그레이드 금지·진행 중 재시도·언어', () => {
+  const m = (v, lang) => ({ version: v, lang: lang || 'ko' });
+  assert.strictEqual(L.managedAction(null, '1.0.0', 'ko', false), 'none');
+  assert.strictEqual(L.managedAction(m('1.0.0'), null, 'ko', false), 'none');
+  assert.strictEqual(L.managedAction(m('1.0.0'), '1.1.0', 'ko', false), 'sync');
+  assert.strictEqual(L.managedAction(m('9.9.9'), '1.0.0', 'ko', false), 'newer');
+  assert.strictEqual(L.managedAction(m('1.10.0'), '1.9.0', 'ko', false), 'newer'); // 문자열 비교가 아니라 숫자 비교
+  assert.strictEqual(L.managedAction(m('1.9.0'), '1.10.0', 'ko', false), 'sync');
+  assert.strictEqual(L.managedAction(m('2.0.0'), '2.0.0', 'ko', true), 'sync'); // 진행 중 표시가 남음
+  assert.strictEqual(L.managedAction(m('3.0.0'), '2.0.0', 'ko', true), 'newer');
+  assert.strictEqual(L.managedAction(m('2.0.0', 'ko'), '2.0.0', 'en', false), 'lang');
+  assert.strictEqual(L.managedAction(m('2.0.0', 'ko'), '2.0.0', 'ko', false), 'none');
+  assert.strictEqual(L.managedAction(m('2.0.0'), '2.0.0', null, false), 'none');
+  assert.deepStrictEqual([L.cmpVersion('1.2', '1.2.0'), L.cmpVersion('2', '10'), L.cmpVersion('1.0.1', '1.0.0')], [0, -1, 1]);
+  const { d } = mkPayload(); assert.strictEqual(L.readPayloadVersion(d), '1.2.3'); fs.writeFileSync(path.join(d, 'VERSION'), 'bad version!'); assert.strictEqual(L.readPayloadVersion(d), null);
+});
+t('S1 매니페스트: 대소문자·유니코드 별칭·링크 중간 폴더·보호 대상으로는 지우지 않는다', () => {
+  for (const bad of ['Data/profile.json', 'DATA/x', '.Claude/settings.local.json', '.claude/Settings.Local.json', '.GIT/config', 'ſcripts/a', 'scripts/\u212Aa', 'a/b c', '.maru-managed', '.MARU-syncing']) assert.strictEqual(L.safeManifestPath(bad), null, bad);
+  assert.strictEqual(L.safeManifestPath('.claude/skills/recall/SKILL.md'), '.claude/skills/recall/SKILL.md');
+  const { d } = mkPayload(); const home = newHome(); assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true);
+  const outside = fs.mkdtempSync(path.join(tmp, 'ov-')); fs.writeFileSync(path.join(outside, 'victim.txt'), 'v');
+  fs.symlinkSync(outside, path.join(home, 'evil')); // 홈 안의 링크 폴더
+  fs.mkdirSync(path.join(home, 'data'), { recursive: true }); fs.writeFileSync(path.join(home, 'data', 'profile.json'), 'p');
+  fs.writeFileSync(path.join(home, '.claude', 'settings.local.json'), 'L');
+  fs.mkdirSync(path.join(home, 'ghost')); fs.writeFileSync(path.join(home, 'ghost', 'hard.txt'), 'h'); fs.linkSync(path.join(home, 'ghost', 'hard.txt'), path.join(outside, 'hard2.txt')); // 링크 수 2
+  fs.writeFileSync(path.join(home, 'scripts', 'plain-old.sh'), 'x');
+  const mk = JSON.parse(fs.readFileSync(path.join(home, L.MANAGED_MARKER), 'utf8'));
+  mk.manifest.push('Data/profile.json', '.Claude/settings.local.json', 'evil/victim.txt', 'ghost/hard.txt', 'scripts/plain-old.sh', 'data/profile.json', '.claude/settings.local.json');
+  fs.writeFileSync(path.join(home, L.MANAGED_MARKER), JSON.stringify(mk));
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true);
+  assert.strictEqual(fs.readFileSync(path.join(home, 'data', 'profile.json'), 'utf8'), 'p');
+  assert.strictEqual(fs.readFileSync(path.join(home, '.claude', 'settings.local.json'), 'utf8'), 'L');
+  assert.strictEqual(fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8'), 'v');
+  assert.strictEqual(fs.readFileSync(path.join(home, 'ghost', 'hard.txt'), 'utf8'), 'h'); // 하드링크는 지우지 않는다
+  assert.ok(!fs.existsSync(path.join(home, 'scripts', 'plain-old.sh'))); // 정상적인 옛 파일은 지운다
+  // 보호 대상과 같은 파일(ino)로 해석되는 경로는 이름이 달라도 지우지 않는다(대소문자를 가리지 않는 파일 시스템 별칭을 모사)
+  const prot = path.join(home, 'alias'); fs.symlinkSync(path.join(home, 'data'), prot);
+  const mk2 = JSON.parse(fs.readFileSync(path.join(home, L.MANAGED_MARKER), 'utf8')); mk2.manifest.push('alias/profile.json'); fs.writeFileSync(path.join(home, L.MANAGED_MARKER), JSON.stringify(mk2));
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true); assert.strictEqual(fs.readFileSync(path.join(home, 'data', 'profile.json'), 'utf8'), 'p');
+});
+t('L1 홈 0700 고정·하위 폴더의 그룹/타인 쓰기 제거', () => {
+  const { d } = mkPayload(); const home = newHome(); L.syncPayload({ payloadDir: d, home, lang: 'ko' });
+  fs.chmodSync(home, 0o755); fs.chmodSync(path.join(home, 'scripts'), 0o777);
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home, lang: 'ko' }).ok, true);
+  assert.strictEqual(fs.statSync(home).mode & 0o777, 0o700); assert.strictEqual(fs.statSync(path.join(home, 'scripts')).mode & 0o022, 0);
+  const e = newHome(); fs.mkdirSync(e, { mode: 0o700 }); fs.chmodSync(e, 0o770);
+  assert.strictEqual(L.syncPayload({ payloadDir: d, home: e, lang: 'ko' }).reason, 'home-mode'); // 빈 폴더라도 권한이 넓으면 거부
+});
+t('homeStatus·resolveRoot isManaged: 마커 없는 ~/.maru·링크 ~/.maru 는 채택하지 않는다', () => {
+  const { d } = mkPayload(); const home = newHome();
+  assert.strictEqual(L.homeStatus(home), 'absent');
+  fs.mkdirSync(home, { mode: 0o700 }); assert.strictEqual(L.homeStatus(home), 'empty'); fs.writeFileSync(path.join(home, 'x'), '1'); assert.strictEqual(L.homeStatus(home), 'foreign');
+  const real = newHome(); L.syncPayload({ payloadDir: d, home: real, lang: 'ko' }); assert.strictEqual(L.homeStatus(real), 'managed');
+  const lnk = newHome(); fs.mkdirSync(path.dirname(lnk), { recursive: true }); fs.symlinkSync(real, lnk); assert.strictEqual(L.homeStatus(lnk), 'symlink');
+  const isRepo = (dd) => fs.existsSync(path.join(dd, 'scripts', 'maru-status.sh'));
+  const mk = (dir) => L.resolveRoot({ env: {}, home: '/nonexistent-home', isPackaged: true, appDir: '/x', managedHome: dir, io: { readConfig: () => null, isRepo, isManaged: (x) => L.homeStatus(x) === 'managed' } });
+  assert.deepStrictEqual(mk(real), { root: real, source: 'managed' });
+  assert.strictEqual(mk(lnk), null); // 링크라서 채택하지 않는다
+  fs.mkdirSync(path.join(home, 'scripts')); fs.writeFileSync(path.join(home, 'scripts', 'maru-status.sh'), ''); fs.writeFileSync(path.join(home, 'CLAUDE.md'), '');
+  assert.strictEqual(mk(home), null); // repo 처럼 보여도 마커가 없으면 채택하지 않는다
+});
+t('S2 첫 만남 붙여넣기: 고정 문장일 때만, 변형은 거부(일반 퀘스트 필터와 별개)', () => {
+  assert.strictEqual(L.firstMeetingPaste(L.FIRST_MEETING_TEXT), '\x1b[200~/first-meeting\x1b[201~');
+  assert.ok(!/[\r\n]/.test(L.firstMeetingPaste('/first-meeting'))); // Enter 없음
+  for (const bad of ['/first-meeting x', '/other', '/first-meeting\n', ' /first-meeting', '/First-Meeting', '', null, undefined, '/first-meeting\x1b[201~rm -rf /']) assert.strictEqual(L.firstMeetingPaste(bad), null, String(bad));
+  assert.strictEqual(L.isSafeQuestStart('/first-meeting'), false); // 그래서 writePrompt 를 쓰면 항상 실패한다
+});
+t('M2 appendSyncLog 는 링크·큰 파일을 거부하고 한 줄 추가', () => {
+  const root = fs.mkdtempSync(path.join(tmp, 'lg-'));
+  assert.strictEqual(L.appendSyncLog(root, 'sync failed write\nINJECT'), true);
+  const txt = fs.readFileSync(path.join(root, 'data', 'logs', 'app-sync.log'), 'utf8'); assert.strictEqual(txt.trim().split('\n').length, 1); assert.ok(/sync failed write\?INJECT$/.test(txt.trim()));
+  const r2 = fs.mkdtempSync(path.join(tmp, 'lg-')); const o = fs.mkdtempSync(path.join(tmp, 'lo-')); fs.symlinkSync(o, path.join(r2, 'data'));
+  assert.strictEqual(L.appendSyncLog(r2, 'x'), false); assert.deepStrictEqual(fs.readdirSync(o), []);
+  fs.writeFileSync(path.join(root, 'data', 'logs', 'app-sync.log'), 'x'.repeat(70000)); assert.strictEqual(L.appendSyncLog(root, 'y'), false);
+});
+t('M4 setup.json 손상 시 파생·프로필 병합(기존 프로필을 잃지 않는다)', () => {
+  const prof = { name: '가', lang: 'en', calendar: true, createdAt: '2026-01-01T00:00:00.000Z' };
+  assert.deepStrictEqual(L.deriveSetupState({ marker: { version: '1' }, profile: prof }), { ...L.defaultSetupState(), homeAt: prof.createdAt });
+  assert.strictEqual(L.deriveSetupState({ marker: null, profile: prof }), null); assert.strictEqual(L.deriveSetupState({ marker: { version: '1' }, profile: null }), null);
+  assert.deepStrictEqual(L.mergeProfile(prof, '나', 'ko', '2030-01-01T00:00:00.000Z'), { name: '나', lang: 'ko', calendar: true, createdAt: prof.createdAt });
+  assert.deepStrictEqual(L.mergeProfile(null, '나', 'ko', '2030-01-01T00:00:00.000Z'), { name: '나', lang: 'ko', calendar: false, createdAt: '2030-01-01T00:00:00.000Z' });
+  assert.deepStrictEqual(L.mergeProfile({ name: '', lang: 'xx' }, '나', 'en', '2030-01-01T00:00:00.000Z').calendar, false);
+});
+t('M5 기억 폴더 읽기: 없음·정상·링크·권한 없음을 구분하고, 읽지 못하면 배너를 띄우지 않는다', () => {
+  const base = fs.mkdtempSync(path.join(tmp, 'pm-'));
+  assert.strictEqual(L.probeMemoryDir(path.join(base, 'none')), 'missing');
+  const ok = path.join(base, 'ok'); fs.mkdirSync(ok); assert.strictEqual(L.probeMemoryDir(ok), 'ok');
+  const ln = path.join(base, 'ln'); fs.symlinkSync(ok, ln); assert.strictEqual(L.probeMemoryDir(ln), 'unreadable');
+  const noperm = path.join(base, 'np'); fs.mkdirSync(noperm); fs.chmodSync(noperm, 0o000);
+  if (process.getuid() !== 0) assert.strictEqual(L.probeMemoryDir(noperm), 'unreadable'); fs.chmodSync(noperm, 0o700);
+  const f = path.join(base, 'file'); fs.writeFileSync(f, ''); assert.strictEqual(L.probeMemoryDir(f), 'unreadable');
+  assert.strictEqual(L.probeMemoryDir(''), 'unreadable'); assert.strictEqual(L.probeMemoryDir(null), 'unreadable');
+  const prof = { name: 'a', lang: 'ko', calendar: false, createdAt: '2026-01-01T00:00:00Z' }; const S0 = L.defaultSetupState(); const empty = { items: [], skipped: 0 };
+  assert.strictEqual(L.firstMeetingBanner({ memories: null, probe: 'missing', state: S0, profile: prof }), true);
+  assert.strictEqual(L.firstMeetingBanner({ memories: empty, probe: 'ok', state: S0, profile: prof }), true);
+  assert.strictEqual(L.firstMeetingBanner({ memories: empty, probe: 'unreadable', state: S0, profile: prof }), false);
+  assert.strictEqual(L.firstMeetingBanner({ memories: empty, state: S0, profile: prof }), false);
+  assert.strictEqual(L.firstMeetingBanner({ memories: null, probe: 'ok', state: S0, profile: prof }), false);
+});
+t('setup.json: 검증·손상·큰 파일·알 수 없는 필드', () => {
+  const f = path.join(fs.mkdtempSync(path.join(tmp, 'su-')), 'data', 'setup.json');
+  assert.strictEqual(L.loadSetupState(f), null);
+  const st = { ...L.defaultSetupState(), homeAt: '2026-01-01T00:00:00.000Z', connect: 'later' };
+  assert.strictEqual(L.saveSetupState(f, st), true);
+  assert.deepStrictEqual(L.loadSetupState(f), st);
+  fs.writeFileSync(f, 'not json'); assert.strictEqual(L.loadSetupState(f), null);
+  fs.writeFileSync(f, JSON.stringify({ ...st, extra: 'x', connect: 'weird' })); assert.deepStrictEqual(L.loadSetupState(f), { ...st, connect: null });
+  fs.writeFileSync(f, JSON.stringify({ ...st, metAt: 'yesterday' })); assert.strictEqual(L.loadSetupState(f), null);
+  fs.writeFileSync(f, JSON.stringify({ ...st, v: 2 })); assert.strictEqual(L.loadSetupState(f), null);
+  fs.writeFileSync(f, JSON.stringify({ ...st, pad: 'x'.repeat(5000) })); assert.strictEqual(L.loadSetupState(f), null);
+  fs.writeFileSync(f, '[]'); assert.strictEqual(L.loadSetupState(f), null);
+  assert.strictEqual(L.saveSetupState(f, { v: 1, connect: 'bogus', homeAt: 5 }), false);
+  // profile.json 모양은 그대로(옛 파일 통과)
+  assert.deepStrictEqual(L.validateProfile({ name: '가', lang: 'en', calendar: false, createdAt: '2026-01-01T00:00:00Z' }), { name: '가', lang: 'en', calendar: false, createdAt: '2026-01-01T00:00:00Z' });
+});
+t('setupStage·setupUnfinished', () => {
+  const man = { root: '/h/.maru', source: 'managed' };
+  assert.deepStrictEqual(L.setupStage({ found: null, state: null }), { needed: true, stage: 'welcome' });
+  assert.deepStrictEqual(L.setupStage({ found: { root: '/x', source: 'app' }, state: null }), { needed: false, stage: 'done' });
+  assert.deepStrictEqual(L.setupStage({ found: { root: '/h/maru', source: 'home' }, state: null }), { needed: false, stage: 'done' });
+  assert.deepStrictEqual(L.setupStage({ found: man, state: null }), { needed: true, stage: 'welcome' });
+  assert.deepStrictEqual(L.setupStage({ found: man, state: { ...L.defaultSetupState(), homeAt: '2026-01-01T00:00:00Z' } }), { needed: true, stage: 'connect' });
+  assert.deepStrictEqual(L.setupStage({ found: man, state: { ...L.defaultSetupState(), homeAt: '2026-01-01T00:00:00Z', doneAt: '2026-01-02T00:00:00Z', connect: 'later' } }), { needed: false, stage: 'done' });
+  assert.strictEqual(L.setupUnfinished({ found: man, state: { ...L.defaultSetupState(), connect: 'later' } }), true);
+  assert.strictEqual(L.setupUnfinished({ found: man, state: { ...L.defaultSetupState(), connect: 'done' } }), false);
+  assert.strictEqual(L.setupUnfinished({ found: { root: '/x', source: 'app' }, state: null }), false);
+});
+t('prerequisites 모델링·PATH 탐색', () => {
+  const ok = { macos: true, claude: 'ok', auth: { loggedIn: true, state: 'ok' }, git: 'ok', python3: 'ok', jq: 'ok', perl: 'ok' };
+  const m = L.modelPrereqs({ ...ok, macosVersion: '15.2' }); assert.strictEqual(m[0].detail, '15.2'); assert.strictEqual(L.modelPrereqs({ ...ok, macosVersion: '<b>' })[0].detail, null); assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, macosVersion: '12.0' })), true); assert.deepStrictEqual(m.map((x) => x.id), L.PREREQ_IDS); assert.ok(m.every((x) => x.status === 'ok' && x.how === null)); assert.strictEqual(L.prereqsReady(m), true);
+  const m2 = L.modelPrereqs({ ...ok, jq: 'missing', git: 'broken', auth: { loggedIn: false, state: 'out' } });
+  const by = (id) => m2.find((x) => x.id === id);
+  assert.strictEqual(by('jq').status, 'missing'); assert.strictEqual(by('jq').how, 'prereq.how.jq'); assert.strictEqual(by('git').status, 'need'); assert.strictEqual(by('git').how, 'prereq.how.clt');
+  assert.strictEqual(by('auth').status, 'need'); assert.strictEqual(L.prereqsReady(m2), false);
+  assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, auth: { loggedIn: false, state: 'out' } })), true); // 로그인은 필수가 아니다
+  assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, claude: 'missing' })), false);
+  assert.strictEqual(L.modelPrereqs({ ...ok, auth: null }).find((x) => x.id === 'auth').status, 'unknown');
+  assert.strictEqual(L.modelPrereqs({ ...ok, claude: 'missing' }).find((x) => x.id === 'auth').status, 'need');
+  assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, macos: false })), false);
+  assert.strictEqual(L.prereqsReady(L.modelPrereqs(null)), false); assert.strictEqual(L.prereqsReady(null), false);
+  const ex = new Set(['/b/jq', '/a/jq']);
+  assert.strictEqual(L.findInPath('jq', 'rel:/a:/b', (p) => ex.has(p)), '/a/jq');
+  assert.strictEqual(L.findInPath('jq', '/c', (p) => ex.has(p)), null); assert.strictEqual(L.findInPath('../jq', '/a', () => true), null);
+});
+t('첫 만남 배너 판단', () => {
+  const prof = { name: 'a', lang: 'ko', calendar: false, createdAt: '2026-01-01T00:00:00Z' }; const empty = { items: [], skipped: 0 };
+  const S = L.defaultSetupState(); const B = (o) => L.firstMeetingBanner({ memories: empty, probe: 'ok', state: S, profile: prof, ...o });
+  assert.strictEqual(B({}), true); assert.strictEqual(B({ state: null }), true);
+  assert.strictEqual(B({ memories: { items: [{}], skipped: 0 } }), false); assert.strictEqual(B({ memories: { items: [], skipped: 2 } }), false);
+  assert.strictEqual(B({ state: { ...S, metAt: '2026-01-01T00:00:00Z' } }), false); assert.strictEqual(B({ state: { ...S, dismissedAt: '2026-01-01T00:00:00Z' } }), false);
+  assert.strictEqual(B({ profile: null }), false); assert.strictEqual(B({ memories: null }), false);
+  assert.strictEqual(L.FIRST_MEETING_TEXT, '/first-meeting');
+});
+t('parseInstallSections: 머리글 언어와 무관(마지막 끝 표시는 어떤 말이든 뺀다)', () => {
+  assert.deepStrictEqual(L.parseInstallSections('\n== Checking requirements\n  ok x\n\n== Register SessionEnd hook\n== Done\n  note\n'), ['Checking requirements', 'Register SessionEnd hook']);
+  assert.deepStrictEqual(L.parseInstallSections('\n== 요구사항 확인\n== 끝\n'), ['요구사항 확인']);
+  assert.deepStrictEqual(L.parseInstallSections('no headers'), []);
+});
+t('앱 연결(소스 구조): fromMain·고정 문장·dev 전용 환경변수·install 환경', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  for (const ch of ['setup:get', 'setup:prereqs', 'setup:create-home', 'setup:connect-later', 'setup:finish', 'meet:get', 'meet:dismiss']) assert.ok(new RegExp("ipcMain\\.handle\\('" + ch + "', (async )?\\(e[,)][^\\n]*\\n?[\\s\\S]{0,80}fromMain\\(e\\)").test(main), ch);
+  const ms = main.split("ipcMain.handle('meet:start'")[1].split('\n});')[0];
+  assert.ok(/wsFrom\(e, id\)/.test(ms) && /isMaruWs\(w\)/.test(ms) && /w\.bracketed/.test(ms) && /confirmBox/.test(ms) && /firstMeetingPaste\(text\)/.test(ms) && !/writePrompt/.test(ms) && !/\\r|\\n/.test(ms));
+  assert.ok(/!app\.isPackaged && typeof process\.env\[k\]/.test(main) && /MARU_APP_MANAGED_HOME/.test(main) && /MARU_APP_PAYLOAD/.test(main));
+  assert.ok(/MARU_LANG: curLang\(\)/.test(main) && /installEnv\(\)/.test(main));
+  assert.ok(/app\.relaunch\(\)/.test(main) && /'setup'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main));
+  assert.ok(!/innerHTML/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8')));
+  const pk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).build.extraResources.map((e) => e.to);
+  for (const x of ['payload/scripts', 'payload/prompts', 'payload/squads', 'payload/squads-en', 'payload/launchd', 'payload/bin', 'payload/install.sh', 'payload/uninstall.sh', 'payload/CLAUDE.md', 'payload/CLAUDE.en.md', 'payload/README.md', 'payload/.claude/agents', 'payload/.claude/skills', 'payload/.claude/settings.json']) assert.ok(pk.includes(x), x);
+  assert.ok(!pk.some((p) => /data|\.git|settings\.local|cmux|payload\/app/.test(p)));
 });
 
 (async () => {

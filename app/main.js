@@ -22,18 +22,46 @@ function isRepo(dir) {
     return d.isDirectory() && s.isFile() && c.isFile() && safeOwned(d) && safeOwned(s);
   } catch { return false; }
 }
+// 관리형 홈(~/.maru): 앱에 실려 온 payload 를 풀어 두는 곳. 개발 실행에서만 환경변수로 시험용 위치를 지정할 수 있다.
+const absEnv = (k) => (!app.isPackaged && typeof process.env[k] === 'string' && path.isAbsolute(process.env[k]) ? path.normalize(process.env[k]) : null);
+const MANAGED_HOME = absEnv('MARU_APP_MANAGED_HOME') || path.join(os.homedir(), '.maru');
+const DEV_MANAGED = !!(absEnv('MARU_APP_MANAGED_HOME') && absEnv('MARU_APP_PAYLOAD')); // 개발 실행에서 payload 를 쓰려면 둘 다 필요(실제 ~/.maru 를 건드리지 않게)
+const PAYLOAD_DIR = (DEV_MANAGED && absEnv('MARU_APP_PAYLOAD')) || path.join(process.resourcesPath || __dirname, 'payload');
 const found = L.resolveRoot({
-  env: process.env, home: os.homedir(), isPackaged: app.isPackaged, appDir: __dirname,
+  env: process.env, home: os.homedir(), isPackaged: app.isPackaged, appDir: __dirname, managedHome: MANAGED_HOME,
   io: {
     readConfig: () => { const r = readRegular(path.join(os.homedir(), '.config', 'maru', 'root'), 4096, false); return r ? r.text : null; },
     isRepo,
+    isManaged: (dir) => L.homeStatus(dir) === 'managed', // ~/.maru 는 마커가 있고 링크가 아니며 내 소유·쓰기 제한일 때만 채택
   },
 });
+// 관리형 홈: payload 버전과 다르면 조용히 다시 푼다(앱 자신의 코드). 홈이 앱보다 새것이면 건드리지 않고 알린다. 언어만 다르면 CLAUDE.md 만.
+// 개발 checkout·~/maru 는 건드리지 않는다. 개발 실행에서는 MARU_APP_MANAGED_HOME 과 MARU_APP_PAYLOAD 가 둘 다 있을 때만.
+let homeNotice = null; // 'failed' | 'newer' | null (설정 화면 행과 상단 안내에 보인다)
+if (found && found.source === 'managed' && (app.isPackaged || DEV_MANAGED)) {
+  try {
+    const mk = L.readMarker(found.root);
+    const pf = L.loadProfile(path.join(found.root, 'data', 'profile.json'));
+    const pv = L.readPayloadVersion(PAYLOAD_DIR);
+    const act = pv ? L.managedAction(mk, pv, pf && pf.lang, L.readSyncing(found.root)) : 'none';
+    let res = null;
+    if (!pv) homeNotice = 'failed';
+    else if (act === 'sync') res = L.syncPayload({ payloadDir: PAYLOAD_DIR, home: found.root, lang: pf ? pf.lang : L.defaultLang(app.getLocale()) });
+    else if (act === 'lang') res = L.syncClaudeMd({ payloadDir: PAYLOAD_DIR, home: found.root, lang: pf.lang });
+    else if (act === 'newer') homeNotice = 'newer';
+    if (res && !res.ok) homeNotice = 'failed';
+    if (homeNotice) L.appendSyncLog(found.root, 'sync ' + homeNotice + (res && res.reason ? ' ' + res.reason : (!pv ? ' payload-version' : '')));
+    if (!homeNotice && L.readSyncing(found.root)) homeNotice = 'failed';
+  } catch { homeNotice = 'failed'; }
+}
 const ROOT = found ? found.root : null; // null 이면 저장소를 못 찾은 것(패널 비움, 셸은 홈에서)
+const MANAGED = !!(found && found.source === 'managed');
+// 루트가 없는데 ~/.maru 가 마루가 만든 것이 아니거나 안전하지 않으면(덮어쓰지 않는다) 그 이유를 첫 설정 화면에 알린다
+const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', owner: 'home-owner', mode: 'home-mode' })[L.homeStatus(MANAGED_HOME)] || null : null;
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph', 'setup'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
@@ -677,7 +705,7 @@ function buildMenu() {
     { label: tr('set.title'), submenu: [{
       label: tr('menu.openSettings'), accelerator: 'CmdOrCtrl+,',
       click: () => { sendToRenderer('ui:open-settings'); },
-    }] },
+    }, ...(ROOT ? [{ label: tr('menu.firstMeeting'), click: () => { sendToRenderer('ui:meet'); } }] : [])] },
     { role: 'window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
   ]));
 }
@@ -735,6 +763,11 @@ async function checkAuth() {
   return a.expiresAt ? row('auth', 'ok', 'auth.ok', { plan: a.plan, date: a.expiresAt }) : row('auth', 'ok', 'auth.okNoDate', { plan: a.plan });
 }
 
+function checkHome() {
+  if (homeNotice === 'failed') return row('home', 'need', 'home.failed');
+  if (homeNotice === 'newer') return row('home', 'need', 'home.newer');
+  return row('home', 'ok', 'home.ok');
+}
 async function checkHooks() {
   const installable = !!ROOT && isFileSafe(path.join(ROOT, 'install.sh'));
   if (!ROOT) return row('hooks', 'unknown', 'hooks.noInstall');
@@ -818,7 +851,7 @@ async function settingsRows(recheckCalendar) {
   if (recheckCalendar && profile && profile.calendar) await readCalendar();
   const guard = (id, fn, ms) => withTimeout(Promise.resolve().then(fn).catch(() => row(id, 'unknown', 'set.fail')), ms, row(id, 'unknown', 'set.fail'));
   return Promise.all([
-    guard('auth', checkAuth, 20000), guard('hooks', checkHooks, 5000), guard('dream', checkDream, 6000),
+    ...(MANAGED ? [guard('home', checkHome, 1000)] : []), guard('auth', checkAuth, 20000), guard('hooks', checkHooks, 5000), guard('dream', checkDream, 6000),
     guard('acc', checkAccessibility, 3000), guard('screen', checkScreen, 3000), guard('auto', checkAutomation, 1000),
     guard('cal', checkCalendar, 1000), guard('tg', checkTelegram, 8000), guard('mem', checkMemory, 3000),
   ]);
@@ -838,13 +871,14 @@ let installPreviewHash = null; // 미리보기 때 install.sh 의 sha256
 let installPreviewCount = 0;
 const hashInstall = () => { try { return crypto.createHash('sha256').update(fs.readFileSync(installSh())).digest('hex'); } catch { return null; } };
 let installBusy = false;
+const installEnv = () => ({ ...childEnv(), MARU_LANG: curLang(), MARU_HOME: ROOT }); // install.sh 에 언어와 홈을 알린다
 const installSh = () => (ROOT ? path.join(ROOT, 'install.sh') : null);
 async function previewInstall() {
   if (!ROOT || !isFileSafe(installSh())) return { ok: false, reason: 'noInstall' };
   if (installBusy) return { ok: false, reason: 'busy' };
   installBusy = true;
   try {
-    const r = await exec('/bin/bash', [installSh(), '--dry-run'], { timeout: 60000, maxBuffer: 1 << 20 });
+    const r = await exec('/bin/bash', [installSh(), '--dry-run'], { timeout: 60000, maxBuffer: 1 << 20, env: installEnv() });
     const output = L.cleanBlock(r.stdout + (r.stderr ? '\n' + r.stderr : ''));
     if (r.err) { installPreviewAt = 0; installPreviewHash = null; return { ok: false, reason: 'failed', output }; }
     installPreviewAt = Date.now(); installPreviewHash = hashInstall(); installPreviewCount = L.parseInstallSections(r.stdout).length;
@@ -864,7 +898,8 @@ async function runInstall() {
     const ans = await dialog.showMessageBox(win, { type: 'question', buttons: [tr('hooks.apply'), tr('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message: tr('hooks.confirmTitle', { n: count }), detail: tr('hooks.mainConfirm') });
     if (ans.response !== 0) return { ok: false, reason: 'cancelled' };
     if (hashInstall() !== want) return { ok: false, reason: 'changed' };
-    const r = await exec('/bin/bash', [installSh()], { timeout: 120000, maxBuffer: 1 << 20 });
+    const r = await exec('/bin/bash', [installSh()], { timeout: 120000, maxBuffer: 1 << 20, env: installEnv() });
+    if (!r.err && setupState) saveSetup({ connect: 'done' }); // 연결이 끝났음을 기록한다(첫 설정 상태)
     return { ok: !r.err, output: L.cleanBlock(r.stdout + (r.stderr ? '\n' + r.stderr : '')) };
   } finally { installBusy = false; }
 }
@@ -1340,8 +1375,123 @@ ipcMain.handle('projects:continue', (e, id, key, shown) => {
   if (typeof shown !== 'string' || shown !== s.title) return { ok: false, reason: 'stale' };
   return writePrompt(w, tr('project.continue', { title: s.title }));
 });
+// ---- 첫 설정·첫 만남 (상태는 <홈>/data/setup.json, 프로필과 따로) ----
+const SETUP_FAKE = TEST_UI === 'setup'; // 시험 전용: 가짜 상태로 화면만 그린다(아무것도 만들지 않음)
+let setupState = null;
+const setupFile = () => path.join(ROOT, 'data', 'setup.json');
+function loadSetup() {
+  if (!ROOT) { setupState = null; return; }
+  // setup.json 이 없거나 망가졌어도 마커와 유효한 프로필이 있으면 홈은 이미 만든 것으로 본다(첫 설정을 처음부터 다시 하지 않는다)
+  setupState = L.loadSetupState(setupFile()) || (MANAGED ? L.deriveSetupState({ marker: L.readMarker(ROOT), profile }) : null) || L.defaultSetupState();
+}
+// 관리형 홈에만 파일로 저장한다. 개발 checkout·~/maru 에는 새 파일을 만들지 않고 메모리에만 둔다.
+function saveSetup(patch) {
+  if (!ROOT || !setupState) return false;
+  const next = { ...setupState, ...patch };
+  const v = L.validateSetupState(next);
+  if (!v) return false;
+  if (MANAGED && !L.saveSetupState(setupFile(), v)) return false;
+  setupState = v;
+  return true;
+}
+const nowIso = () => new Date().toISOString();
+const isExecFile = (p) => { try { const st = fs.statSync(p); fs.accessSync(p, fs.constants.X_OK); return st.isFile(); } catch { return false; } };
+// 도구를 실제로 실행해 본다(install.sh 와 같은 기준). CLT 가 없을 때 /usr/bin 의 git·python3 은 설치 창을 띄우므로 실행하지 않고 '없음' 으로 본다.
+async function runTool(name, args, cltOk) {
+  const p = L.findInPath(name, childEnv().PATH, isExecFile);
+  if (!p) return 'missing';
+  if (p.startsWith('/usr/bin/') && (name === 'git' || name === 'python3') && !cltOk) return 'missing';
+  const r = await exec(p, args, { timeout: 8000, cwd: os.homedir() });
+  return r.code === 0 ? 'ok' : 'broken';
+}
+async function checkPrereqs() {
+  const clt = (await exec('/usr/bin/xcode-select', ['-p'], { timeout: 4000, cwd: os.homedir() })).code === 0;
+  const bin = await resolveClaude();
+  const claudeP = bin ? exec(bin, ['--version'], { timeout: 15000, cwd: os.homedir() }).then((r) => (r.code === 0 ? 'ok' : 'broken')) : Promise.resolve('missing');
+  const [claude, git, python3, jq, perl] = await Promise.all([claudeP, runTool('git', ['--version'], clt), runTool('python3', ['--version'], clt), runTool('jq', ['--version'], clt), runTool('perl', ['-e', 'exit 0'], clt)]);
+  let auth = null;
+  if (claude === 'ok') { const r = await exec(bin, ['auth', 'status'], { timeout: 10000, cwd: os.homedir() }); auth = L.parseAuthStatus(r.stdout); }
+  let macosVersion = null; try { macosVersion = process.getSystemVersion(); } catch { /* 모름 */ }
+  const list = L.modelPrereqs({ macos: process.platform === 'darwin', macosVersion, claude, auth, git, python3, jq, perl });
+  return { list, ready: L.prereqsReady(list) };
+}
+let prereqRun = null; // 점검이 겹쳐 돌지 않게 같은 약속을 나눠 쓴다
+const FAKE_PREREQS = L.modelPrereqs({ macos: true, macosVersion: '15.2', claude: 'ok', auth: { loggedIn: false }, git: 'ok', python3: 'ok', jq: 'missing', perl: 'ok' });
+const SETUP_STEPS = ['lang', 'prereq', 'home', 'connect', 'done'];
+ipcMain.handle('setup:get', (e) => {
+  if (!fromMain(e)) return null;
+  if (SETUP_FAKE) { const st = SETUP_STEPS.includes(process.env.MARU_APP_SETUP_STEP) ? process.env.MARU_APP_SETUP_STEP : 'prereq'; return { needed: true, stage: st === 'connect' || st === 'done' ? 'connect' : 'welcome', step: st, unfinished: false, fake: true }; }
+  const sg = L.setupStage({ found, state: setupState });
+  return { needed: sg.needed, stage: sg.stage, unfinished: L.setupUnfinished({ found, state: setupState }) && !sg.needed, blocked: HOME_BLOCK, fake: false };
+});
+ipcMain.handle('setup:prereqs', async (e) => {
+  if (!fromMain(e)) return null;
+  if (SETUP_FAKE) return { list: FAKE_PREREQS, ready: false };
+  try { if (!prereqRun) prereqRun = checkPrereqs().finally(() => { prereqRun = null; }); return await prereqRun; } catch { return null; }
+});
+let homeBusy = false;
+// 홈 만들기: 입력(이름·언어)은 main 이 다시 검증한다. 네이티브 확인 뒤 payload 를 풀고 프로필·상태를 저장한 다음 앱을 다시 띄운다(ROOT 가 모듈 상수라서 가장 단순하고 안정적인 방법).
+ipcMain.handle('setup:create-home', async (e, input) => {
+  if (!fromMain(e) || SETUP_FAKE || homeBusy) return { ok: false, reason: 'invalid' };
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((k) => k !== 'name' && k !== 'lang')) return { ok: false, reason: 'invalid' };
+  const name = typeof input.name === 'string' ? L.cleanName(input.name) : '';
+  if (!name) return { ok: false, reason: 'name' };
+  if (!I18N.isLang(input.lang)) return { ok: false, reason: 'invalid' };
+  if (ROOT && !(MANAGED && setupState && !setupState.homeAt)) return { ok: false, reason: 'exists' }; // 이미 쓸 수 있는 홈이 있으면 만들지 않는다
+  const lg = input.lang; const t = (k, p) => I18N.t(lg, k, p);
+  homeBusy = true; let keepBusy = false;
+  try {
+    const home = MANAGED_HOME;
+    if (HOME_BLOCK) return { ok: false, reason: HOME_BLOCK }; // 마루가 만들지 않은 ~/.maru 는 덮어쓰지 않는다
+    if (!(await resolveClaude())) return { ok: false, reason: 'prereq' }; // 렌더러의 점검 결과를 믿지 않고 main 이 한 번 더 확인
+    const ans = await box({ type: 'question', buttons: [t('su.home.create'), t('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message: t('su.home.confirmTitle'), detail: t('su.home.confirmDetail', { path: L.shortenPath(home, os.homedir()) }) });
+    if (ans.response !== 0) return { ok: false, reason: 'cancelled' };
+    const r = L.syncPayload({ payloadDir: PAYLOAD_DIR, home, lang: lg });
+    if (!r.ok) return { ok: false, reason: r.reason };
+    const at = nowIso();
+    const pfile = path.join(home, 'data', 'profile.json'); const sfile = path.join(home, 'data', 'setup.json');
+    const merged = L.mergeProfile(L.loadProfile(pfile), name, lg, at); // 기존 유효한 프로필(캘린더 설정·만든 날짜)은 지킨다
+    if (!L.saveProfile(pfile, merged)) return { ok: false, reason: 'save' };
+    const prev = L.loadSetupState(sfile) || L.deriveSetupState({ marker: null, profile: null }) || L.defaultSetupState();
+    if (!L.saveSetupState(sfile, { ...prev, homeAt: prev.homeAt || at })) return { ok: false, reason: 'save' };
+    keepBusy = true; // 앱이 다시 시작될 때까지 다른 요청을 받지 않는다
+    setTimeout(() => { quitting = true; cleanup(); app.relaunch(); app.exit(0); }, 400);
+    return { ok: true, relaunch: true };
+  } finally { if (!keepBusy) homeBusy = false; }
+});
+ipcMain.handle('setup:connect-later', (e) => (fromMain(e) && !SETUP_FAKE && ROOT && MANAGED && setupState && setupState.connect !== 'done' ? { ok: saveSetup({ connect: 'later' }) } : { ok: false }));
+ipcMain.handle('setup:finish', (e) => (fromMain(e) && !SETUP_FAKE && ROOT && MANAGED && setupState ? { ok: setupState.doneAt ? true : saveSetup({ doneAt: nowIso() }) } : { ok: false }));
+// 첫 만남: 기억 파일이 0개이고 metAt·dismissedAt 이 없을 때만 배너
+ipcMain.handle('meet:get', async (e) => {
+  if (!fromMain(e)) return { show: false };
+  if (SETUP_FAKE) return { show: false };
+  if (!ROOT || !profile || !setupState) return { show: false };
+  const probe = L.probeMemoryDir(memDir()); // 읽지 못한 것(링크·권한)은 "비어 있음"으로 보지 않는다
+  const memories = probe === 'ok' ? await memListCache.get() : null;
+  return { show: L.firstMeetingBanner({ memories, probe, state: setupState, profile }) };
+});
+ipcMain.handle('meet:dismiss', (e) => (fromMain(e) && setupState ? { ok: setupState.dismissedAt ? true : saveSetup({ dismissedAt: nowIso() }) } : { ok: false }));
+// 시작/다시 하기: 스킬 "설치 요청" 과 같은 보호(활성 마루 작업 공간만, 붙여넣기 준비, 네이티브 확인, Enter 는 보내지 않음). 고정 문장 /first-meeting 만 쓴다.
+ipcMain.handle('meet:start', async (e, id) => {
+  const w = wsFrom(e, id);
+  if (!w || !ROOT) return { ok: false, reason: 'invalid' };
+  if (w.id !== activeId) return { ok: false, reason: 'inactive' };
+  if (!isMaruWs(w)) return { ok: false, reason: 'not-maru' };
+  if (!w.term) return { ok: false, reason: 'no-term' };
+  if (!w.bracketed) return { ok: false, reason: 'not-ready' };
+  const text = L.FIRST_MEETING_TEXT;
+  const paste = L.firstMeetingPaste(text); // 고정 문장일 때만(일반 퀘스트 필터는 '/' 로 시작하는 문장을 거부한다)
+  if (!paste) return { ok: false, reason: 'invalid' };
+  if (!(await confirmBox(tr('meet.confirm.title'), tr('meet.confirm.detail', { text }), tr('meet.start')))) return { ok: false, reason: 'cancel' };
+  if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' };
+  if (!w.term || !w.bracketed) return { ok: false, reason: 'not-ready' };
+  w.term.write(paste); // Enter 는 보내지 않는다
+  const r = { ok: true };
+  if (r.ok && setupState && !setupState.metAt) saveSetup({ metAt: nowIso() });
+  return r;
+});
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
-  profile, defaultLang: L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,
+  homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,
 } : null));
 // patch: { name?: string, lang?: 'ko'|'en' } 만 허용. 이름은 main 이 다시 정리·검증한다. 첫 저장에는 name 이 필요하다.
 ipcMain.handle('profile:set', (e, patch) => {
@@ -1355,8 +1505,11 @@ ipcMain.handle('profile:set', (e, patch) => {
   if (!ROOT) return { ok: false, reason: 'save' };
   const next = { name, lang, calendar: profile ? profile.calendar : false, createdAt: profile ? profile.createdAt : new Date().toISOString() };
   if (!L.saveProfile(profilePath(), next)) return { ok: false, reason: 'save' };
+  const langChanged = !!profile && profile.lang !== lang;
   profile = next; buildMenu(); refreshTray(true);
-  return { ok: true, profile };
+  let claudeMd = null; // 관리형 홈에서 언어가 바뀌면 CLAUDE.md 만 다시 쓴다(새 세션부터 적용)
+  if (langChanged && MANAGED) claudeMd = L.syncClaudeMd({ payloadDir: PAYLOAD_DIR, home: ROOT, lang }).ok ? 'synced' : 'failed';
+  return { ok: true, profile, claudeMd };
 });
 ipcMain.handle('calendar:set', async (e, on) => {
   if (!fromMain(e) || typeof on !== 'boolean' || !profile || !ROOT) return { ok: false };
@@ -1407,9 +1560,11 @@ ipcMain.on('app:rendered', (e) => {
 });
 
 // ---- 창 ----
+const DEV_SIZE = !app.isPackaged && /^(\d{3,4})x(\d{3,4})$/.exec(process.env.MARU_APP_WINSIZE || ''); // 시험 전용: 화면 크기(예: 900x560)
+const DEV_W = DEV_SIZE ? Number(DEV_SIZE[1]) : 0; const DEV_H = DEV_SIZE ? Number(DEV_SIZE[2]) : 0;
 function createWindow() {
   win = new BrowserWindow({
-    width: 1440, height: 900, minWidth: 900, minHeight: 560,
+    width: DEV_W || 1440, height: DEV_H || 900, minWidth: 900, minHeight: 560,
     backgroundColor: '#0B0907', title: tr('app.title'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1447,6 +1602,7 @@ function createWindow() {
 app.whenReady().then(() => {
   if (TEST_FX && !(found && found.source === 'env')) { console.error('MARU_APP_FX 에는 시험용 저장소(MARU_HOME)가 필요합니다'); app.exit(1); return; }
   profile = ROOT ? L.loadProfile(profilePath()) : null;
+  loadSetup();
   buildMenu();
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
   session.defaultSession.setPermissionCheckHandler(() => false);

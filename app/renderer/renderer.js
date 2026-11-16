@@ -22,7 +22,8 @@
   const modals = []; // [{ el, prev, closable(), close() }]
   const modalOpen = () => modals.length > 0;
   function syncModalState() {
-    $('app').inert = modals.length > 0;
+    $('app').inert = modals.length > 0 || su.open;
+    $('setup').inert = modals.length > 0;
     for (const e of terms.values()) e.term.options.disableStdin = modals.length > 0;
     modals.forEach((m, i) => { m.el.inert = i !== modals.length - 1; });
   }
@@ -370,7 +371,7 @@
   }
   function renderStatic(p) {
     lastPanels = p;
-    $('root-missing').hidden = !p.rootMissing;
+    $('root-missing').hidden = !p.rootMissing || su.open;
     $('lv').textContent = 'LV ' + p.level.level;
     $('growth-left').textContent = T('growth.left', { n: p.level.memories });
     $('growth-right').textContent = T('growth.right', { n: p.level.toNext });
@@ -1010,6 +1011,8 @@
     if (detailOpen && detailMode === 'inbox' && inboxDet) renderInboxDetail(false);
     if (memView) memView.relabel();
     if (setRows) renderSettings();
+    if (su.open) renderSetup(false);
+    if (homeNotice) $('home-warn').textContent = T('home.warn.' + homeNotice);
     if (!$('pop-update').hidden) renderUpdate();
     renderLangSeg();
     if (!$('dlg-name').hidden) fillNameDialog();
@@ -1019,8 +1022,18 @@
     lang = l;
     relabel();
     if (profile) {
-      try { const r = await window.maru.setProfile({ lang: l }); if (r && r.ok) profile = r.profile; } catch (e) { /* UI 언어는 이미 바뀜 */ }
+      try {
+        const r = await window.maru.setProfile({ lang: l });
+        if (r && r.ok) { profile = r.profile; if (r.claudeMd) flashNote(T(r.claudeMd === 'synced' ? 'lang.claudeMdNote' : 'lang.claudeMdFail')); } // 관리형 홈이면 CLAUDE.md 를 다시 썼다(새 세션부터)
+      } catch (e) { /* UI 언어는 이미 바뀜 */ }
     }
+  }
+
+  // 한 줄 알림(8초 뒤 사라짐): textContent 만 쓴다
+  let noteTimer2 = null;
+  function flashNote(text) {
+    const n = $('lang-note'); n.textContent = text; n.hidden = !text;
+    clearTimeout(noteTimer2); if (text) noteTimer2 = setTimeout(() => { n.textContent = ''; n.hidden = true; }, 8000);
   }
 
   // ---- 사용자 칩 ----
@@ -1057,6 +1070,8 @@
     m.append(g);
     m.append(el('div', 'sep')); m.lastChild.setAttribute('role', 'separator');
     m.append(item(T('menu.rename'), 'menuitem', () => openNameDialog('rename')));
+    if (profile) m.append(item(T('menu.firstMeeting'), 'menuitem', startMeet));
+    if (suUnfinished) m.append(item(T('menu.finishSetup'), 'menuitem', () => suOpen('connect', false)));
     m.append(el('div', 'sep')); m.lastChild.setAttribute('role', 'separator');
     const v = el('div', 'mi ver', T('menu.version', { v: version || '-' })); v.setAttribute('role', 'menuitem'); v.setAttribute('aria-disabled', 'true'); v.tabIndex = -1;
     m.append(v);
@@ -1174,9 +1189,9 @@
   const PANES = { openAccessibility: 'accessibility', openScreen: 'screen', openAutomation: 'automation', openCalendars: 'calendars' };
   let setRows = null; let setLoading = false; const rowNotes = {};
   function openSettings() {
-    if (modalOpen()) return;
+    if (modalOpen() || su.open) return; // 첫 설정 덮개 위에는 설정 창을 열지 않는다
     openModal($('dlg-settings'), $('set-close'), { close: () => { closeModal($('dlg-settings')); setRows = null; } });
-    setRows = ROW_IDS.map((id) => ({ id, status: null }));
+    setRows = (homeManaged ? ['home', ...ROW_IDS] : ROW_IDS).map((id) => ({ id, status: null }));
     renderSettings();
     loadSettings(false);
   }
@@ -1233,24 +1248,31 @@
     } else if (r.action === 'install') installFlow();
   }
   async function installFlow() {
-    rowNotes.hooks = T('hooks.previewing'); renderSettings();
+    await installDialogs((t) => { rowNotes.hooks = t; renderSettings(); });
+    loadSettings(false);
+  }
+  // 미리보기 -> 확인 -> 실행(설정과 첫 설정이 함께 쓴다). 설치가 성공하면 true.
+  async function installDialogs(setNote) {
+    setNote(T('hooks.previewing'));
     let pv = null; try { pv = await window.maru.hooksPreview(); } catch (e) { pv = null; }
-    rowNotes.hooks = ''; renderSettings();
+    setNote('');
     if (!pv || !pv.ok) {
       await askConfirm({ title: T('hooks.previewFail'), note: pv && pv.reason === 'noInstall' ? T('hooks.noInstall') : '', out: pv && pv.output, cancelLabel: T('common.close') });
-      return;
+      return false;
     }
     const secs = pv.sections || [];
+    let okRun = false;
     await askConfirm({
       title: T('hooks.confirmTitle', { n: secs.length }), note: (secs.length ? secs.join(' · ') + '\n' : '') + T('hooks.confirmNote'), out: pv.output,
       okLabel: T('hooks.apply'), runningLabel: T('hooks.running'),
       onConfirm: async () => {
         const r = await window.maru.hooksInstall();
         if (r && ['expired', 'changed', 'cancelled'].includes(r.reason)) return { title: T('hooks.resultFail'), note: T('hooks.' + r.reason), out: '' };
+        okRun = !!(r && r.ok);
         return { title: T(r && r.ok ? 'hooks.resultOk' : 'hooks.resultFail'), note: '', out: r && r.output };
       },
     });
-    loadSettings(false);
+    return okRun;
   }
   $('set-close').addEventListener('click', () => { const m = modals.find((x) => x.el === $('dlg-settings')); if (m) m.close(); });
   $('set-recheck').addEventListener('click', () => loadSettings(true));
@@ -1408,6 +1430,140 @@
   }
   $('mem-open').addEventListener('click', () => openMemory('list'));
 
+  // ---- 첫 설정(덮개) ----
+  const SU_STEPS = ['lang', 'prereq', 'home', 'connect', 'done'];
+  const su = { blocked: null, open: false, step: 'lang', name: '', prereq: null, checking: false, busy: false, err: '', later: false, fake: false };
+  let suUnfinished = false;
+  let homeManaged = false; let homeNotice = null;
+  function suOpen(step, fake, blocked) {
+    su.open = true; su.step = step; su.err = ''; su.busy = false; su.later = false; su.fake = !!fake; su.blocked = blocked || null;
+    if (!su.name && profile) su.name = profile.name;
+    $('setup').hidden = false; $('root-missing').hidden = true; $('meet-banner').hidden = true;
+    syncModalState();
+    renderSetup(true);
+    if (step === 'prereq') suCheck();
+  }
+  function suClose() { su.open = false; $('setup').hidden = true; syncModalState(); focusTerm(); refreshMeet(); }
+  function suGo(step) { su.step = step; su.err = ''; renderSetup(true); if (step === 'prereq') suCheck(); }
+  async function suCheck() {
+    su.checking = true; su.prereq = null; su.err = ''; renderSetup(false);
+    let r = null; try { r = await window.maru.setupPrereqs(); } catch (e) { r = null; }
+    su.checking = false; su.prereq = r && Array.isArray(r.list) ? r : null;
+    if (!su.prereq) su.err = T('su.prereq.failed');
+    if (su.step === 'prereq') renderSetup(false);
+  }
+  function suSeg() {
+    const seg = el('div', 'seg'); seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', T('ob.lang'));
+    for (const l of I18N.LANGS) {
+      const b = el('button', 'seg-b' + (lang === l ? ' on' : ''), T('lang.' + l)); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(lang === l));
+      b.addEventListener('click', () => { setLang(l); });
+      seg.append(b);
+    }
+    return seg;
+  }
+  function suBtn(label, cls, fn, disabled) { const b = el('button', 'btn' + (cls ? ' ' + cls : ''), label); b.type = 'button'; b.disabled = !!disabled; b.addEventListener('click', fn); return b; }
+  function renderSetup(focusFirst) {
+    const cur = SU_STEPS.indexOf(su.step);
+    const ol = $('su-steps'); ol.replaceChildren();
+    SU_STEPS.forEach((k, i) => {
+      const st = i < cur ? 'done' : i === cur ? 'current' : 'pending';
+      const li = el('li', st); if (st === 'current') li.setAttribute('aria-current', 'step');
+      li.append(el('span', '', (i + 1) + '. ' + T('su.step.' + k)), el('span', 'st', T('su.state.' + st)));
+      ol.append(li);
+    });
+    const body = $('su-body'); body.replaceChildren();
+    const row = el('div', 'btn-row');
+    const err = () => { const e = el('div', 'su-err', su.err); e.setAttribute('role', 'alert'); return e; };
+    if (su.step === 'lang') {
+      body.append(el('h2', '', T('su.step.lang')), el('p', '', T('su.lang.hint')), suSeg());
+      const lab = el('label', 'field'); lab.append(el('span', 'lbl', T('ob.name.label')));
+      const inp = el('input'); inp.type = 'text'; inp.maxLength = 40; inp.autocomplete = 'off'; inp.spellcheck = false; inp.value = su.name; inp.id = 'su-name';
+      inp.addEventListener('input', () => { su.name = inp.value; });
+      lab.append(inp); body.append(lab, el('div', 'hint', T('ob.name.hint')), err());
+      const next = () => { const n = Lib.cleanName(su.name); if (!n) { su.err = T('su.err.name'); renderSetup(false); $('su-name').focus(); return; } su.name = n; suGo('prereq'); };
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); next(); } });
+      row.append(suBtn(T('su.next'), 'primary', next));
+    } else if (su.step === 'prereq') {
+      body.append(el('h2', '', T('su.step.prereq')), el('p', '', T('su.prereq.intro')));
+      const list = el('div', 'su-list');
+      if (su.checking) list.append(el('p', '', T('su.prereq.checking')));
+      for (const x of (su.prereq && su.prereq.list) || []) {
+        const r = el('div', 'su-row'); const rt = el('div', 'rt');
+        rt.append(el('span', '', T('prereq.name.' + x.id) + (x.detail ? ' ' + x.detail : '') + (x.required ? '' : ' (' + T('prereq.optional') + ')')), el('span', 'pill ' + (x.status === 'ok' ? 'ok' : x.status === 'unknown' ? 'unknown' : 'need'), T('prereq.status.' + x.status)));
+        r.append(rt);
+        if (x.how) r.append(el('div', 'how', T(x.how)));
+        list.append(r);
+      }
+      body.append(list);
+      if (su.prereq && su.prereq.list.some((x) => x.id === 'auth' && x.status !== 'ok')) body.append(el('div', 'hint', T('su.prereq.authNote')));
+      if (su.prereq && !su.prereq.ready) body.append(el('div', 'hint', T('su.prereq.blocked')));
+      body.append(err());
+      row.append(suBtn(T('su.back'), 'ghost', () => suGo('lang')), suBtn(T('su.prereq.recheck'), '', suCheck, su.checking), suBtn(T('su.next'), 'primary', () => suGo('home'), su.checking || !(su.prereq && su.prereq.ready)));
+    } else if (su.step === 'home') {
+      body.append(el('h2', '', T('su.home.title')));
+      const ul = el('ul'); for (const k of ['su.home.l1', 'su.home.l2', 'su.home.l3', 'su.home.l4']) ul.append(el('li', '', T(k)));
+      body.append(ul);
+      if (su.busy) { const w = el('p', '', T('su.home.working')); w.setAttribute('role', 'status'); body.append(w); }
+      body.append(err());
+      if (su.blocked) body.insertBefore(el('div', 'su-err', T('su.err.' + su.blocked)), row);
+      row.append(suBtn(T('su.back'), 'ghost', () => suGo('prereq'), su.busy), suBtn(T('su.home.create'), 'primary', suCreateHome, su.busy || !!su.blocked));
+    } else if (su.step === 'connect') {
+      body.append(el('h2', '', T('su.connect.title')), el('p', '', T('su.connect.intro')), el('p', 'hint', T('su.connect.laterNote')), err());
+      row.append(suBtn(T('su.connect.later'), 'ghost', suLater, su.busy), suBtn(T('su.connect.preview'), 'primary', suConnect, su.busy));
+    } else {
+      body.append(el('h2', '', T('su.done.title')), el('p', '', T('su.done.textMeet')));
+      if (su.later) body.append(el('p', 'hint', T('su.done.later')));
+      row.append(suBtn(T('su.done.skip'), 'ghost', () => suFinish(false)), suBtn(T('su.done.meet'), 'primary', () => suFinish(true)));
+    }
+    body.append(row);
+    if (focusFirst) { const f = body.querySelector('input, .btn.primary'); if (f) f.focus(); }
+  }
+  async function suCreateHome() {
+    if (su.busy || su.fake) return;
+    su.busy = true; su.err = ''; renderSetup(false);
+    let r = null; try { r = await window.maru.setupCreateHome(su.name, lang); } catch (e) { r = null; }
+    if (r && r.ok) return; // 앱이 곧 다시 시작된다(홈이 생기면 첫 설정은 연결 단계부터 이어진다)
+    su.busy = false;
+    const reason = r && r.reason;
+    su.err = reason === 'cancelled' ? '' : T(['exists', 'invalid', 'save', 'not-managed', 'home-symlink', 'home-owner', 'home-mode', 'payload-missing', 'prereq'].includes(reason) ? 'su.err.' + reason : reason === 'name' ? 'su.err.name' : 'su.err.other');
+    renderSetup(false);
+  }
+  async function suConnect() {
+    if (su.busy || su.fake) return;
+    su.busy = true; renderSetup(false);
+    let ok = false; try { ok = await installDialogs(() => {}); } catch (e) { ok = false; }
+    su.busy = false;
+    if (ok) { suUnfinished = false; suGo('done'); } else { su.err = ''; renderSetup(false); }
+  }
+  async function suLater() {
+    if (su.fake) return;
+    try { await window.maru.setupConnectLater(); } catch (e) { /* 다음 실행에서 다시 보인다 */ }
+    su.later = true; suGo('done'); su.later = true; renderSetup(false);
+  }
+  async function suFinish(meet) {
+    if (su.fake) return;
+    try { await window.maru.setupFinish(); } catch (e) { /* 무시 */ }
+    suClose();
+    if (meet) startMeet();
+  }
+
+  // ---- 첫 만남 배너·시작 ----
+  async function refreshMeet() {
+    let r = null; try { r = await window.maru.meetGet(); } catch (e) { r = null; }
+    $('meet-banner').hidden = !(r && r.show) || su.open;
+  }
+  async function startMeet() {
+    if (!activeId || modalOpen()) return;
+    let r = null; try { r = await window.maru.meetStart(activeId); } catch (e) { r = null; }
+    if (r && r.ok) { flashNote(T('meet.note.ok')); refreshMeet(); return; }
+    const reason = r && r.reason;
+    if (reason === 'cancel') return;
+    flashNote(T(reason === 'not-maru' ? 'meet.note.not-maru' : reason === 'not-ready' || reason === 'no-term' ? 'meet.note.not-ready' : 'meet.note.fail'));
+  }
+  $('meet-start').addEventListener('click', startMeet);
+  $('meet-dismiss').addEventListener('click', async () => { try { await window.maru.meetDismiss(); } catch (e) { /* 무시 */ } $('meet-banner').hidden = true; });
+  window.maru.onMeet(() => { if (profile && !su.open) startMeet(); });
+
   // ---- 시작 ----
   async function boot() {
     let init = null;
@@ -1415,18 +1571,25 @@
     if (init) {
       version = init.version || '';
       profile = init.profile || null;
+      homeManaged = init.managed === true;
+      homeNotice = init.homeNotice === 'failed' || init.homeNotice === 'newer' ? init.homeNotice : null;
       lang = I18N.isLang(profile && profile.lang) ? profile.lang : (I18N.isLang(init.defaultLang) ? init.defaultLang : 'ko');
     }
     applyStatic();
+    if (homeNotice) { $('home-warn').textContent = T('home.warn.' + homeNotice); $('home-warn').hidden = false; }
     renderBusy('none');
     tickClock(); setInterval(tickClock, 15000);
-    if (!profile) openNameDialog('onboard');
+    let sg = null; try { sg = await window.maru.setupGet(); } catch (e) { sg = null; }
+    suUnfinished = !!(sg && sg.unfinished);
+    if (sg && sg.needed) suOpen(sg.fake ? sg.step : sg.stage === 'connect' ? 'connect' : 'lang', sg.fake, sg.blocked);
+    else if (!profile) openNameDialog('onboard');
     else if (init && init.uiOpen === 'menu') openMenu();
     else if (init && init.uiOpen === 'settings') openSettings();
     else if (init && init.uiOpen === 'update') openUpdate();
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
     syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
+    refreshMeet(); setInterval(refreshMeet, 30000);
     setInterval(() => { if (lastPanels) renderInbox(lastPanels.inbox); }, 30000); // 상대 시각(N분 전)을 갱신
     setInterval(syncWs, 1000); // 상태 파일은 이벤트가 없으므로 주기적으로 읽는다
   }

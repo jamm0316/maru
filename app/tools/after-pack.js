@@ -19,6 +19,10 @@ function walk(dir, out) {
 
 exports.default = async function afterPack(ctx) {
   const bundle = path.join(ctx.appOutDir, 'Maru.app');
+  // payload/VERSION: 앱 버전(관리형 홈의 마커와 비교한다). 서명 전에 쓴다.
+  const pdir = path.join(bundle, 'Contents', 'Resources', 'payload');
+  fs.mkdirSync(pdir, { recursive: true });
+  fs.writeFileSync(path.join(pdir, 'VERSION'), require('../package.json').version + '\n');
   const unpacked = path.join(bundle, 'Contents', 'Resources', 'app.asar.unpacked');
   if (fs.existsSync(unpacked)) {
     for (const f of walk(unpacked, [])) {

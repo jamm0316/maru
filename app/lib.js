@@ -412,9 +412,9 @@ function claudeLaunchCommand(sid, wrapper) {
   return 'command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + '\r';
 }
 
-// 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru
+// 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru -> ~/.maru(managed)
 // io: { readConfig(): string|null, isRepo(dir): boolean }. 후보는 절대경로이고 isRepo 통과해야 채택.
-function resolveRoot({ env = {}, home, isPackaged, appDir, io }) {
+function resolveRoot({ env = {}, home, isPackaged, appDir, io, managedHome }) {
   const path = require('path');
   const expand = (p) => {
     if (typeof p !== 'string') return null;
@@ -431,11 +431,12 @@ function resolveRoot({ env = {}, home, isPackaged, appDir, io }) {
     ['config', expand(cfg)],
     ['app', isPackaged ? null : (appDir ? path.resolve(appDir, '..') : null)],
     ['home', home ? path.join(home, 'maru') : null],
+    ['managed', managedHome ? path.normalize(managedHome) : (home ? path.join(home, '.maru') : null)], // 앱이 payload 를 풀어 둔 홈(마커 .maru-managed)
   ];
   for (const [source, dir] of cands) {
     if (!dir) continue;
     let ok = false;
-    try { ok = io.isRepo(dir) === true; } catch { ok = false; }
+    try { ok = io.isRepo(dir) === true && (source !== 'managed' || !io.isManaged || io.isManaged(dir) === true); } catch { ok = false; }
     if (ok) return { root: dir, source };
   }
   return null;
@@ -1672,8 +1673,9 @@ function parseInstallSections(out) {
   const r = [];
   for (const line of out.split(/\r?\n/)) {
     const m = /^== (.+)$/.exec(line.replace(BAD_CHARS_G, ''));
-    if (m && m[1] !== '끝') r.push(m[1].trim().slice(0, 100));
+    if (m) r.push(m[1].trim().slice(0, 100));
   }
+  r.pop(); // 마지막 머리글은 끝 표시(언어와 무관하게 항상 마지막)
   return r;
 }
 
@@ -2006,7 +2008,448 @@ function seenToStore(events, now = Date.now()) {
   return at && at < cur ? at : (at ? cur : '');
 }
 
+// ================= 관리형 홈(~/.maru): 앱에 실려 온 payload 를 풀어 두는 곳 =================
+// 앱이 쓰는 곳은 마커(.maru-managed)가 있는 홈뿐이다. data/ 와 .claude/settings.local.json 은 절대 건드리지 않는다.
+const MANAGED_MARKER = '.maru-managed';
+const SYNC_MARKER = '.maru-syncing'; // 동기화가 진행 중이라는 표시(실패하면 남아 다음 시작 때 다시 시도)
+const MANAGED_MARKER_MAX = 512 * 1024;
+const PAYLOAD_FILES_MAX = 3000;
+const PAYLOAD_FILE_MAX_BYTES = 8 * 1024 * 1024;
+const PAYLOAD_TOTAL_MAX_BYTES = 64 * 1024 * 1024;
+const FIRST_MEETING_TEXT = '/first-meeting'; // 고정 문장(번역하지 않는다)
+const SEG_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const fsOf = (io) => (io && io.fs) || require('fs');
+const idOf = (st) => st.dev + ':' + st.ino;
+
+// 매니페스트·payload 경로 검증: 모든 성분이 ASCII [A-Za-z0-9._-], '.'·'..'·빈 성분·절대경로 금지.
+// 보호 경로(data/, .git, .claude/settings.local.json, 마커)는 대소문자를 가리지 않고 거부한다. 통과하면 같은 문자열, 아니면 null.
+function safeManifestPath(p) {
+  if (typeof p !== 'string' || !p || p.length > 300) return null;
+  const parts = p.split('/');
+  if (parts.length > 12) return null;
+  for (const s of parts) if (!SEG_RE.test(s) || s === '.' || s === '..') return null;
+  const low = p.toLowerCase(); const top = parts[0].toLowerCase();
+  if (top === 'data' || top === '.git' || low === '.claude/settings.local.json') return null;
+  if (parts.length === 1 && low.startsWith('.maru-')) return null;
+  return p;
+}
+
+// 마커 텍스트 -> { version, lang, manifest[] } | null (manifest 는 안전한 경로만 남긴다)
+function parseMarker(text) {
+  if (typeof text !== 'string' || text.length > MANAGED_MARKER_MAX) return null;
+  let o; try { o = JSON.parse(text); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o) || typeof o.version !== 'string' || o.version.length > 40) return null;
+  const manifest = [];
+  if (Array.isArray(o.manifest)) for (const p of o.manifest.slice(0, PAYLOAD_FILES_MAX + 100)) { const s = safeManifestPath(p); if (s) manifest.push(s); }
+  return { version: o.version, lang: o.lang === 'en' ? 'en' : 'ko', manifest };
+}
+
+function readMarker(home, io) {
+  const fs = fsOf(io); const path = require('path');
+  const f = path.join(home, MANAGED_MARKER);
+  try {
+    const st = fs.lstatSync(f);
+    if (!st.isFile() || st.isSymbolicLink() || st.size > MANAGED_MARKER_MAX) return null;
+    return parseMarker(fs.readFileSync(f, 'utf8'));
+  } catch { return null; }
+}
+function readSyncing(home, io) {
+  try { const st = fsOf(io).lstatSync(require('path').join(home, SYNC_MARKER)); return st.isFile() && !st.isSymbolicLink(); } catch { return false; }
+}
+
+// 버전 비교(숫자 성분만, 나머지는 0). a>b 이면 1
+function cmpVersion(a, b) {
+  const p = (v) => String(v).split(/[.+-]/).slice(0, 4).map((x) => (/^\d{1,9}$/.test(x) ? parseInt(x, 10) : 0));
+  const x = p(a); const y = p(b);
+  for (let i = 0; i < 4; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0 ? 1 : -1; }
+  return 0;
+}
+function readPayloadVersion(payloadDir, io) {
+  const b = readPayloadFile(require('path').join(payloadDir, 'VERSION'), io);
+  const v = b ? b.toString('utf8').trim().slice(0, 40) : '';
+  return /^[0-9A-Za-z._+-]{1,40}$/.test(v) ? v : null;
+}
+
+// payload 폴더 훑기: 일반 파일·폴더만. 심볼릭 링크·특수 파일이 하나라도 있으면 거부. -> { ok, files:[{rel, abs, exec}] } | { ok:false, reason }
+function scanPayload(payloadDir, io) {
+  const fs = fsOf(io); const path = require('path');
+  const files = []; let total = 0;
+  const skipTop = new Set(['CLAUDE.md', 'CLAUDE.en.md']);
+  let st;
+  try { st = fs.lstatSync(payloadDir); } catch { return { ok: false, reason: 'payload-missing' }; }
+  if (!st.isDirectory() || st.isSymbolicLink()) return { ok: false, reason: 'payload-missing' };
+  const walk = (dir, rel) => {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const r = rel ? rel + '/' + name : name;
+      const abs = path.join(dir, name);
+      const s = fs.lstatSync(abs);
+      if (s.isSymbolicLink()) return 'payload-symlink';
+      if (!rel && skipTop.has(name)) continue;
+      if (!rel && (name.toLowerCase() === 'data' || name.toLowerCase() === '.git')) continue; // 개인 데이터·저장소 정보는 싣지 않는다
+      if (!safeManifestPath(r)) return 'payload-name';
+      if (s.isDirectory()) { const e = walk(abs, r); if (e) return e; }
+      else if (s.isFile()) {
+        if (s.size > PAYLOAD_FILE_MAX_BYTES) return 'payload-big';
+        total += s.size;
+        if (files.length >= PAYLOAD_FILES_MAX || total > PAYLOAD_TOTAL_MAX_BYTES) return 'payload-big';
+        files.push({ rel: r, abs, exec: (s.mode & 0o111) !== 0 });
+      } else return 'payload-special';
+    }
+    return null;
+  };
+  try { const e = walk(payloadDir, ''); if (e) return { ok: false, reason: e }; } catch { return { ok: false, reason: 'payload-read' }; }
+  return { ok: true, files };
+}
+
+// 홈 검사. -> { ok, marker, created, empty } | { ok:false, reason }
+function prepareHome(home, io, uid) {
+  const fs = fsOf(io);
+  let st = null;
+  try { st = fs.lstatSync(home); } catch { /* 없음 */ }
+  if (!st) return { ok: true, marker: null, created: true, empty: false };
+  if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false, reason: 'home-symlink' };
+  if (st.uid !== uid) return { ok: false, reason: 'home-owner' };
+  if ((st.mode & 0o022) !== 0) return { ok: false, reason: 'home-mode' };
+  const marker = readMarker(home, io);
+  let empty = false;
+  if (!marker) {
+    let n = 0; try { n = fs.readdirSync(home).length; } catch { return { ok: false, reason: 'home-read' }; }
+    if (n > 0) return { ok: false, reason: 'not-managed' };
+    empty = true;
+  }
+  return { ok: true, marker, created: false, empty };
+}
+// 홈 상태 이름: absent | empty | managed | symlink | owner | mode | foreign | unreadable
+function homeStatus(home, io) {
+  const uid = io && typeof io.uid === 'number' ? io.uid : process.getuid();
+  const h = prepareHome(home, io, uid);
+  if (!h.ok) return { 'home-symlink': 'symlink', 'home-owner': 'owner', 'home-mode': 'mode', 'not-managed': 'foreign' }[h.reason] || 'unreadable';
+  return h.created ? 'absent' : h.marker ? 'managed' : 'empty';
+}
+
+// 상위 폴더 확인/생성: 모든 중간 성분을 lstat 해 심볼릭 링크·폴더 아님·남의 소유면 거부, 그룹/다른 사용자 쓰기 권한은 고친다.
+// create=false 면 없는 폴더는 그대로 둔다(사전 점검용). -> null | 이유
+function walkChain(base, rel, io, uid, create) {
+  const fs = fsOf(io); const path = require('path');
+  const parts = rel.split('/'); parts.pop();
+  let cur = base;
+  for (const p of parts) {
+    cur = path.join(cur, p);
+    let st = null; try { st = fs.lstatSync(cur); } catch { /* 없음 */ }
+    if (!st) { if (!create) return null; fs.mkdirSync(cur, { mode: 0o755 }); continue; }
+    if (st.isSymbolicLink() || !st.isDirectory()) return 'dest-symlink';
+    if (st.uid !== uid) return 'dest-owner';
+    if (create && (st.mode & 0o022) !== 0) { try { fs.chmodSync(cur, st.mode & 0o755); } catch { return 'dest-mode'; } }
+  }
+  return null;
+}
+
+// 같은 폴더에 임시 파일 -> fsync -> rename 으로 쓴다
+function writeFileAtomicMode(dest, data, mode, io) {
+  const fs = fsOf(io); const path = require('path'); const crypto = require('crypto');
+  const tmp = path.join(path.dirname(dest), '.' + path.basename(dest) + '.' + crypto.randomBytes(5).toString('hex') + '.tmp');
+  let fd = null;
+  try {
+    fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    fs.writeSync(fd, data);
+    fs.fchmodSync(fd, mode);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = null;
+    fs.renameSync(tmp, dest);
+    return true;
+  } catch {
+    if (fd !== null) try { fs.closeSync(fd); } catch { /* 무시 */ }
+    try { fs.unlinkSync(tmp); } catch { /* 없음 */ }
+    return false;
+  }
+}
+
+function readPayloadFile(abs, io) {
+  const fs = fsOf(io);
+  let fd = null;
+  try {
+    fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > PAYLOAD_FILE_MAX_BYTES) return null;
+    const buf = Buffer.alloc(st.size); const n = fs.readSync(fd, buf, 0, st.size, 0);
+    return buf.subarray(0, n);
+  } catch { return null; } finally { if (fd !== null) try { fs.closeSync(fd); } catch { /* 무시 */ } }
+}
+
+// CLAUDE.md 원본 고르기: en 이면 CLAUDE.en.md(없으면 CLAUDE.md 로 대체), 아니면 CLAUDE.md
+function pickClaudeMd(payloadDir, lang, io) {
+  const path = require('path');
+  if (lang === 'en') { const b = readPayloadFile(path.join(payloadDir, 'CLAUDE.en.md'), io); if (b) return { buf: b, fallback: false }; }
+  const b = readPayloadFile(path.join(payloadDir, 'CLAUDE.md'), io);
+  return b ? { buf: b, fallback: lang === 'en' } : null;
+}
+
+function writeMarker(home, marker, io) {
+  const body = JSON.stringify({ version: marker.version, lang: marker.lang, manifest: marker.manifest, syncedAt: new Date().toISOString() }, null, 2) + '\n';
+  return writeFileAtomicMode(require('path').join(home, MANAGED_MARKER), body, 0o600, io);
+}
+
+// 보호 대상(data/ 폴더, settings.local.json)의 dev:ino. 이름의 대소문자·유니코드 별칭과 상관없이 같은 파일이면 걸린다.
+function protectedIds(home, io) {
+  const fs = fsOf(io); const path = require('path'); const ids = new Set();
+  for (const p of [path.join(home, 'data'), path.join(home, '.claude', 'settings.local.json')]) { try { ids.add(idOf(fs.lstatSync(p))); } catch { /* 없음 */ } }
+  return ids;
+}
+// 이전 매니페스트에만 있던 파일 제거: 모든 중간 성분이 진짜 폴더, 대상은 링크 수 1 의 일반 파일, 보호 대상이 아닐 때만.
+function removeStale(home, manifest, newSet, io) {
+  const fs = fsOf(io); const path = require('path');
+  const prot = protectedIds(home, io); let removed = 0;
+  for (const rel of manifest) {
+    if (newSet.has(rel) || !safeManifestPath(rel)) continue;
+    const parts = rel.split('/'); let cur = home; const dirs = []; let ok = true;
+    for (let i = 0; i < parts.length - 1; i++) {
+      cur = path.join(cur, parts[i]);
+      let st; try { st = fs.lstatSync(cur); } catch { ok = false; break; }
+      if (st.isSymbolicLink() || !st.isDirectory() || prot.has(idOf(st))) { ok = false; break; }
+      dirs.push(cur);
+    }
+    if (!ok) continue;
+    const p = path.join(home, rel);
+    let st; try { st = fs.lstatSync(p); } catch { continue; }
+    if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || prot.has(idOf(st))) continue;
+    try { fs.unlinkSync(p); removed++; } catch { continue; }
+    for (let i = dirs.length - 1; i >= 0; i--) { try { fs.rmdirSync(dirs[i]); } catch { break; } }
+  }
+  return removed;
+}
+
+// 홈 옆의 오래된 임시 폴더(<홈>.tmp-<16진>)를 지운다: 앱이 쓴 진행 중 표시가 있고, 내 소유의 진짜 폴더이며, maxAgeMs 보다 오래된 것만.
+function cleanStaleTmp(home, io, maxAgeMs) {
+  const fs = fsOf(io); const path = require('path');
+  const uid = io && typeof io.uid === 'number' ? io.uid : process.getuid();
+  const age = typeof maxAgeMs === 'number' ? maxAgeMs : 10 * 60 * 1000;
+  const parent = path.dirname(home); const prefix = path.basename(home) + '.tmp-'; let n = 0;
+  let names = []; try { names = fs.readdirSync(parent); } catch { return 0; }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !/^[0-9a-f]{10}$/.test(name.slice(prefix.length))) continue;
+    const d = path.join(parent, name);
+    try {
+      const st = fs.lstatSync(d);
+      if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid) continue;
+      const m = fs.lstatSync(path.join(d, SYNC_MARKER));
+      if (!m.isFile() || m.isSymbolicLink() || (age > 0 && Date.now() - m.mtimeMs < age)) continue;
+      fs.rmSync(d, { recursive: true, force: true }); n++;
+    } catch { /* 표시가 없으면 건드리지 않는다 */ }
+  }
+  return n;
+}
+
+// payload -> 관리형 홈 동기화. io = { fs, uid }(주입 가능).
+// 새 홈(없거나 빈 폴더)은 옆의 임시 폴더에 다 만든 뒤 rename 한다(중간에 실패해도 홈은 생기지 않는다).
+// 기존 관리형 홈은 진행 중 표시(.maru-syncing)를 먼저 쓰고 마커를 마지막에 쓴 뒤 표시를 지운다(실패하면 표시가 남아 다시 시도된다).
+// -> { ok, version, lang, written, removed, claudeFallback } | { ok:false, reason }
+function syncPayload({ payloadDir, home, lang, io } = {}) {
+  const fs = fsOf(io); const path = require('path'); const crypto = require('crypto');
+  const uid = io && typeof io.uid === 'number' ? io.uid : process.getuid();
+  if (typeof payloadDir !== 'string' || typeof home !== 'string' || !path.isAbsolute(payloadDir) || !path.isAbsolute(home)) return { ok: false, reason: 'args' };
+  const lg = lang === 'en' ? 'en' : 'ko';
+  const sc = scanPayload(payloadDir, io);
+  if (!sc.ok) return sc;
+  const version = readPayloadVersion(payloadDir, io);
+  if (!version) return { ok: false, reason: 'payload-version' };
+  const md = pickClaudeMd(payloadDir, lg, io);
+  if (!md) return { ok: false, reason: 'payload-claude-md' };
+  const h = prepareHome(home, io, uid);
+  if (!h.ok) return h;
+  const fresh = h.created || h.empty;
+  const items = sc.files.filter((f) => f.rel !== 'CLAUDE.md');
+  const newSet = new Set(items.map((f) => f.rel)); newSet.add('CLAUDE.md');
+  let root = home;
+  if (fresh) {
+    cleanStaleTmp(home, io);
+    root = home + '.tmp-' + crypto.randomBytes(5).toString('hex');
+    try { fs.mkdirSync(path.dirname(home), { recursive: true, mode: 0o700 }); fs.mkdirSync(root, { mode: 0o700 }); fs.chmodSync(root, 0o700); } catch { return { ok: false, reason: 'home-create' }; }
+  } else {
+    // 사전 점검: 중간 성분이 링크·남의 것이면, 목적지가 폴더·링크이면 아무것도 쓰기 전에 거부한다
+    for (const rel of newSet) {
+      const e = walkChain(home, rel, io, uid, false); if (e) return { ok: false, reason: e };
+      let st = null; try { st = fs.lstatSync(path.join(home, rel)); } catch { /* 없음 */ }
+      if (st && st.isDirectory()) return { ok: false, reason: 'dest-dir' };
+      if (st && st.isSymbolicLink()) return { ok: false, reason: 'dest-symlink' };
+    }
+    try { fs.chmodSync(home, 0o700); } catch { return { ok: false, reason: 'home-mode' }; }
+  }
+  const run = () => {
+    if (!writeFileAtomicMode(path.join(root, SYNC_MARKER), JSON.stringify({ to: version, at: new Date().toISOString() }) + '\n', 0o600, io)) return { ok: false, reason: 'write' };
+    let written = 0;
+    for (const f of items) {
+      const e = walkChain(root, f.rel, io, uid, true); if (e) return { ok: false, reason: e };
+      let st = null; try { st = fs.lstatSync(path.join(root, f.rel)); } catch { /* 없음 */ }
+      if (st && st.isSymbolicLink()) return { ok: false, reason: 'dest-symlink' };
+      const buf = readPayloadFile(f.abs, io);
+      if (!buf) return { ok: false, reason: 'payload-read' };
+      if (!writeFileAtomicMode(path.join(root, f.rel), buf, f.exec ? 0o755 : 0o644, io)) return { ok: false, reason: 'write' };
+      written++;
+    }
+    if (!writeFileAtomicMode(path.join(root, 'CLAUDE.md'), md.buf, 0o644, io)) return { ok: false, reason: 'write' };
+    written++;
+    const removed = fresh || !h.marker ? 0 : removeStale(root, h.marker.manifest, newSet, io);
+    if (!writeMarker(root, { version, lang: lg, manifest: [...newSet].sort() }, io)) return { ok: false, reason: 'marker' };
+    try { fs.unlinkSync(path.join(root, SYNC_MARKER)); } catch { return { ok: false, reason: 'marker' }; }
+    return { ok: true, version, lang: lg, written, removed, claudeFallback: md.fallback };
+  };
+  let res;
+  try { res = run(); } catch { res = { ok: false, reason: 'write' }; }
+  if (fresh) {
+    if (res.ok) {
+      try { if (h.empty) fs.rmdirSync(home); fs.renameSync(root, home); } catch { res = { ok: false, reason: 'home-create' }; }
+    }
+    if (!res.ok) { try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 다음 시작 때 정리 */ } }
+  }
+  return res;
+}
+
+// 언어가 바뀌었을 때 CLAUDE.md 만 다시 쓴다(마커가 있는 홈만). 마커의 lang 도 갱신.
+function syncClaudeMd({ payloadDir, home, lang, io } = {}) {
+  const path = require('path'); const fs = fsOf(io);
+  const uid = io && typeof io.uid === 'number' ? io.uid : process.getuid();
+  if (typeof payloadDir !== 'string' || typeof home !== 'string' || !path.isAbsolute(payloadDir) || !path.isAbsolute(home)) return { ok: false, reason: 'args' };
+  const lg = lang === 'en' ? 'en' : 'ko';
+  const h = prepareHome(home, io, uid);
+  if (!h.ok) return h;
+  if (!h.marker) return { ok: false, reason: 'not-managed' };
+  try { const d = fs.lstatSync(path.join(payloadDir, 'CLAUDE.md')); if (d.isSymbolicLink()) return { ok: false, reason: 'payload-symlink' }; } catch { return { ok: false, reason: 'payload-claude-md' }; }
+  const md = pickClaudeMd(payloadDir, lg, io);
+  if (!md) return { ok: false, reason: 'payload-claude-md' };
+  try { const st = fs.lstatSync(path.join(home, 'CLAUDE.md')); if (st.isDirectory()) return { ok: false, reason: 'dest-dir' }; } catch { /* 없음 */ }
+  if (!writeFileAtomicMode(path.join(home, 'CLAUDE.md'), md.buf, 0o644, io)) return { ok: false, reason: 'write' };
+  const man = new Set(h.marker.manifest); man.add('CLAUDE.md');
+  if (!writeMarker(home, { version: h.marker.version, lang: lg, manifest: [...man].sort() }, io)) return { ok: false, reason: 'marker' };
+  return { ok: true, lang: lg, claudeFallback: md.fallback };
+}
+
+// 시작 때 할 일: 'newer'(홈이 앱보다 새것: 건드리지 않음) | 'sync' | 'lang' | 'none'
+function managedAction(marker, payloadVersion, profileLang, syncing) {
+  if (!marker || !payloadVersion) return 'none';
+  if (cmpVersion(marker.version, payloadVersion) > 0) return 'newer';
+  if (syncing || marker.version !== payloadVersion) return 'sync';
+  if ((profileLang === 'ko' || profileLang === 'en') && marker.lang !== profileLang) return 'lang';
+  return 'none';
+}
+
+// 동기화 기록(데이터 폴더 안 로그 한 줄). data/ 와 logs/ 가 진짜 폴더이고 파일이 링크가 아닐 때만, 64KB 상한.
+function appendSyncLog(root, line, io) {
+  const fs = fsOf(io); const path = require('path');
+  try {
+    const data = path.join(root, 'data'); const logs = path.join(data, 'logs'); const f = path.join(logs, 'app-sync.log');
+    for (const d of [data, logs]) {
+      let st = null; try { st = fs.lstatSync(d); } catch { /* 없음 */ }
+      if (!st) fs.mkdirSync(d, { mode: 0o700 }); else if (st.isSymbolicLink() || !st.isDirectory()) return false;
+    }
+    try { const st = fs.lstatSync(f); if (!st.isFile() || st.isSymbolicLink() || st.size > 64 * 1024) return false; } catch { /* 없음 */ }
+    const fd = fs.openSync(f, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+    try { fs.writeSync(fd, new Date().toISOString() + ' ' + String(line).replace(/[^\x20-\x7e]/g, '?').slice(0, 200) + '\n'); } finally { fs.closeSync(fd); }
+    return true;
+  } catch { return false; }
+}
+
+// 첫 만남 입력줄에 붙이는 고정 문장. 상수와 정확히 같을 때만 붙여넣기 문자열을 돌려준다(그 밖은 null). 일반 퀘스트용 isSafeQuestStart 는 '/' 로 시작하는 문장을 거부하므로 따로 둔다.
+function firstMeetingPaste(text) { return text === FIRST_MEETING_TEXT ? '\x1b[200~' + FIRST_MEETING_TEXT + '\x1b[201~' : null; }
+
+// 기억 폴더 읽기 가능 여부: 'missing'(아직 없음=새 사용자) | 'ok' | 'unreadable'(링크·권한 등)
+function probeMemoryDir(dir, io) {
+  const fs = fsOf(io); const path = require('path');
+  if (typeof dir !== 'string' || !dir) return 'unreadable';
+  let st;
+  try { st = fs.lstatSync(dir); } catch (e) { return e && e.code === 'ENOENT' ? 'missing' : 'unreadable'; }
+  if (st.isSymbolicLink() || !st.isDirectory()) return 'unreadable';
+  try { if (fs.lstatSync(path.dirname(dir)).isSymbolicLink()) return 'unreadable'; fs.readdirSync(dir); } catch { return 'unreadable'; }
+  return 'ok';
+}
+
+// ---- 첫 설정 상태 (<홈>/data/setup.json). 프로필(profile.json)과 따로 둔다 ----
+const SETUP_MAX_BYTES = 4096;
+const SETUP_CONNECT = ['done', 'later'];
+function defaultSetupState() { return { v: 1, homeAt: null, connect: null, doneAt: null, metAt: null, dismissedAt: null }; }
+const isoOrNull = (s) => (typeof s === 'string' && s.length <= 40 && /^\d{4}-\d{2}-\d{2}T/.test(s) && Number.isFinite(Date.parse(s)) ? s : null);
+function validateSetupState(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  if (o.v !== 1) return null;
+  const connect = SETUP_CONNECT.includes(o.connect) ? o.connect : null;
+  for (const k of ['homeAt', 'doneAt', 'metAt', 'dismissedAt']) if (o[k] !== null && o[k] !== undefined && isoOrNull(o[k]) === null) return null;
+  return { v: 1, homeAt: isoOrNull(o.homeAt), connect, doneAt: isoOrNull(o.doneAt), metAt: isoOrNull(o.metAt), dismissedAt: isoOrNull(o.dismissedAt) }; // 알 수 없는 필드는 버린다
+}
+function parseSetupState(res) {
+  if (!res || res.truncated || typeof res.text !== 'string') return null;
+  try { return validateSetupState(JSON.parse(res.text)); } catch { return null; }
+}
+function loadSetupState(file) { return parseSetupState(readRegular(file, SETUP_MAX_BYTES, false)); } // 없거나 망가졌으면 null
+function saveSetupState(file, st) { const v = validateSetupState(st); return v ? writeJsonAtomic(file, v, 'setup') : false; }
+
+// 관리형 홈이 있고 프로필이 유효한데 setup.json 이 없거나 망가졌을 때: 홈은 이미 만든 것으로 본다
+function deriveSetupState({ marker, profile }) { return marker && profile ? validateSetupState({ ...defaultSetupState(), homeAt: profile.createdAt }) : null; }
+// 기존 프로필이 유효하면 createdAt·calendar 를 지키고 이름·언어만 바꾼다(덮어써 잃지 않게)
+function mergeProfile(existing, name, lang, nowIso) {
+  const e = validateProfile(existing);
+  return e ? { name, lang, calendar: e.calendar, createdAt: e.createdAt } : { name, lang, calendar: false, createdAt: nowIso };
+}
+// 첫 설정 화면이 필요한가. found = resolveRoot 결과, state = 상태|null. -> { needed, stage: 'welcome'|'connect'|'done' }
+function setupStage({ found, state }) {
+  if (!found) return { needed: true, stage: 'welcome' };
+  if (found.source !== 'managed') return { needed: false, stage: 'done' };
+  const st = state || defaultSetupState();
+  if (st.doneAt) return { needed: false, stage: 'done' };
+  if (!st.homeAt) return { needed: true, stage: 'welcome' };
+  return { needed: true, stage: 'connect' };
+}
+// 설정이 아직 끝나지 않은(연결을 미룬) 홈인지: 상태 영역의 "설정 마무리" 항목용
+function setupUnfinished({ found, state }) {
+  if (!found || found.source !== 'managed') return false;
+  const st = state || defaultSetupState();
+  return st.connect !== 'done';
+}
+
+// ---- 사전 요구사항 ----
+const PREREQ_IDS = ['macos', 'claude', 'auth', 'git', 'python3', 'jq', 'perl'];
+const PREREQ_HOW = { macos: 'prereq.how.macos', claude: 'prereq.how.claude', auth: 'prereq.how.auth', git: 'prereq.how.clt', python3: 'prereq.how.clt', jq: 'prereq.how.jq', perl: 'prereq.how.perl' };
+// PATH 문자열에서 실행 파일 찾기(io.isExec(path) -> boolean)
+function findInPath(name, pathStr, isExec) {
+  const path = require('path');
+  if (typeof name !== 'string' || !/^[A-Za-z0-9._-]{1,40}$/.test(name)) return null;
+  for (const d of String(pathStr || '').split(':')) {
+    if (!d || !path.isAbsolute(d)) continue;
+    const p = path.join(d, name);
+    let ok = false; try { ok = isExec(p) === true; } catch { ok = false; }
+    if (ok) return p;
+  }
+  return null;
+}
+// raw: { macos: boolean, claude: 'ok'|'missing'|'broken', auth: parseAuthStatus 결과|null, git/python3/jq/perl: 'ok'|'missing'|'broken' }
+// -> [{ id, status: 'ok'|'missing'|'need'|'unknown', required, how }]. auth 는 필수가 아니다(홈 만들기는 로그인 없이 가능).
+function modelPrereqs(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const tool = (v) => (v === 'ok' ? 'ok' : v === 'broken' ? 'need' : 'missing');
+  const out = [];
+  out.push({ id: 'macos', status: r.macos === true ? 'ok' : 'missing', required: true, detail: typeof r.macosVersion === 'string' && /^[0-9.]{1,20}$/.test(r.macosVersion) ? r.macosVersion : null });
+  out.push({ id: 'claude', status: tool(r.claude), required: true });
+  let auth = 'unknown';
+  if (r.claude === 'ok') { const a = r.auth; auth = !a ? 'unknown' : (a.loggedIn && a.state !== 'expired') ? 'ok' : 'need'; }
+  else auth = 'need';
+  out.push({ id: 'auth', status: auth, required: false });
+  for (const id of ['git', 'python3', 'jq', 'perl']) out.push({ id, status: tool(r[id]), required: true });
+  return out.map((x) => ({ ...x, how: x.status === 'ok' ? null : PREREQ_HOW[x.id] }));
+}
+function prereqsReady(list) { return Array.isArray(list) && PREREQ_IDS.every((id) => { const x = list.find((y) => y && y.id === id); return !!x && (x.status === 'ok' || !x.required); }); }
+
+// ---- 첫 만남 배너 ----
+// 기억 파일이 0개이고 metAt·dismissedAt 이 없고 프로필이 있을 때만 보인다. memories = readMemoryFiles 결과({items, skipped})|null
+function firstMeetingBanner({ memories, probe, state, profile }) {
+  if (!profile) return false;
+  if (probe !== 'missing' && probe !== 'ok') return false; // 읽지 못한 것과 비어 있는 것을 구분한다
+  if (probe === 'ok' && (!memories || !Array.isArray(memories.items) || memories.items.length > 0 || (memories.skipped | 0) > 0)) return false;
+  const st = state || defaultSetupState();
+  return !st.metAt && !st.dismissedAt;
+}
+
 const api = {
+  MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
+  defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
+  PREREQ_IDS, findInPath, modelPrereqs, prereqsReady, firstMeetingBanner,
   INBOX_NOTIF_MAX, PROPOSAL_FILE_MAX, PROPOSAL_TOTAL_MAX, PROPOSAL_FILES_MAX, logAtMs, plausibleLogAt, fmtLogAt, seenToStore, PROPOSAL_LIST_MAX, INBOX_SEEN_MAX_BYTES, validProposalSlug, cleanDisplay, cleanProposalText, proposalMeta, scanProposalDir, listProposals, proposalDetail, trashProposalDir, skillRequestText, parseSquadCheck, summarizeSquadCheck, validateInboxSeen, parseInboxSeen, readInboxSeenFile, saveInboxSeen, markUnseen, newestAt, relativeAgo,
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
