@@ -21,6 +21,9 @@ def clip(s, n=CLIP):
 
 with open(src, encoding="utf-8", errors="replace") as f:
     for idx, raw in enumerate(f):
+        # 쓰는 중인 마지막 줄(개행 없음)은 세지 않는다: 살아 있는 세션을 중간에 회고해도 그 줄을 다음 회고가 처음부터 읽는다
+        if not raw.endswith("\n"):
+            break
         total = idx + 1
         if idx < from_line:
             continue

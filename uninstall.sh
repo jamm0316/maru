@@ -26,8 +26,11 @@ PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
 say() { printf '\n== %s\n' "$*"; }
 die() { echo "  실패: $*" >&2; echo "  여기서 중단합니다(이후 단계는 실행하지 않음)." >&2; exit 1; }
 
-say "SessionEnd 훅 제거"
+say "SessionEnd·SessionStart·Stop·PreCompact 훅 제거"
 "${CFG[@]}" hook-remove --settings "$CLAUDE_DIR/settings.json" --match "$MARU_HOME/scripts/reflect.sh" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"} || die "SessionEnd 훅 제거 실패"
+for spec in "SessionStart:session-context.sh" "Stop:journal-tick.sh" "PreCompact:journal-tick.sh"; do
+  "${CFG[@]}" hook-remove --settings "$CLAUDE_DIR/settings.json" --event "${spec%%:*}" --match "$MARU_HOME/scripts/${spec#*:}" --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"} || die "${spec%%:*} 훅 제거 실패"
+done
 
 say "launchd 작업 $LABEL 제거"
 if [ -n "$DRY" ]; then echo "  (dry-run) launchctl bootout, $PLIST 삭제"

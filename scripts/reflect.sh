@@ -84,8 +84,11 @@ if [ "$total" -lt "$from" ]; then   # transcript가 줄어듦 → 처음부터
   from=0
   read -r turns total < <(python3 "$SCRIPTS/digest.py" "$tp" "$dg" --from-line 0 2>>"$LOG")
 fi
-if [ "$turns" -lt "$MIN_TURNS" ]; then
-  log "[$short] 새 사용자 턴 ${turns}개(줄 $from→$total) — 건너뜀"; exit 10
+# 이미 회고된 세션의 꼬리(기록된 오프셋 > 0)는 새 턴 1개면 충분하다(안 그러면 마지막 한 턴이 영영 회고되지 않는다).
+# 세션 도중 tick 이 띄운 실행(MARU_TICK_RUN=1)과 처음 보는 세션은 MIN_TURNS 를 그대로 쓴다.
+need=$MIN_TURNS; [ "$from" -gt 0 ] && [ -z "${MARU_TICK_RUN:-}" ] && need=1
+if [ "$turns" -lt "$need" ]; then
+  log "[$short] 새 사용자 턴 ${turns}개(줄 $from→$total, 필요 $need) — 건너뜀"; exit 10
 fi
 
 log "[$short] 회고 시작 (새 턴=$turns, 줄 $from→$total, model=$MODEL)"
@@ -130,6 +133,7 @@ printf '%s\n' "$out" | grep -v '^Warning: this sign-in' >> "$LOG"
 reason=""
 if [ $rc -ne 0 ]; then reason="모델 rc=$rc"
 elif ! apply_deletions "$MEM" "$STAGE/delete.txt"; then reason="삭제 목록 거부"
+elif comm -3 "$TXN.A" "$TXN.B" | grep -Eq ' \./journal(/|$)'; then reason="모델이 journal/ 을 직접 건드림(일지는 journal.txt 로만 쓴다)"
 else reason=$(mem_validate "$MEM" "$before_n") || true
 fi
 if [ -n "$reason" ]; then
@@ -159,6 +163,12 @@ for d in "$STAGE"/*; do
     "$n" "$today" "$short" "$exist" > "$PROPOSALS/$n/PROPOSAL.md"
   log "[$short] 스킬 제안 저장: $n ($exist)"
 done
+# 일지: 트랜잭션이 성공으로 끝난 뒤(= 되돌림 경로는 여기 오지 않음) 이 실행이 쥔 잠금 안에서 셸이 덧붙인다.
+# 모델 실행 전후 스냅샷 밖이라 롤백 대상이 아니고, 아래 before/after 비교에 잡혀 기억과 같은 hist 커밋에 들어간다.
+# 프로젝트 라벨은 다이제스트 머리의 cwd 에서 얻는다(없으면 생략).
+jlabel=$(sed -n '2s/^cwd: //p' "$dg" 2>/dev/null | head -1); jlabel=$(basename "${jlabel:-/}" 2>/dev/null); [ "$jlabel" = / ] && jlabel=""
+journaled=""
+apply_journal "$STAGE/journal.txt" "$short" "$jlabel" && journaled=1
 apply_suggestions "$STAGE/suggestions.txt"   # 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
 rm -rf "$STAGE"
 
@@ -171,6 +181,7 @@ after=$(mem_snap "$MEM")
 changed=$(comm -3 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | sed 's/^[[:space:]]*[0-9a-f]\{32\} //' | sort -u)
 paths=()
 while IFS= read -r f; do [ -n "$f" ] && paths+=("$MEM/${f#./}"); done <<< "$changed"
+[ -n "$journaled" ] && [ "${summary:-변경 없음}" = "변경 없음" ] && summary="일지 기록"
 if [ ${#paths[@]} -gt 0 ]; then hist_git add -A -- "${paths[@]}" >> "$LOG" 2>&1; fi
 if ! hist_git diff --cached --quiet -- "${paths[@]:-$MEM}" 2>/dev/null; then
   hist_git commit -q -m "reflect: $short — ${summary:-회고}" -- "${paths[@]}" >> "$LOG" 2>&1 && log "[$short] 커밋 완료"

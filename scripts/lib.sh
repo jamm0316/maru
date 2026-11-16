@@ -79,6 +79,7 @@ mem_snap() { (cd "$1" 2>/dev/null && find . -type f -print0 | xargs -0 md5 -r 2>
 
 # ---- 트랜잭션: 모델 실행 직전 memory 를 복사하고 파일별 체크섬 목록 A 를 만든다.
 # 모델 종료 직후 목록 B 를 만든다. 되돌릴 대상은 diff(A,B), 즉 "이번 실행이 바꾼 경로"뿐이다.
+# 알려진 한계: 세션 도중(journal-tick) 회고가 실패해 되돌려질 때, 그 실행 시간대에 다른 살아 있는 세션이 쓴 기억 파일도 함께 되돌려질 수 있다.
 # 한계(남는 경합): A~B 사이 약 수십 초 동안 같은 파일을 다른 세션이 고치면 그 변경도 이번 실행의 것으로 보고 되돌린다.
 # 그 밖의 시간대·다른 파일에 대한 쓰기는 보존된다. 그래서 txn_begin 은 모델 호출 직전에, txn_after 는 직후에 부른다.
 # txn_begin <memdir> <snapdir> / txn_after <memdir> <snapdir> / txn_restore <memdir> <snapdir> / txn_end <snapdir>
@@ -206,11 +207,12 @@ apply_suggestions() {
   [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
   mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "추천 목록: data 폴더 없음 — 건너뜀"; return 0; }
   tmp=$(mktemp "$MARU_DATA/.suggestions.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "추천 목록: 임시 파일 실패 — 건너뜀"; return 0; }
-  res=$(python3 -I - "$src" "$tmp" <<'PY' 2>&1
-import os, stat, sys, unicodedata
+  res=$(python3 -I - "$src" "$tmp" "$_maru_lib" <<'PY' 2>&1
+import os, stat, sys
 src, tmp = sys.argv[1:3]
+sys.path.insert(0, sys.argv[3])
+from textclean import has_bad   # 제어·서식·보이지 않는 문자 판정(apply_journal 과 공용)
 MAX_BYTES, MAX_LINES, MAX_CHARS = 65536, 8, 120
-HIDDEN = {"\u3164", "\u115f", "\u1160", "\uffa0", "\u2800"}
 try:
     st = os.lstat(src)
     if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
@@ -224,7 +226,7 @@ for line in text.split("\n"):
     if line.endswith("\r"): line = line[:-1]
     line = line.strip(" ")
     if not line: continue
-    if len(line) > MAX_CHARS or any(c in HIDDEN or unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") for c in line):
+    if len(line) > MAX_CHARS or has_bad(line):
         dropped += 1; continue
     if line in seen: continue
     seen.add(line); out.append(line)
@@ -237,6 +239,85 @@ PY
   if [ $? -eq 0 ]; then type log >/dev/null 2>&1 && log "추천 목록 갱신: $res"
   else rm -f "$tmp"; type log >/dev/null 2>&1 && log "추천 목록 유지(기존 목록 그대로): ${res:-반영 실패}"; fi
   return 0
+}
+
+# ---- 일지(journal): apply_journal <stage의 journal.txt> <세션 id 앞 8자> <프로젝트 라벨(없으면 빈 문자열)>
+# 모델이 쓴 `<kind>|<중요도>|<문장>` 줄(kind=done|decision|todo, 중요도 1~10, 문장 160자 이하)을 검증해 $MEM/journal/YYYY-MM-DD.md
+# 에 블록으로 덧붙인다(헤더는 셸이 쓴다). 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 제어·서식·보이지 않는 문자는 제거
+# (textclean.py, apply_suggestions 와 공용) / 문장은 neutralize_body 로 무해화(백틱 제거, < > [ ] 치환, 앞쪽 # 제거) /
+# 형식에 안 맞는 줄·비밀값처럼 보이는 줄(sk-…, 16진수 32자+, base64 40자+)·중복 줄은 버림 / 앞에서 8줄까지.
+# journal 이 심볼릭 링크이거나 일반 폴더가 아니면 거부. 임시 파일에 쓰고 rename 하므로 읽는 쪽은 반쪽 블록을 보지 않는다.
+# 호출 쪽이 기억 쓰기 잠금을 쥔 상태에서, 기억 트랜잭션이 성공으로 끝난 뒤에만 부른다(reflect.sh). 덧붙였으면 0, 아니면 1(로그만 남김).
+apply_journal() {
+  local src=$1 sid8=$2 label=${3:-} res rc
+  [ -e "$src" ] || [ -L "$src" ] || return 1     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
+  res=$(python3 -I - "$src" "$MEM" "$(date +%F)" "$(date +%H:%M)" "$sid8" "$label" "$_maru_lib" <<'PY' 2>&1
+import os, re, stat, sys, tempfile
+src, mem, day, hhmm, sid8, label, libdir = sys.argv[1:8]
+sys.path.insert(0, libdir)
+from textclean import strip_bad, neutralize_body, looks_secret
+MAX_BYTES, MAX_LINES, MAX_CHARS = 32768, 8, 160
+KINDS = {"done": "한 일", "decision": "결정", "todo": "남은 일"}
+LINE = re.compile(r"^(done|decision|todo)[ ]*\|[ ]*([0-9]{1,2})[ ]*\|[ ]*(.+?)[ ]*$")
+try:
+    st = os.lstat(src)
+    if not stat.S_ISREG(st.st_mode): print("거부: 일반 파일 아님(심볼릭 링크 등)"); sys.exit(1)
+    if st.st_size > MAX_BYTES: print("거부: 크기 초과(%d바이트)" % st.st_size); sys.exit(1)
+    with open(src, "rb") as f: raw = f.read(MAX_BYTES + 1)
+    text = raw.decode("utf-8")
+except (OSError, UnicodeDecodeError) as e:
+    print("거부: 읽기 실패(%s)" % type(e).__name__); sys.exit(1)
+out, seen, dropped = [], set(), 0
+for line in text.split("\n"):
+    line = strip_bad(line.rstrip("\r")).strip(" ")
+    if not line: continue
+    m = LINE.match(line)
+    if not m: dropped += 1; continue
+    kind, imp, body = m.group(1), int(m.group(2)), m.group(3)
+    if len(body) > MAX_CHARS or looks_secret(body): dropped += 1; continue   # 원문 기준: 길이·비밀값 모양
+    body = neutralize_body(body)   # 백틱 제거, < > [ ] 치환, 앞쪽 # 제거(읽을 때도 같은 함수)
+    if not 1 <= imp <= 10 or not body or len(body) > MAX_CHARS:
+        dropped += 1; continue
+    key = (kind, body)
+    if key in seen: continue
+    seen.add(key); out.append((kind, imp, body))
+if not out: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
+over = max(0, len(out) - MAX_LINES)
+out = out[:MAX_LINES]
+out.sort(key=lambda t: list(KINDS).index(t[0]))   # 안정 정렬: 한 일 → 결정 → 남은 일
+lab = re.sub(r"[^0-9A-Za-z가-힣._-]+", "-", label).strip("-._")[:24]
+header = "## %s %s(%s)" % (hhmm, lab + " " if lab else "", sid8)
+block = header + "\n" + "".join("- [%s] (%d) %s\n" % (KINDS[k], i, b) for k, i, b in out)
+jd = os.path.join(mem, "journal")
+try:
+    if os.path.islink(jd) or (os.path.lexists(jd) and not os.path.isdir(jd)):
+        print("거부: journal 이 심볼릭 링크이거나 폴더가 아님"); sys.exit(1)
+    os.makedirs(jd, mode=0o700, exist_ok=True)
+    os.chmod(jd, 0o700)
+    dst = os.path.join(jd, day + ".md")
+    if os.path.lexists(dst):
+        dst_st = os.lstat(dst)
+        if not stat.S_ISREG(dst_st.st_mode): print("거부: 날짜 파일이 일반 파일 아님"); sys.exit(1)
+        with open(dst, "rb") as f: old = f.read()
+        if not old.endswith(b"\n"): old += b"\n"
+    else:
+        old = ("# %s 일지\n" % day).encode("utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=jd)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(old + b"\n" + block.encode("utf-8")); f.flush(); os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dst)
+    except BaseException:
+        if os.path.exists(tmp): os.unlink(tmp)
+        raise
+except OSError as e:
+    print("거부: 쓰기 실패(%s)" % type(e).__name__); sys.exit(1)
+print("ok %d줄 → journal/%s.md(버린 줄 %d, 상한 초과 %d)" % (len(out), day, dropped, over))
+PY
+  ); rc=$?
+  type log >/dev/null 2>&1 && log "일지: ${res:-반영 실패}"
+  return $((rc != 0))
 }
 
 # 프롬프트 템플릿의 {{키}} 를 값으로 치환(경로에 어떤 문자가 있어도 안전): render_template <파일> 키=값...

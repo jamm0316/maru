@@ -111,6 +111,7 @@ printf '%s\n' "$out" | grep -v '^Warning: this sign-in' >> "$LOG"
 reason=""
 if [ $rc -ne 0 ]; then reason="모델 rc=$rc"
 elif ! apply_deletions "$MEM" "$STAGE/delete.txt"; then reason="삭제 목록 거부"
+elif comm -3 "$TXN.A" "$TXN.B" | grep -Eq ' \./journal(/|$)'; then reason="모델이 journal/ 을 건드림"
 else reason=$(mem_validate "$MEM" "$before_n") || true
 fi
 if [ -n "$reason" ]; then

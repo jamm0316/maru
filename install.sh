@@ -77,6 +77,13 @@ say "SessionEnd 훅 등록 (~/.claude/settings.json)"
 "${CFG[@]}" hook-add --settings "$CLAUDE_DIR/settings.json" --command "bash \"$MARU_HOME/scripts/reflect.sh\"" \
   --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"} || die "SessionEnd 훅 등록 실패"
 
+say "일지 훅 등록: SessionStart(최근 일지 로드) · Stop/PreCompact(세션 도중 일지)"
+for spec in "SessionStart:session-context.sh" "Stop:journal-tick.sh" "PreCompact:journal-tick.sh"; do
+  mt=""; [ "${spec%%:*}" = SessionStart ] && mt="startup|clear|compact"   # resume 은 이미 컨텍스트가 있으므로 제외
+  "${CFG[@]}" hook-add --settings "$CLAUDE_DIR/settings.json" --event "${spec%%:*}" ${mt:+--matcher "$mt"} --command "bash \"$MARU_HOME/scripts/${spec#*:}\"" \
+    --backup-dir "$MARU_DATA/backups" ${DRYARG[@]+"${DRYARG[@]}"} || die "${spec%%:*} 훅 등록 실패"
+done
+
 say "launchd 작업 $LABEL (매일 03:30)"
 install_launchd "$LABEL" "$MARU_HOME/launchd/$LABEL.plist.template" "$PLIST" "${DRY:+1}" "$MARU_DATA/backups" || die "launchd 작업 $LABEL 설치 실패"
 

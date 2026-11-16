@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """install.sh / uninstall.sh 가 쓰는 설정 편집기. 사용자 설정 파일을 최소한으로만 고친다.
 사용: maru_config.py <명령> [옵션]   (모든 명령은 --dry-run 지원: 바꿀 내용만 출력)
-  hook-add     --settings F --command CMD [--backup-dir D]
-  hook-remove  --settings F --match S [--backup-dir D]
+  hook-add     --settings F --command CMD [--event E] [--matcher M] [--backup-dir D]   (E 기본 SessionEnd; SessionStart/Stop/PreCompact 등)
+  hook-remove  --settings F --match S [--event E] [--backup-dir D]
   claude-md    --file F --block-file B [--backup-dir D]       (maru 블록만 추가/교체. 블록 밖은 건드리지 않는다)
   claude-md-remove --file F [--backup-dir D]
   local-settings --file F --dir DIR
@@ -49,9 +49,9 @@ def hook_cmds(group):
     return [h for h in group.get("hooks", []) if isinstance(h, dict)]
 
 
-def strip_hooks(d, pred):
-    """SessionEnd 에서 pred(command)가 참인 훅만 제거. 제거 개수 반환."""
-    groups = d.get("hooks", {}).get("SessionEnd", [])
+def strip_hooks(d, pred, event="SessionEnd"):
+    """event 에서 pred(command)가 참인 훅만 제거. 제거 개수 반환."""
+    groups = d.get("hooks", {}).get(event, [])
     removed, out = 0, []
     for g in groups:
         keep = [h for h in g.get("hooks", []) if not (isinstance(h, dict) and pred(h.get("command", "")))]
@@ -61,18 +61,22 @@ def strip_hooks(d, pred):
         elif not g.get("hooks"):
             out.append(g)  # 원래 비어 있던 그룹은 건드리지 않는다
     if removed:
-        d["hooks"]["SessionEnd"] = out
+        d["hooks"][event] = out
     return removed
 
 
 def cmd_hook_add(a):
     d, ind, nl = load_json(a.settings)
-    before = json.dumps(d, sort_keys=True)
-    strip_hooks(d, lambda c: c == a.command)
-    d.setdefault("hooks", {}).setdefault("SessionEnd", []).append({"hooks": [{"type": "command", "command": a.command}]})
-    if json.dumps(d, sort_keys=True) == before:
-        print("  SessionEnd 훅: 이미 등록됨(변경 없음)"); return
-    print(f"  SessionEnd 훅 등록: {a.command}")
+    ev = a.event or "SessionEnd"
+    # 멱등 기준 = 이벤트 + 명령. matcher 가 다르면 기존 항목을 새 matcher 로 교체한다(두 번째 항목을 만들지 않는다).
+    same = [g for g in d.get("hooks", {}).get(ev, []) if isinstance(g, dict) and any(h.get("command") == a.command for h in hook_cmds(g))]
+    if same and all(g.get("matcher") == a.matcher for g in same) and len(same) == 1 and len(hook_cmds(same[0])) == 1:
+        print(f"  {ev} 훅: 이미 등록됨(변경 없음)"); return
+    if same: strip_hooks(d, lambda c: c == a.command, ev)
+    grp = {"hooks": [{"type": "command", "command": a.command}]}
+    if a.matcher: grp = {"matcher": a.matcher, **grp}
+    d.setdefault("hooks", {}).setdefault(ev, []).append(grp)
+    print(f"  {ev} 훅 등록: {a.command}")
     if a.dry_run: return
     backup(a.settings, a.backup_dir, False)
     atomic_write(a.settings, dump_json(d, ind, nl))
@@ -80,10 +84,11 @@ def cmd_hook_add(a):
 
 def cmd_hook_remove(a):
     d, ind, nl = load_json(a.settings)
-    n = strip_hooks(d, lambda c: a.match in c)
+    ev = a.event or "SessionEnd"
+    n = strip_hooks(d, lambda c: a.match in c, ev)
     if not n:
-        print("  SessionEnd 훅: 해당 항목 없음"); return
-    print(f"  SessionEnd 훅 {n}개 제거")
+        print(f"  {ev} 훅: 해당 항목 없음"); return
+    print(f"  {ev} 훅 {n}개 제거")
     if a.dry_run: return
     backup(a.settings, a.backup_dir, False)
     atomic_write(a.settings, dump_json(d, ind, nl))
@@ -186,7 +191,7 @@ def cmd_dock_check(a):
 
 p = argparse.ArgumentParser()
 p.add_argument("cmd")
-for o in ("settings", "command", "match", "file", "block-file", "dir", "backup-dir"):
+for o in ("settings", "command", "match", "file", "block-file", "dir", "backup-dir", "event", "matcher"):
     p.add_argument("--" + o)
 p.add_argument("--dry-run", action="store_true")
 a = p.parse_args()
