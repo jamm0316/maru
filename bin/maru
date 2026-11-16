@@ -1,6 +1,6 @@
 #!/bin/bash
 # maru 런처. 아무것도 설치·수정하지 않는다(PATH 등록 없음). bash 3.2 호환.
-# 사용: maru [ui|app|suggest [번호]|todo [번호]|status|log [reflect|dream]|hist ...|doctor|help]
+# 사용: maru [ui|app|suggest [번호]|todo [번호]|squad ...|status|log [reflect|dream]|hist ...|doctor|help]
 set -u
 
 # 자기 자신의 실제 경로(심볼릭 링크 해석)로 저장소 위치를 계산한다.
@@ -25,11 +25,16 @@ need_env() {
 usage() {
   cat <<'USAGE'
 maru — 개인 에이전트 마루 런처
-  maru                 저장소에서 claude 실행
+  maru                 저장소에서 claude 실행(스쿼드가 있으면 --agents 로 함께)
   maru ui              상황판(TUI): 1상태 2기억 3로그 4제안 5추천
   maru app             데스크톱 앱 실행(/Applications/Maru.app 이 있으면 그것, 없으면 app 폴더에서 npm start)
   maru suggest [번호]  추천 요청 목록 보기 / 그 번호의 줄을 클립보드에 복사(전송 안 함)
   maru todo [번호]     오늘 할 일 목록(태그별) 보기 / 그 번호의 프롬프트를 클립보드에 복사(없으면 직접 할 일)
+  maru squad [list]    스쿼드 목록(내장+개인, 제외된 것과 이유)
+  maru squad check <폴더>                         제안 폴더 검토(통과/거부 사유, 위험 신호)
+  maru squad install <폴더> [--replace] [--ack-warnings]   검증 통과 시 data/squads/ 로 설치(위험 신호가 있으면 --ack-warnings 필요)
+  maru squad remove <slug>                        개인 스쿼드를 data/squads-trash/ 로 옮김(영구 삭제 아님)
+  maru squad remove --proposal <slug>             제안함(data/squad-proposals/)의 제안을 data/squads-trash/ 로 옮김(영구 삭제 아님)
   maru status          maru-status.sh 출력 (--json 등 옵션 전달)
   maru log [reflect|dream]   로그 마지막 줄 보기(기본 reflect)
   maru hist ...        기억 변경 이력(읽기 전용: log show diff status ls-files)
@@ -116,7 +121,13 @@ doctor() {
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case "$cmd" in
-  "") cd "$MARU_HOME" && exec claude ;;
+  "") cd "$MARU_HOME" && exec "$MARU_HOME/scripts/maru-claude.sh" ;;
+  squad)
+    need_env
+    export MARU_DATA
+    sub=${1:-list}; [ $# -gt 0 ] && shift
+    case "$sub" in list|check|install|remove) ;; *) echo "squad: list | check <폴더> | install <폴더> [--replace] [--ack-warnings] | remove [--proposal] <slug>" >&2; exit 2 ;; esac
+    exec python3 -I "$MARU_HOME/scripts/squads.py" "$sub" "$@" ;;
   ui)
     need_env
     exec python3 "$MARU_HOME/scripts/maru_ui.py" "$@" ;;

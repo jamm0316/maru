@@ -67,7 +67,7 @@ echo "  MARU_HOME=$MARU_HOME"; echo "  MARU_DATA=$MARU_DATA"; echo "  기억 폴
 # 템플릿이 있고 비어 있지 않은지, 렌더가 되는지는 launchd 단계에서 임시 파일로 검증한다(기존 파일은 그 뒤에야 건드린다).
 
 say "데이터·기억 폴더 생성"
-run mkdir -p "$MARU_DATA"/{state,logs,digests,skill-proposals,backups} "$MEM" "$MARU_WORK" || die "폴더 생성 실패"
+run mkdir -p "$MARU_DATA"/{state,logs,digests,skill-proposals,squad-proposals,squads,backups} "$MEM" "$MARU_WORK" || die "폴더 생성 실패"
 echo "  data/ 와 기억 폴더 준비됨"
 
 say "개인 변경 이력 저장소(hist) 준비"
