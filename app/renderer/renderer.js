@@ -81,9 +81,10 @@
     term.options.disableStdin = modalOpen();
     term.attachCustomKeyEventHandler((e) => {
       if (modalOpen()) return false;
-      const seq = Lib.keyToSeq(e);
-      if (seq === null) return !Lib.isNewlineKey(e); // Shift+Enter 의 keypress 가 Enter(전송)로 새지 않게 삼킨다
-      if (e.type === 'keydown') window.maru.ptyWrite(id, seq);
+      const alt = term.buffer.active.type === 'alternate'; // vim 등 alternate screen 에서는 Cmd+←/→ 를 그대로 둔다
+      const seq = Lib.keyToSeq(e, alt);
+      if (seq === null) return !(Lib.isNewlineKey(e) || Lib.isLineNavKey(e, alt)); // Shift+Enter 의 keypress 가 Enter(전송)로 새지 않게, Cmd+←/→ 의 keypress·keyup 도 같이 삼킨다
+      if (e.type === 'keydown') { e.preventDefault(); window.maru.ptyWrite(id, seq); }
       return false;
     });
     term.onData((d) => { if (!modalOpen()) window.maru.ptyWrite(id, d); });
@@ -269,6 +270,31 @@
   }
 
   let lastPanels = null;
+  // 파티: 활성 작업 공간의 서브에이전트가 돌면 그 줄이 움직인다. 파티에 없는 종류는 임시 줄. 마루 줄은 세션이 busy 일 때.
+  // (subs 는 main 이 이미 검증했지만 형식을 다시 확인한다)
+  const SUB_TYPE = /^[A-Za-z0-9_:.-]{1,64}$/;
+  function renderParty() {
+    const p = lastPanels; const party = $('party');
+    if (!p || !Array.isArray(p.party)) return;
+    const subs = new Map();
+    for (const s of Array.isArray(p.subs) ? p.subs : []) if (s && typeof s.type === 'string' && SUB_TYPE.test(s.type) && Number.isInteger(s.count) && s.count >= 1 && s.count <= 32) subs.set(s.type, s.count);
+    const known = new Set(p.party.map((m) => m.name));
+    const rows = p.party.map((m) => ({ m, n: m.lead ? (lastAgent === 'busy' ? 1 : 0) : (subs.get(m.name) || 0) }));
+    for (const [type, count] of subs) if (!known.has(type)) rows.push({ m: { name: type, roleKey: null, model: '' }, n: count });
+    const sig = JSON.stringify([rows, lang]);
+    if (sig === partySig) return;
+    partySig = sig; party.replaceChildren();
+    for (const { m, n } of rows) {
+      const row = el('div', 'party-row' + (m.lead ? ' lead' : '') + (n ? ' working' : ''));
+      const l = el('span', 'pl'); l.append(el('span', 'pd'), el('b', '', m.name || T('app.title')));
+      if (m.roleKey) l.append(document.createTextNode(' ' + T('role.' + m.roleKey)));
+      const r = el('span', 'pr');
+      if (n) r.append(el('span', 'pw', n > 1 && !m.lead ? T('party.working.n', { n }) : T('party.working')));
+      if (m.model) r.append(el('span', 'm', m.model));
+      row.append(l, r); party.append(row);
+    }
+  }
+  let partySig = '';
   function renderStatic(p) {
     lastPanels = p;
     $('root-missing').hidden = !p.rootMissing;
@@ -281,12 +307,7 @@
     $('upd-dot').hidden = !(p.updateAvailable || updNotice);
     $('upgrade-btn').title = p.updateAvailable ? T('user.upgrade.aria') : '';
 
-    const party = $('party'); party.replaceChildren();
-    for (const m of p.party) {
-      const row = el('div', 'party-row' + (m.lead ? ' lead' : ''));
-      const l = el('span'); l.append(el('b', '', m.name || T('app.title')), document.createTextNode(' ' + T('role.' + m.roleKey)));
-      row.append(l, el('span', 'm', m.model)); party.append(row);
-    }
+    renderParty();
 
     // 일정(opt-in, 읽기 전용): 오늘 → 내일
     const cg = $('cal-group'); cg.replaceChildren();
@@ -560,7 +581,7 @@
 
   let lastAgent = 'none';
   function renderBusy(agent) {
-    lastAgent = agent;
+    lastAgent = agent; renderParty();
     const core = document.querySelector('.core');
     const k = stateKey(agent);
     core.classList.toggle('idle', agent !== 'busy' && agent !== 'waiting');
@@ -903,6 +924,35 @@
   }
   $('upgrade-btn').addEventListener('click', () => { if (updOpen) closeUpdate(true); else openUpdate(); });
   window.maru.onUpdateProgress((p) => { updPct = p; if (updOpen && updPhase === 'downloading') renderUpdate(); });
+
+  // ---- 파일 끌어다 놓기: 터미널 영역에만. 경로는 main 이 검증해 bracketed paste 로 넣는다(Enter 없음) ----
+  const dropZone = document.querySelector('.term-wrap');
+  const hasFiles = (e) => !!e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0;
+  // 창 어디서든 파일 drop 이 페이지 이동을 일으키지 않게(터미널 밖은 무시). 텍스트 drag 는 건드리지 않는다.
+  window.addEventListener('dragover', (e) => { if (hasFiles(e)) { e.preventDefault(); if (!dropZone.contains(e.target)) e.dataTransfer.dropEffect = 'none'; } });
+  window.addEventListener('drop', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  const canDrop = () => !!activeId && !modalOpen() && !detailOpen;
+  dropZone.addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    const ok = canDrop();
+    e.dataTransfer.dropEffect = ok ? 'copy' : 'none';
+    dropZone.classList.toggle('drop', ok);
+  });
+  dropZone.addEventListener('dragleave', (e) => { if (!e.relatedTarget || !dropZone.contains(e.relatedTarget)) dropZone.classList.remove('drop'); });
+  dropZone.addEventListener('drop', async (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    dropZone.classList.remove('drop');
+    const files = Array.prototype.slice.call(e.dataTransfer.files || []);
+    if (!files.length) return;
+    if (!canDrop()) { note(T('drop.busy-ui')); return; }
+    let res = null;
+    try { res = await window.maru.dropFiles(activeId, files); } catch (x) { /* 무시 */ }
+    if (!res || !res.ok) note(T(Lib.dropNoticeKey(res && res.reason)));
+    focusTerm();
+  });
+  document.addEventListener('dragend', () => dropZone.classList.remove('drop'));
 
   // ---- 전역 키·바깥 클릭 ----
   document.addEventListener('keydown', (e) => {

@@ -104,6 +104,123 @@ t('keyToSeq 단축키', () => {
   assert.strictEqual(L.isNewlineKey({ type: 'keypress', key: 'Enter' }), false);
   assert.strictEqual(L.isNewlineKey({ type: 'keydown', key: 'Enter', shiftKey: true, isComposing: true }), false);
 });
+t('keyToSeq Cmd+←/→: 줄 맨 앞/끝', () => {
+  const k = (key, o) => L.keyToSeq({ type: 'keydown', key, ...o });
+  assert.strictEqual(k('ArrowLeft', { metaKey: true }), '\x01');
+  assert.strictEqual(k('ArrowRight', { metaKey: true }), '\x05');
+  assert.strictEqual(k('ArrowLeft', {}), null);
+  for (const m of ['shiftKey', 'altKey', 'ctrlKey']) for (const key of ['ArrowLeft', 'ArrowRight']) assert.strictEqual(k(key, { metaKey: true, [m]: true }), null, m + key);
+  assert.strictEqual(k('ArrowLeft', { metaKey: true, isComposing: true }), null);
+  assert.strictEqual(k('ArrowRight', { metaKey: true, keyCode: 229 }), null);
+  assert.strictEqual(k('ArrowUp', { metaKey: true }), null);
+  assert.strictEqual(L.keyToSeq({ type: 'keyup', key: 'ArrowLeft', metaKey: true }), null);
+  // alternate screen(vim 등)에서는 변환하지 않는다
+  assert.strictEqual(L.keyToSeq({ type: 'keydown', key: 'ArrowLeft', metaKey: true }, true), null);
+  assert.strictEqual(L.keyToSeq({ type: 'keydown', key: 'ArrowRight', metaKey: true }, false), '\x05');
+  assert.strictEqual(L.isLineNavKey({ type: 'keyup', key: 'ArrowRight', metaKey: true }, true), false);
+  assert.strictEqual(L.keyToSeq({ type: 'keydown', key: 'Backspace', metaKey: true }, true), '\x15'); // 다른 단축키는 그대로
+  // keypress·keyup 은 렌더러 핸들러가 isLineNavKey 로 삼킨다
+  assert.strictEqual(L.isLineNavKey({ type: 'keyup', key: 'ArrowRight', metaKey: true }), true);
+  assert.strictEqual(L.isLineNavKey({ type: 'keyup', key: 'ArrowRight', metaKey: true, altKey: true }), false);
+  assert.strictEqual(L.isLineNavKey({ type: 'keyup', key: 'ArrowRight' }), false);
+});
+t('파일 드롭: 경로 검증·인용·조립', () => {
+  const paste = (a) => L.buildDropPaste(a);
+  assert.strictEqual(paste(['/tmp/a b.png']), '\x1b[200~/tmp/a\\ b.png \x1b[201~'); // 백슬래시 탈출 + 뒤 공백, Enter 없음
+  assert.strictEqual(paste(['/tmp/한글 파일.png', '/x/y']), '\x1b[200~/tmp/한글\\ 파일.png /x/y \x1b[201~');
+  assert.strictEqual(paste(["/tmp/it's a 사진.png"]), "\x1b[200~/tmp/it\\'s\\ a\\ 사진.png \x1b[201~");
+  assert.strictEqual(L.shellQuote('/a/$(rm -rf ~)/`id`'), '/a/\\$\\(rm\\ -rf\\ \\~\\)/\\`id\\`'); // 치환 문자는 글자로 남는다
+  assert.strictEqual(L.shellQuote('/a-b_c.d+e,f:g@h%i=j/ABC123'), '/a-b_c.d+e,f:g@h%i=j/ABC123'); // 안전한 문자는 그대로
+  // 셸에 그대로 넣어도 한 단어로 읽혀 원래 경로와 같은지(printf 만 실행, 임시 폴더에서)
+  {
+    const cp = require('child_process'); const os = require('os'); const nodefs = require('fs'); const nodepath = require('path');
+    const tdir = nodefs.mkdtempSync(nodepath.join(os.tmpdir(), 'maru-drop-'));
+    try {
+      const names = ["/t/a b.png", "/t/it's a 사진.png", '/t/$(echo PWNED)`echo X`.png', '/t/q"d\\b.png', '/t/[a]{b}&;|<>*?!#~^.png', '/t/한글 😀️ 👨‍👩.png', '/t/  lead  trail  ', '/t/a=b,c:d@e%f+g'];
+      for (const n of names) {
+        const out = cp.execFileSync('sh', ['-c', "printf '%s' " + L.shellQuote(n)], { cwd: tdir, encoding: 'utf8' });
+        assert.strictEqual(out, n, n);
+      }
+      const multi = L.buildDropPaste(names).slice('\x1b[200~'.length, -'\x1b[201~'.length).trim(); // 여러 개는 단어 N개
+      const outs = cp.execFileSync('sh', ['-c', 'for a in ' + multi + '; do printf "%s\\0" "$a"; done'], { cwd: tdir, encoding: 'utf8' }).split('\0').slice(0, -1);
+      assert.deepStrictEqual(outs, names);
+      assert.deepStrictEqual(nodefs.readdirSync(tdir), []); // 아무 것도 만들지·실행하지 않았다
+    } finally { nodefs.rmSync(tdir, { recursive: true, force: true }); }
+  }
+  assert.ok(paste(['/a/$(x)/`y`']).includes('/a/\\$\\(x\\)/\\`y\\`'));
+  assert.ok(!paste(['/a']).includes('\r') && !paste(['/a']).includes('\n'));
+  assert.strictEqual(paste(['/a/b\nc']), null); assert.strictEqual(paste(['/a/b\rc']), null);
+  assert.strictEqual(paste(['/a/\x1b[201~evil']), null); assert.strictEqual(paste(['/a/‮b']), null); assert.strictEqual(paste(['/a/​b']), null);
+  assert.strictEqual(paste(['/a/\u0000b']), null);
+  assert.ok(paste(['/a/😀\uFE0F.png']) && paste(['/a/👨\u200D👩.png']).includes('👨\u200D👩')); // 이모지 이름: 변형 선택자·ZWJ 허용
+  for (const bad of ['\u200B', '\u202E', '\u2060', '\uFEFF', '\u200C', '\u200E', '\u0085', '\uE000']) assert.strictEqual(paste(['/a/' + bad + 'b']), null, bad.charCodeAt(0).toString(16));
+  assert.strictEqual(paste(['relative/path.png']), null); assert.strictEqual(paste(['']), null); assert.strictEqual(paste([42]), null); assert.strictEqual(paste('/a'), null);
+  assert.ok(paste(Array.from({ length: 10 }, (_, i) => '/f/' + i)));
+  assert.strictEqual(paste(Array.from({ length: 11 }, (_, i) => '/f/' + i)), null);
+  assert.strictEqual(paste([]), null);
+  assert.ok(paste(['/' + 'a'.repeat(1023)])); assert.strictEqual(paste(['/' + 'a'.repeat(1024)]), null); // 1024자 / 1025자
+  assert.strictEqual(paste(['/ok', '/bad\n']), null); // 하나라도 틀리면 전부 거부
+  for (const r of ['invalid', 'inactive', 'busy-ui', 'not-ready', 'no-term', 'too-many', 'missing']) for (const lg of I.LANGS) assert.ok(I.STR[lg]['drop.' + r], lg + r);
+  assert.strictEqual(L.dropNoticeKey('zzz'), 'drop.invalid');
+});
+t('모델 표시: 짧은 이름·transcript 파싱·경로 검증', () => {
+  assert.strictEqual(L.shortModelName('claude-opus-4-1-20250805'), 'opus');
+  assert.strictEqual(L.shortModelName('claude-sonnet-5-5'), 'sonnet');
+  assert.strictEqual(L.shortModelName('claude-haiku-4-5'), 'haiku');
+  assert.strictEqual(L.shortModelName('Fable-2'), 'fable'); assert.strictEqual(L.shortModelName('mythos'), 'mythos');
+  assert.strictEqual(L.shortModelName('x'.repeat(40)), 'x'.repeat(24));
+  assert.strictEqual(L.shortModelName(''), null); assert.strictEqual(L.shortModelName(null), null);
+  assert.ok(L.validModelId('claude-opus-4[1m]') && !L.validModelId('a b') && !L.validModelId('x'.repeat(65)) && !L.validModelId('a"b') && !L.validModelId(''));
+  assert.ok(L.validTranscriptPath('/h/.claude/projects/p/s.jsonl'));
+  for (const bad of ['rel/s.jsonl', '/a/s.json', '/a/\ns.jsonl', '/a/\u0007s.jsonl', '/' + 'a'.repeat(1020) + '.jsonl', 5, '']) assert.strictEqual(L.validTranscriptPath(bad), false, String(bad));
+  assert.ok(L.pathInside('/h/.claude/projects/p/s.jsonl', '/h/.claude/projects'));
+  assert.ok(!L.pathInside('/h/.claude/projectsX/s.jsonl', '/h/.claude/projects') && !L.pathInside('/etc/passwd', '/h/.claude/projects') && !L.pathInside('/h/.claude/projects', '/h/.claude/projects') && !L.pathInside('/a', '/'));
+  const line = (o) => JSON.stringify(o);
+  const tr = [line({ type: 'user', message: { role: 'user', content: 'hi' } }), line({ type: 'assistant', message: { role: 'assistant', model: 'claude-opus-4-1', content: [] } }),
+    line({ type: 'assistant', message: { role: 'assistant', model: '<synthetic>' } }), line({ type: 'user', message: { model: 'claude-haiku-4-5', role: 'user' } }), 'not json {"model"'].join('\n');
+  assert.strictEqual(L.parseTranscriptModel(tr), 'claude-opus-4-1'); // 마지막 유효 assistant, synthetic·user·깨진 줄 제외
+  assert.strictEqual(L.parseTranscriptModel(line({ type: 'assistant', message: { model: '<synthetic>' } })), null);
+  assert.strictEqual(L.parseTranscriptModel('{"type":"assistant","message":{"model":"claude-sonn', true), null); // 잘린 첫 줄은 버린다
+  assert.strictEqual(L.parseTranscriptModel('xx\n' + line({ type: 'assistant', message: { model: 'claude-sonnet-5-5' } }), true), 'claude-sonnet-5-5');
+  assert.strictEqual(L.parseTranscriptModel(line({ type: 'assistant', message: { model: 'bad model!' } })), null);
+  assert.strictEqual(L.parseTranscriptModel(7), null);
+  // 상태 기록: transcript·model 은 검증 통과분만
+  const r = L.parseAgentRecord('{"state":"idle","at":"2026-01-01T00:00:00Z","transcript_path":"/a/b.jsonl","model":"claude-opus-4-1"}');
+  assert.strictEqual(r.transcript, '/a/b.jsonl'); assert.strictEqual(r.model, 'claude-opus-4-1');
+  const r2 = L.parseAgentRecord('{"state":"idle","transcript_path":"../b.jsonl","model":"a b"}');
+  assert.ok(!('transcript' in r2) && !('model' in r2));
+});
+t('파티: frontmatter 파싱·구성·서브에이전트 요약', () => {
+  assert.deepStrictEqual(L.parseAgentFile('---\nname: scout\ndescription: x: y\nmodel: haiku\n---\n본문'), { name: 'scout', model: 'haiku' });
+  assert.deepStrictEqual(L.parseAgentFile('---\r\nname: "w"\r\nmodel: \'sonnet\'\r\n---\r\n'), { name: 'w', model: 'sonnet' });
+  for (const bad of ['no front', '---\nname: a b\nmodel: x\n---', '---\nname: ok\nmodel: bad model\n---', '---\nname: ../x\nmodel: x\n---', null]) assert.strictEqual(L.parseAgentFile(bad), null, String(bad));
+  assert.deepStrictEqual(L.parseAgentFile('---\nname: ok\n---'), { name: 'ok', model: 'inherit' }); // model 없음 = 마루와 같은 값
+  assert.deepStrictEqual(L.parseAgentFile('---\nname: ok\nmodel: inherit\n---'), { name: 'ok', model: 'inherit' });
+  assert.deepStrictEqual(L.buildAgentParty([{ name: 'ok', model: 'inherit' }]), [{ name: 'ok', roleKey: null, model: 'inherit' }]);
+  assert.deepStrictEqual(L.buildAgentParty([]).map((a) => a.name + ':' + a.model), ['scout:haiku', 'worker:sonnet', 'expert:opus']);
+  assert.deepStrictEqual(L.buildAgentParty([{ name: 'scout', model: 'haiku' }, { name: 'scout', model: 'opus' }, { name: 'custom', model: 'claude-opus-4-1' }]),
+    [{ name: 'scout', roleKey: 'scout', model: 'haiku' }, { name: 'custom', roleKey: null, model: 'opus' }]);
+  assert.strictEqual(L.buildAgentParty(Array.from({ length: 20 }, (_, i) => ({ name: 'a' + i, model: 'm' }))).length, 12);
+  assert.deepStrictEqual(L.summarizeSubs(['worker', 'Explore', 'worker', 'bad type', '']), [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }]);
+  assert.strictEqual(L.parseSubType('general-purpose\n'), 'general-purpose'); assert.strictEqual(L.parseSubType('a b'), null); assert.strictEqual(L.parseSubType('x'.repeat(300)), null);
+  assert.ok(L.validSubFileName('agent_1-a') && !L.validSubFileName('../a') && !L.validSubFileName('.hidden') && !L.validSubFileName(''));
+  for (const k of ['party.working', 'party.working.n']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + k);
+});
+t('드롭·파티·모델 정적 검사: 좁은 preload, sender 검사, textContent', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, 'main.js'), 'utf8'); const pre = require('fs').readFileSync(require('path').join(__dirname, 'preload.js'), 'utf8');
+  const rd = require('fs').readFileSync(require('path').join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  assert.ok(/webUtils\.getPathForFile/.test(pre) && !/readFile|createReadStream/.test(pre));
+  const h = main.split("ipcMain.handle('files:drop'")[1].split('\n});')[0];
+  assert.ok(/wsFrom\(e, id\)/.test(h) && /id !== activeId|w\.id !== activeId/.test(h) && /lstatSync/.test(h) && !/realpath/.test(h) && /w\.bracketed/.test(h) && /buildDropPaste/.test(h));
+  assert.ok(!/\\r|\\n/.test(h.split('buildDropPaste')[1] || ''), 'Enter 를 보내지 않는다');
+  assert.ok(/pathInside\(real, fs\.realpathSync\(path\.join\(claudeDir\(\), 'projects'\)\)\)/.test(main) && /TRANSCRIPT_TAIL = 256 \* 1024/.test(main));
+  assert.ok(/TEST_UI = !app\.isPackaged && \[[^\]]*'party'/.test(main));
+  assert.ok(!/innerHTML/.test(rd));
+  assert.ok(/buffer\.active\.type === 'alternate'/.test(rd));
+  assert.ok(/w\.lastTranscript = rec\.transcript/.test(main) && /w\.lastModel = id/.test(main) && /w\.lastTranscript = null; w\.lastModel = null/.test(main)); // 세션이 다시 시작되면 비움
+  assert.ok(/SUBS_SCAN_MAX = 512/.test(main) && /types\.slice\(0, SUBS_MAX\)/.test(main));
+  assert.ok(/catch \{ \/\* 이 항목만 건너뜀 \*\/ \}/.test(main));
+});
 t('resolveRoot 순서와 검증', () => {
   const good = new Set(['/e/x', '/cfg/y', '/app', '/h/maru']);
   const mk = (o) => L.resolveRoot({ env: {}, home: '/h', isPackaged: false, appDir: '/app/app', io: { readConfig: () => null, isRepo: (d) => good.has(d) }, ...o });
@@ -992,7 +1109,7 @@ t('journal·memory 읽기: 기억 폴더가 링크여도 둘 다 읽지 않는�
 });
 t('화면 시험 모드·상세와 터미널 전환 정적 검사', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
-  assert.ok(/!app\.isPackaged && \['menu', 'settings', 'update', 'project'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main)); // 패키징 빌드에서는 무시
+  assert.ok(/!app\.isPackaged && \['menu', 'settings', 'update', 'project', 'party'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main)); // 패키징 빌드에서는 무시
   assert.ok(/uiOpen === 'project'\) openFirstProject/.test(rd) && /x\.kind === 'project'\) \|\| all\[0\]/.test(rd));
   assert.ok(/closeDetail\(false\); showActive\(true\)/.test(rd)); // 작업 공간이 바뀌면 상세를 닫고 나서 그린다
   assert.ok(/function showActive\(focus\) \{\s*if \(detailOpen\) return;/.test(rd)); // 숨은 컨테이너에서 xterm open 금지

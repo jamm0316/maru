@@ -125,9 +125,15 @@ function isNewlineKey(e) {
   return !!e && e.key === 'Enter' && !!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
 }
 
-function keyToSeq(e) {
+// Cmd+←/→(다른 보조키 없음): 줄 맨 앞(Ctrl+A) / 맨 끝(Ctrl+E). 조합 중, 그리고 alternate screen(vim 등; altScreen=true)에서는 건드리지 않는다
+function isLineNavKey(e, altScreen) {
+  return !altScreen && !!e && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !!e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
+}
+
+function keyToSeq(e, altScreen) {
   if (!e || e.type !== 'keydown') return null;
   if (e.isComposing || e.keyCode === 229) return null;
+  if (isLineNavKey(e, altScreen)) return e.key === 'ArrowLeft' ? '\x01' : '\x05';
   // Shift+Enter: 줄바꿈(ESC+CR. Claude Code 가 Option+Enter 로 받는 입력과 같다). 전송하지 않는다
   if (e.key === 'Enter') return isNewlineKey(e) ? '\x1b\r' : null;
   if (e.key !== 'Backspace') return null;
@@ -135,6 +141,100 @@ function keyToSeq(e) {
   if (e.metaKey && !e.altKey) return '\x15'; // Cmd+Backspace: 줄 앞부분 삭제(Ctrl+U)
   if (e.altKey && !e.metaKey) return '\x17'; // Option+Backspace: 앞 단어 삭제(Ctrl+W)
   return null;
+}
+
+// ---- 파일 끌어다 놓기: 절대 경로 검증·인용·bracketed paste 조립 ----
+const DROP_MAX = 10;
+const DROP_PATH_MAX = 1024;
+function validDropPath(p) {
+  return typeof p === 'string' && p.length > 0 && p.startsWith('/') && [...p].length <= DROP_PATH_MAX && !hasBadChars(p.replace(/[\uFE0F\u200D]/g, '')); // 이모지 파일 이름을 위해 변형 선택자·ZWJ 만 허용
+}
+// macOS 터미널의 드롭처럼 백슬래시 탈출: ASCII 영숫자와 / . _ - + , : @ % = 및 비ASCII(한글 등)는 그대로,
+// 그 밖의 ASCII(공백 ' " \ $ ( ) 백틱 등)는 앞에 \ 를 붙인다. 셸이 한 단어로 읽고, claude 가 이미지 경로로 인식한다
+function shellQuote(p) { return String(p).replace(/[\x00-\x7F]/g, (c) => (/[A-Za-z0-9\/._+,:@%=-]/.test(c) ? c : '\\' + c)); }
+// 경로 배열 -> 붙여넣을 문자열(각 경로 인용 + 공백 + 끝 공백 하나, Enter 없음). 하나라도 틀리거나 0·11개 이상이면 null
+function buildDropPaste(paths) {
+  if (!Array.isArray(paths) || paths.length < 1 || paths.length > DROP_MAX || !paths.every(validDropPath)) return null;
+  return '\x1b[200~' + paths.map(shellQuote).join(' ') + ' \x1b[201~';
+}
+// 드롭 거부 사유 -> 문구 키('drop.<사유>')
+const DROP_REASONS = ['invalid', 'inactive', 'busy-ui', 'not-ready', 'no-term', 'too-many', 'missing'];
+function dropNoticeKey(reason) { return 'drop.' + (DROP_REASONS.includes(reason) ? reason : 'invalid'); }
+
+// ---- 서브에이전트·모델 표시 ----
+const MODEL_ID_RE = /^[A-Za-z0-9._:\[\]-]{1,64}$/;
+function validModelId(m) { return typeof m === 'string' && MODEL_ID_RE.test(m); }
+function shortModelName(id) {
+  if (typeof id !== 'string' || !id) return null;
+  const low = id.toLowerCase();
+  for (const w of ['opus', 'sonnet', 'haiku', 'fable', 'mythos']) if (low.includes(w)) return w;
+  return [...id].slice(0, 24).join('');
+}
+// 기록(transcript) 경로: 절대 경로, .jsonl, 제어문자 없음, 1024자 이하
+function validTranscriptPath(p) {
+  return typeof p === 'string' && p.startsWith('/') && p.endsWith('.jsonl') && [...p].length <= 1024 && !/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/.test(p);
+}
+// realFile 이 realBase(예: ~/.claude/projects 의 realpath) 아래에 있는지(문자열 비교; realpath 는 호출 쪽)
+function pathInside(realFile, realBase) {
+  return typeof realFile === 'string' && typeof realBase === 'string' && realBase.length > 1 && realFile.startsWith(realBase.endsWith('/') ? realBase : realBase + '/');
+}
+// transcript 꼬리 텍스트 -> 마지막 assistant 항목의 message.model(없으면 null). <synthetic> 제외
+function parseTranscriptModel(text, truncated = false) {
+  if (typeof text !== 'string') return null;
+  const rows = text.split(/\r?\n/);
+  if (truncated) rows.shift(); // 잘린 첫 줄 버림
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (!r || r.length > 1 << 20 || r.indexOf('"model"') < 0) continue;
+    let o; try { o = JSON.parse(r); } catch { continue; }
+    const m = o && typeof o === 'object' && o.message && typeof o.message === 'object' ? o.message : null;
+    if (!m || (o.type !== 'assistant' && m.role !== 'assistant')) continue;
+    if (validModelId(m.model) && m.model !== '<synthetic>') return m.model;
+  }
+  return null;
+}
+// .claude/agents/*.md frontmatter -> {name, model}|null. 이름·모델 형식이 틀리면 null
+const AGENT_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
+function parseAgentFile(text) {
+  if (typeof text !== 'string') return null;
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  if (!m) return null;
+  const f = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const k = /^(name|model):[ \t]*(.*?)[ \t]*$/.exec(line);
+    if (k) f[k[1]] = k[2].replace(/^(["'])(.*)\1$/, '$2');
+  }
+  if (f.model === undefined || f.model === '') f.model = 'inherit'; // model 없음 = 마루와 같은 모델
+  if (!AGENT_NAME_RE.test(f.name || '') || !validModelId(f.model)) return null;
+  return { name: f.name, model: f.model };
+}
+const PARTY_MAX = 12;
+const PARTY_ROLES = ['scout', 'worker', 'expert'];
+const DEFAULT_AGENTS = [{ name: 'scout', model: 'haiku' }, { name: 'worker', model: 'sonnet' }, { name: 'expert', model: 'opus' }];
+// 읽은 에이전트 목록 -> 파티(마루 제외). 비면 기본 3개. 이름이 겹치면 앞의 것만. 역할 이름은 아는 이름만
+function buildAgentParty(agents) {
+  const seen = new Set(); const out = [];
+  for (const a of Array.isArray(agents) ? agents : []) {
+    if (!a || !AGENT_NAME_RE.test(a.name || '') || !validModelId(a.model) || seen.has(a.name)) continue;
+    seen.add(a.name); out.push({ name: a.name, roleKey: PARTY_ROLES.includes(a.name) ? a.name : null, model: a.model === 'inherit' ? 'inherit' : shortModelName(a.model) }); // 'inherit' 는 main 이 마루 줄의 모델로 바꾼다
+    if (out.length >= PARTY_MAX) break;
+  }
+  const rank = (x) => { const i = PARTY_ROLES.indexOf(x.name); return i < 0 ? PARTY_ROLES.length : i; };
+  out.sort((x, y) => rank(x) - rank(y)); // 아는 역할(scout, worker, expert)을 앞에, 나머지는 읽은 순서(안정 정렬)
+  return out.length ? out : DEFAULT_AGENTS.map((a) => ({ name: a.name, roleKey: a.name, model: a.model }));
+}
+// 서브에이전트 종류 목록(파일마다 하나) -> [{type, count}] (처음 나온 순서)
+const SUB_TYPE_RE = /^[A-Za-z0-9_:.-]{1,64}$/;
+function summarizeSubs(types) {
+  const m = new Map();
+  for (const t of Array.isArray(types) ? types : []) if (typeof t === 'string' && SUB_TYPE_RE.test(t)) m.set(t, (m.get(t) || 0) + 1);
+  return [...m].map(([type, count]) => ({ type, count }));
+}
+function validSubFileName(n) { return typeof n === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(n); }
+function parseSubType(text) {
+  if (typeof text !== 'string' || text.length > 256) return null;
+  const t = text.split(/\r?\n/)[0];
+  return SUB_TYPE_RE.test(t) ? t : null;
 }
 
 // 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru
@@ -180,9 +280,12 @@ function parseAgentState(text) {
 function parseAgentRecord(text) {
   const state = parseAgentState(text);
   if (!state) return null;
-  let atMs = NaN;
-  try { atMs = Date.parse(JSON.parse(text).at); } catch { /* 무시 */ }
-  return { state, atMs };
+  let atMs = NaN; let o = null;
+  try { o = JSON.parse(text); atMs = Date.parse(o.at); } catch { /* 무시 */ }
+  const rec = { state, atMs };
+  if (o && validTranscriptPath(o.transcript_path)) rec.transcript = o.transcript_path; // 앱 밖에서 쓴 값일 수 있어 다시 검증
+  if (o && validModelId(o.model)) rec.model = o.model;
+  return rec;
 }
 
 // busy 인데 기록이 오래되고(staleMs) pty 출력도 그동안 없으면 idle 로 낮춘다(Esc 중단 등 Stop 훅이 없는 경우)
@@ -1060,6 +1163,8 @@ function parseCalendarOutput(text, now = new Date()) {
 
 const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
+  DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
+  validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
   hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, isNewlineKey, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,

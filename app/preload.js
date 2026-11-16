@@ -1,5 +1,5 @@
 'use strict';
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('maru', {
   // pty·작업 공간: 모든 채널이 작업 공간 id(문자열)를 싣는다. 경로는 받지 않는다(폴더 선택은 main 의 네이티브 창).
@@ -16,6 +16,18 @@ contextBridge.exposeInMainWorld('maru', {
   closeWorkspace: (id) => ipcRenderer.invoke('ws:close', String(id)),
   onCloseRequest: (cb) => { ipcRenderer.on('ui:close-request', () => cb()); },
   onWorkspacesChanged: (cb) => { ipcRenderer.on('ws:changed', () => cb()); },
+  // 파일 끌어다 놓기: sandbox 렌더러에는 File.path 가 없어 webUtils 로 경로 문자열만 얻어 보낸다(내용은 읽지 않는다)
+  dropFiles: (id, files) => {
+    const list = Array.prototype.slice.call(files || [], 0, 11); // 11개 이상이면 main 이 too-many 로 거부
+    const paths = [];
+    for (const f of list) {
+      let p = '';
+      try { p = webUtils.getPathForFile(f); } catch (x) { p = ''; }
+      if (typeof p !== 'string' || !p) return Promise.resolve({ ok: false, reason: 'missing' });
+      paths.push(p);
+    }
+    return ipcRenderer.invoke('files:drop', String(id), paths);
+  },
   getPanels: () => ipcRenderer.invoke('panels:get'),
   fillQuest: (id, index, shown) => ipcRenderer.invoke('quest:fill', String(id), index | 0, String(shown)),
   // 프로젝트 추적: 키·상태·짧은 이름 문자열만 싣는다(경로·문장은 받지 않는다). main 이 자기 목록과 대조한다.

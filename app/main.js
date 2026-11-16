@@ -33,15 +33,32 @@ const ROOT = found ? found.root : null; // null 이면 저장소를 못 찾은 �
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
-const PARTY = [
-  { name: null, roleKey: 'lead', model: 'sonnet', lead: true }, // name null = 앱 이름(i18n app.title)
-  { name: 'scout', roleKey: 'scout', model: 'haiku' },
-  { name: 'worker', roleKey: 'worker', model: 'sonnet' },
-  { name: 'expert', roleKey: 'expert', model: 'opus' },
-];
+// 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
+const AGENT_FILE_MAX = 8192;
+function readAgentParty() {
+  if (!ROOT) return L.buildAgentParty([]);
+  const dir = path.join(ROOT, '.claude', 'agents');
+  const list = [];
+  try {
+    if (fs.lstatSync(dir).isSymbolicLink()) return L.buildAgentParty([]);
+    for (const name of fs.readdirSync(dir).filter((n) => /^[A-Za-z0-9_-]{1,40}\.md$/.test(n)).sort()) {
+      if (list.length >= L.PARTY_MAX) break;
+      const r = readRegular(path.join(dir, name), AGENT_FILE_MAX, false); // 정규 파일만(심볼릭 링크 거부)
+      const a = r ? L.parseAgentFile(r.text) : null;
+      if (a) list.push(a);
+    }
+  } catch { /* 폴더 없음 */ }
+  return L.buildAgentParty(list);
+}
+const partyCache = L.ttlCache(20000, readAgentParty);
+function projectModel() { // 프로젝트 설정의 model(없으면 null)
+  if (!ROOT) return null;
+  const r = readRegular(path.join(ROOT, '.claude', 'settings.json'), 1 << 20, false);
+  try { const m = r ? JSON.parse(r.text).model : null; return L.validModelId(m) ? m : null; } catch { return null; }
+}
 
 let win = null;
 let tray = null;
@@ -60,7 +77,66 @@ const wsOf = (id) => L.lookupWs(wss, id); // 표에 없는·닫힌·이상한 id
 const wsOrder = () => [...wss.values()];
 const STATE_DIR = () => path.join(ROOT, 'data', 'state', 'app');
 const stateFile = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.json') : null);
-function removeStateFile(w) { const f = stateFile(w); if (f) try { fs.unlinkSync(f); } catch { /* 없음 */ } }
+function removeStateFile(w) { w.lastTranscript = null; w.lastModel = null; const f = stateFile(w); if (f) try { fs.unlinkSync(f); } catch { /* 없음 */ } clearSubs(w); }
+// ---- 서브에이전트: <id>.subs/<agent_id> 파일 하나가 실행 중 하나(내용: agent_type). 정규 파일만, 최대 32개, 30분 넘으면 지운다 ----
+const SUBS_MAX = 32; const SUBS_SCAN_MAX = 512; const SUBS_TTL_MS = 30 * 60 * 1000;
+const subsDir = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.subs') : null);
+function clearSubs(w) {
+  const d = subsDir(w); if (!d) return;
+  try {
+    if (!fs.lstatSync(d).isDirectory()) return; // 심볼릭 링크면 lstat 가 isDirectory false
+    for (const n of fs.readdirSync(d)) { try { const f = path.join(d, n); if (fs.lstatSync(f).isFile()) fs.unlinkSync(f); } catch { /* 무시 */ } }
+    fs.rmdirSync(d);
+  } catch { /* 없음 */ }
+}
+function readSubs(w) {
+  const d = subsDir(w);
+  if (!d || !w.term) return [];
+  const st = wsState(w);
+  if (st !== 'busy' && st !== 'waiting') return []; // 세션이 쉬면 남은 것은 무시
+  const types = [];
+  try {
+    if (!fs.lstatSync(d).isDirectory()) return [];
+    for (const n of fs.readdirSync(d).filter(L.validSubFileName).slice(0, SUBS_SCAN_MAX)) { // 전부 lstat 해 오래된 것을 지운 뒤에 32개로 자른다
+      const f = path.join(d, n);
+      try {
+        const ls = fs.lstatSync(f);
+        if (!ls.isFile()) continue;
+        if (Date.now() - ls.mtimeMs > SUBS_TTL_MS) { fs.unlinkSync(f); continue; }
+        const r = readRegular(f, 256, false);
+        const t = r ? L.parseSubType(r.text) : null;
+        if (t) types.push(t);
+      } catch { /* 무시 */ }
+    }
+  } catch { return []; }
+  return L.summarizeSubs(types.slice(0, SUBS_MAX));
+}
+// ---- 마루(지휘) 모델: 상태 파일의 model -> transcript 마지막 assistant 항목 -> 프로젝트 설정 -> '—' ----
+const TRANSCRIPT_TAIL = 256 * 1024;
+const modelCache = new Map(); // 실제 경로 -> { mtimeMs, size, model }
+function transcriptModel(file) {
+  try {
+    const real = fs.realpathSync(file);
+    if (!L.pathInside(real, fs.realpathSync(path.join(claudeDir(), 'projects'))) || !real.endsWith('.jsonl')) return null;
+    const st = fs.statSync(real);
+    if (!st.isFile()) return null;
+    const c = modelCache.get(real);
+    if (c && c.mtimeMs === st.mtimeMs && c.size === st.size) return c.model;
+    const r = readTail(real, TRANSCRIPT_TAIL); // 일반 파일만(O_NOFOLLOW), 끝 256KB
+    const model = r ? L.parseTranscriptModel(r.text, r.truncated) : null;
+    if (modelCache.size >= 50) modelCache.clear();
+    modelCache.set(real, { mtimeMs: st.mtimeMs, size: st.size, model });
+    return model;
+  } catch { return null; }
+}
+function leadModel(w) {
+  const rec = w ? readAgentState(w) : null;
+  if (w && rec && rec.transcript) w.lastTranscript = rec.transcript; // 레코드에 없으면(훅 입력이 잘린 경우 등) 마지막 경로를 쓴다
+  const tp = rec && rec.transcript ? rec.transcript : (w && w.lastTranscript);
+  const id = (rec && rec.model) || (tp && transcriptModel(tp)) || null;
+  if (w && id) w.lastModel = id; // 한 번도 못 읽었을 때만 프로젝트 설정값
+  return L.shortModelName(id) || L.shortModelName(w && w.lastModel) || L.shortModelName(projectModel()) || '—';
+}
 function readAgentState(w) {
   const f = stateFile(w);
   const r = f ? readRegular(f, 4096, false) : null;
@@ -69,6 +145,7 @@ function readAgentState(w) {
 // busy | idle | waiting | none | pending(시작 전) | exited | unavailable(폴더 없음)
 function wsState(w) {
   if (w.unavailable) return 'unavailable';
+  if (TEST_UI === 'party' && w.term) return 'busy'; // 시험 전용: 화면 확인용
   if (w.term) return L.effectiveAgent(readAgentState(w), Date.now(), w.lastOutputAt);
   return w.exited ? 'exited' : 'pending';
 }
@@ -79,10 +156,16 @@ function cleanOldStateFiles() {
   try {
     if (fs.lstatSync(dir).isSymbolicLink()) return;
     for (const name of fs.readdirSync(dir)) {
-      if (!(name.startsWith('.') || name.endsWith('.json'))) continue;
-      const f = path.join(dir, name);
-      const st = fs.lstatSync(f);
-      if (st.isFile() && Date.now() - st.mtimeMs > 24 * 3600 * 1000) fs.unlinkSync(f);
+      if (!(name.startsWith('.') || name.endsWith('.json') || name.endsWith('.subs'))) continue;
+      try { // 항목마다 따로 감싸 하나가 실패해도 나머지를 계속한다
+        const f = path.join(dir, name);
+        const st = fs.lstatSync(f);
+        if (st.isDirectory() && name.endsWith('.subs') && Date.now() - st.mtimeMs > 24 * 3600 * 1000) { // 오래된 서브에이전트 폴더(안은 일반 파일만)
+          for (const n of fs.readdirSync(f)) { try { const g = path.join(f, n); if (fs.lstatSync(g).isFile()) fs.unlinkSync(g); } catch { /* 무시 */ } }
+          fs.rmdirSync(f); continue;
+        }
+        if (st.isFile() && Date.now() - st.mtimeMs > 24 * 3600 * 1000) fs.unlinkSync(f);
+      } catch { /* 이 항목만 건너뜀 */ }
     }
   } catch { /* 디렉터리 없음 */ }
 }
@@ -180,6 +263,10 @@ async function refresh() {
   } finally { refreshing = false; }
 }
 
+function partyView() {
+  const lead = leadModel(wsOf(activeId));
+  return [{ name: null, roleKey: 'lead', model: lead, lead: true }, ...partyCache.get().map((m) => (m.model === 'inherit' ? { ...m, model: lead } : m))];
+}
 function panels() {
   const st = cache.status || {};
   const lv = L.levelInfo(typeof st.memoryFiles === 'number' ? st.memoryFiles : 0);
@@ -196,7 +283,8 @@ function panels() {
     briefing: cache.briefing,
     battery: cache.battery,
     disk: cache.disk,
-    party: PARTY,
+    party: partyView(), // name null = 앱 이름(i18n app.title)
+    subs: TEST_UI === 'party' ? [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }] : (wsOf(activeId) ? readSubs(wsOf(activeId)) : []),
     calendar: profile && profile.calendar && cal.ok ? cal.events : [], // 메모리에만 둔다(디스크·로그 금지)
     updateAvailable: upd.view.status === 'available',
   };
@@ -779,6 +867,25 @@ function writePrompt(w, raw) {
   w.term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만
   return { ok: true };
 }
+// 파일 끌어다 놓기: 렌더러(preload 의 webUtils)가 준 경로 문자열만 받는다. 활성 작업 공간에만, 파일 내용은 읽지 않는다.
+// 모달·상세 화면은 렌더러가 먼저 막고, main 은 자기 네이티브 창이 열려 있을 때 거부한다.
+ipcMain.handle('files:drop', (e, id, paths) => {
+  const w = wsFrom(e, id);
+  if (!w || !Array.isArray(paths) || paths.length < 1) return { ok: false, reason: 'invalid' };
+  if (paths.length > L.DROP_MAX) return { ok: false, reason: 'too-many' };
+  if (w.id !== activeId) return { ok: false, reason: 'inactive' };
+  if (picking || closing || quitAsking || restarting) return { ok: false, reason: 'busy-ui' };
+  if (!paths.every(L.validDropPath)) return { ok: false, reason: 'invalid' };
+  for (const p of paths) { // lstat: 링크는 따라가지 않고 그대로 허용. 일반 파일·폴더·링크만
+    try { const st = fs.lstatSync(p); if (!(st.isFile() || st.isDirectory() || st.isSymbolicLink())) return { ok: false, reason: 'missing' }; } catch { return { ok: false, reason: 'missing' }; }
+  }
+  if (!w.term) return { ok: false, reason: 'no-term' };
+  if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 셸 프롬프트 등 붙여넣기 모드가 아니면 쓰지 않는다(writePrompt 와 같다)
+  const text = L.buildDropPaste(paths);
+  if (!text) return { ok: false, reason: 'invalid' };
+  w.term.write(text); // Enter 는 보내지 않는다
+  return { ok: true };
+});
 // ---- 프로젝트 IPC: 키는 main 의 요약 목록과 대조하고, 문장·이름·상태는 main 이 가진 값으로 다시 만든다 ----
 ipcMain.handle('projects:detail', (e, key) => {
   if (!fromMain(e)) return null;

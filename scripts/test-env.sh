@@ -227,6 +227,60 @@ if [ -n "$HAVE_REAL" ]; then
   check "dream 템플릿 사전 검증 통과" has "$out" "preflight-ok"
 fi
 
+echo "== (iv) agent-state.sh: 상태 JSON·서브에이전트 파일(복사본으로 임시 data/ 에만 쓴다)"
+AS=$T/asrepo; mkdir -p "$AS/scripts"; cp "$REPO/scripts/agent-state.sh" "$AS/scripts/"; chmod +x "$AS/scripts/agent-state.sh"
+SID=abcd1234-aaaa-bbbb; SD=$AS/data/state/app
+as_run() { local json=$1; shift; printf '%s' "$json" | env -i HOME="$FAKE_HOME" PATH="$BASEPATH" MARU_TOOL_DIRS="${ASDIRS-$T/good}" ${ASENV[@]+"${ASENV[@]}"} "$AS/scripts/agent-state.sh" "$@" >/dev/null 2>&1; echo $?; }
+ASENV=(MARU_APP_SESSION=$SID)
+check "세션 없으면 아무것도 안 함(exit 0)" sh -c '[ "$(printf "{}" | env -i PATH="$1" "$2" busy >/dev/null 2>&1; echo $?)" = 0 ] && [ ! -e "$3/data" ]' _ "$BASEPATH" "$AS/scripts/agent-state.sh" "$AS"
+if [ -n "$HAVE_REAL" ]; then
+  rc=$(as_run '{"transcript_path":"/h/.claude/projects/x/s.jsonl","model":{"id":"claude-opus-4-1"},"prompt":"비밀 내용"}' busy)
+  check "busy: exit 0" [ "$rc" = 0 ]
+  st=$(cat "$SD/$SID.json" 2>/dev/null)
+  check "busy: transcript_path·model 기록, 다른 내용은 저장 안 함" sh -c 'echo "$1" | grep -q "\"transcript_path\":\"/h/.claude/projects/x/s.jsonl\"" && echo "$1" | grep -q "\"model\":\"claude-opus-4-1\"" && ! echo "$1" | grep -q "비밀"' _ "$st"
+  check "상태 JSON 이 유효" "$REAL_PY" -c 'import json,sys;o=json.loads(sys.argv[1]);assert o["state"]=="busy" and "at" in o' "$st"
+  as_run '{"transcript_path":"rel/s.jsonl","model":"bad model"}' idle >/dev/null
+  st=$(cat "$SD/$SID.json")
+  check "검증 실패 값은 생략(상태만)" sh -c 'echo "$1" | grep -q "\"state\":\"idle\"" && ! echo "$1" | grep -q "transcript_path\|model"' _ "$st"
+  as_run '{"transcript_path":"/a/\"q\\b.jsonl"}' waiting >/dev/null
+  check "따옴표·역슬래시가 있는 경로도 유효한 JSON" "$REAL_PY" -c 'import json,sys;json.loads(open(sys.argv[1]).read())' "$SD/$SID.json"
+  # 서브에이전트
+  as_run '{"agent_id":"a1b2","agent_type":"worker","extra":"x"}' sub-start >/dev/null
+  check "sub-start: 파일 생성(내용은 종류 한 줄)" [ "$(cat "$SD/$SID.subs/a1b2" 2>/dev/null)" = worker ]
+  as_run '{"agent_id":"c3","subagent_type":"general-purpose"}' sub-start >/dev/null
+  check "sub-start: subagent_type 도 읽음" [ "$(cat "$SD/$SID.subs/c3" 2>/dev/null)" = general-purpose ]
+  as_run '{"agent_id":"../evil","agent_type":"worker"}' sub-start >/dev/null
+  as_run '{"agent_id":"ok1","agent_type":"bad type!"}' sub-start >/dev/null
+  as_run '{"agent_id":"'"$(printf 'a%.0s' $(seq 65))"'","agent_type":"worker"}' sub-start >/dev/null
+  check "형식이 틀린 id·type 은 만들지 않음" [ "$(ls "$SD/$SID.subs" | tr '\n' ' ')" = "a1b2 c3 " ]
+  as_run '{"agent_id":"a1b2"}' sub-stop >/dev/null
+  check "sub-stop: 해당 파일만 지움" [ ! -e "$SD/$SID.subs/a1b2" ] && [ -e "$SD/$SID.subs/c3" ]
+  check "임시 파일 잔여 없음" [ -z "$(ls -A "$SD/$SID.subs" | grep '^\.')" ]
+  # 정규 파일이 아닌 것이 이미 있으면 건드리지 않는다
+  mkdir -p "$T/target"; echo keep > "$T/target/f"; ln -s "$T/target/f" "$SD/$SID.subs/lnk1"
+  as_run '{"agent_id":"lnk1","agent_type":"worker"}' sub-start >/dev/null
+  check "sub-start: 링크가 있는 자리는 덮지 않음" [ -L "$SD/$SID.subs/lnk1" ] && [ "$(cat "$T/target/f")" = keep ]
+  rm -f "$SD/$SID.subs/lnk1"
+  # Stop(idle) 은 이 세션의 .subs 안 정규 파일을 비운다
+  as_run '{}' idle >/dev/null
+  check "idle: .subs 안 파일을 비움(폴더·상태 JSON 은 유지)" [ -z "$(ls -A "$SD/$SID.subs")" ] && [ -f "$SD/$SID.json" ]
+  as_run '{"agent_id":"d4","agent_type":"worker"}' sub-start >/dev/null
+  ln -s "$T/target/f" "$SD/$SID.subs/lnk2"; as_run '{}' idle >/dev/null
+  check "idle: 링크는 따라가지 않음" [ "$(cat "$T/target/f")" = keep ] && [ ! -e "$SD/$SID.subs/d4" ]
+  rm -f "$SD/$SID.subs/lnk2"
+  # 심볼릭 링크 폴더면 아무것도 안 함
+  mkdir -p "$T/elsewhere"; ln -s "$T/elsewhere" "$SD/zzzz1234-aaaa.subs"
+  ASENV=(MARU_APP_SESSION=zzzz1234-aaaa); as_run '{"agent_id":"x1","agent_type":"worker"}' sub-start >/dev/null
+  check "subs 폴더가 심볼릭 링크면 쓰지 않음" [ -z "$(ls -A "$T/elsewhere")" ]
+  echo x > "$T/elsewhere/keepme"; as_run '{}' idle >/dev/null
+  check "idle: subs 폴더가 링크면 아무것도 지우지 않음" [ -f "$T/elsewhere/keepme" ]
+  ASENV=(MARU_APP_SESSION=$SID)
+fi
+ASDIRS="$T/nodir"; rc=$(as_run '{"transcript_path":"/a/b.jsonl"}' busy)
+check "python 이 없거나 고장나도 상태는 쓰고 exit 0" sh -c '[ "$1" = 0 ] && grep -q "\"state\":\"busy\"" "$2" && ! grep -q transcript "$2"' _ "$rc" "$SD/$SID.json"
+rc=$(as_run '{"agent_id":"a9","agent_type":"worker"}' sub-start); check "python 없으면 sub-start 는 조용히 건너뜀" sh -c '[ "$1" = 0 ] && [ ! -e "$2/a9" ]' _ "$rc" "$SD/$SID.subs"
+unset ASDIRS ASENV
+
 echo "== 가드 확인"
 check "진짜 launchctl 은 호출되지 않음" [ ! -e "$T/real-launchctl.called" ]
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
