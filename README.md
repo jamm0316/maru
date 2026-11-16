@@ -108,6 +108,12 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 - `maru squad [list]` 목록과 제외 사유 / `maru squad check <폴더>` 검증과 위험 신호(확인 없이·규칙 무시 문구, 팀원의 Bash·Write·Edit 등) 표시 / `maru squad install <폴더> [--replace] [--ack-warnings]` 개인 스쿼드로 설치(이미 있으면 `--replace`, 위험 신호가 있으면 `--ack-warnings` 필요) / `maru squad remove <slug>` 개인 스쿼드를 `data/squads-trash/` 로 이동(영구 삭제 아님) / `maru squad remove --proposal <slug>` 제안함(`data/squad-proposals/`)의 제안을 같은 휴지 폴더로 이동.
 - 회고가 같은 종류의 여러 단계 작업이 반복된다고 보면 `data/squad-proposals/<slug>/` 에 초안을 제안합니다(한 실행 1개, 제안함 전체 10개 상한). 자동 설치는 없고 사용자가 `maru squad check` 로 검토해 승인한 뒤에만 설치합니다. 새 스쿼드는 다음에 `maru` 로 띄우는 세션부터 보입니다(텔레그램 상시 세션 등 `claude` 를 직접 띄우는 경로에는 붙지 않습니다). 시험: `scripts/test-squads.sh`.
 
+## 언어(ko | en)
+- 해석 순서: 환경변수 `MARU_LANG`(정확히 `ko` 또는 `en`) > `$MARU_DATA/profile.json` 의 `lang`(앱이 사용자의 선택을 여기에 씁니다) > `ko`. 로캘(`LANG`)은 보지 않습니다(launchd 처럼 `LANG` 이 없는 환경에서 기존 한국어 사용자가 바뀌지 않게). CLI 만 쓰는 사용자가 영어를 고르려면 `data/maru.conf` 에 `MARU_LANG=${MARU_LANG:-en}` 한 줄을 둡니다. `lib.sh` 의 `MARU_LANG` 으로 노출됩니다.
+- en 이면 회고·정리 프롬프트(`prompts/*.en.md`), 세션 시작 컨텍스트(영어 한 줄 포함), 영어 내장 스쿼드(`squads-en/`)와 코드가 붙이는 고정 머리말, `install.sh`·`uninstall.sh` 의 화면 출력(`== ` 구역 제목 형식과 `(dry-run)` 표지는 그대로)과 전역 CLAUDE.md 블록이 영어입니다. 기계가 읽는 표지(일지 종류 `done|decision|todo`, 날짜 파일의 `[한 일]`/`[결정]`/`[남은 일]`, 요약의 `No changes`/`변경 없음`, `Promoted:`/`승격:`, 각종 `|` 형식)는 언어와 무관하게 그대로입니다. 개인 스쿼드(`data/squads`)는 번역하지 않습니다.
+- 새 사용자는 `/first-meeting` 스킬로 짧은 인터뷰를 거쳐 첫 기억을 만들 수 있습니다(저장 전에 계획을 보여 주고 승인을 받습니다).
+- `MARU_HOME` 은 git 저장소가 아니어도 됩니다(예: 복사한 `~/.maru`). 개인 이력 저장소는 `data/history.git` 로 따로 있습니다.
+
 ## 코드 작업 방식
 기준은 CLAUDE.md 「코드 작업」(숫자는 기본값이고 사용자 선호가 우선, 작업 저장소가 자체 워크플로우를 가지면 그쪽이 우선)입니다.
 - 크기: 작음(파일 1~2개·약 50줄 이하)은 마루가 직접, 중간(파일 3~8개·흐름 하나)은 기본 팀 `worker`, 큼(흐름 여러 개·9개 이상·병렬 가능·공개 계약 변경·하루 초과)은 개발 스쿼드 `dev`. 인증·결제·삭제·공개 계약·CI 설정에 닿으면 크기와 무관하게 독립 리뷰(새 리뷰어, 구현자의 결론은 안 줌).
@@ -131,6 +137,8 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 ```
 CLAUDE.md          에이전트 정체성과 규칙 (개인 정보 없음)
 squads/            내장 스쿼드(dev research)
+squads-en/         영어 변형 내장 스쿼드(언어가 en 일 때 같은 slug 의 squads/ 를 대체)
+prompts/*.en.md    영어 프롬프트(언어가 en 일 때 사용), CLAUDE.en.md 는 영어 지침
 scripts/           squads.py maru-claude.sh test-squads.sh reflect.sh dream.sh telegram.sh mac-inventory.sh lib.sh(설정·도구 해석) launchd.sh test-env.sh digest.py hist maru_config.py maru-status.sh maru_ui.py
 bin/maru           런처(ui status log hist doctor)
 cmux/              dock.json 등 cmux 연동
