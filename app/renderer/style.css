@@ -1,10 +1,11 @@
 /* 터미널 한글 전용 글꼴: 한글 범위만 명조(시스템 설치본, local()). 글꼴 교체는 src 한 줄 */
 @font-face{font-family:'MaruHangul';src:local('Noto Serif KR'),local('Nanum Myeongjo'),local('AppleMyungjo');unicode-range:U+1100-11FF,U+3130-318F,U+AC00-D7A3}
 :root{--bg:#0B0907;--panel:#14100C;--line:#2B2119;--ink:#F3ECE4;--mute:#A89A8A;--soft:#CFC3B5;--or:#FF8A2A;--or2:#FFB46B;--sel:#2A1A0C;
-/* UI 글꼴(세리프): 여기만 고치면 전체가 바뀐다. 영문은 앞쪽, 한글은 명조 계열로 대체 */
---serif:'Noto Serif KR','Nanum Myeongjo','New York','Iowan Old Style',Georgia,AppleMyungjo,serif;--sans:var(--serif);--mono:var(--serif)}
+/* 본문·라벨·숫자: 고딕(영문 SF Pro, 한글 Apple SD Gothic Neo). 큰 제목만 --serif(명조) */
+--sans:-apple-system,BlinkMacSystemFont,system-ui,'SF Pro Text','Apple SD Gothic Neo',sans-serif;
+--serif:'Noto Serif KR','Nanum Myeongjo','New York','Iowan Old Style',Georgia,AppleMyungjo,serif;--mono:var(--sans)}
 *{box-sizing:border-box}
-html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:var(--serif);font-weight:500}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-weight:400;font-variant-numeric:tabular-nums}
 .app{height:100vh;display:flex;flex-direction:column;min-height:0}
 .col{display:flex;flex-direction:column}.min0{min-width:0}.gap6{gap:6px}
 .stack{display:flex;flex-direction:column;gap:6px}.gap10{gap:10px}.gap8{gap:8px}
@@ -39,7 +40,7 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family
 .party-row b{color:var(--soft)}.party-row.lead{color:var(--ink)}.party-row.lead b{color:var(--or)}
 .party-row .m{font-family:var(--mono);font-size:12px;color:var(--mute)}
 .term-wrap{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;background:#0E0B08;border:1px solid #3A2A1C;border-radius:12px;box-shadow:0 0 0 1px rgba(255,138,42,.08),0 0 40px rgba(255,138,42,.06);overflow:hidden}
-.term-bar{font-family:var(--serif);display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mute);font-family:var(--mono);flex:none}
+.term-bar{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mute);font-family:var(--mono);flex:none}
 .term-bar .accent{color:var(--or)}.term-bar .right{margin-left:auto}
 #terminal{flex:1 1 auto;min-height:0;padding:10px 12px}
 #terminal .xterm{height:100%}
@@ -65,3 +66,8 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family
 @media (max-width:1100px){.left{display:none}}
 .left,.right-col{scrollbar-width:thin;scrollbar-color:#3A2A1C transparent}
 ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:#3A2A1C;border-radius:4px}::-webkit-scrollbar-track{background:transparent}
+
+/* 큰 제목만 세리프 */
+.logo,.eyebrow,.title,.status-main{font-family:var(--serif);font-weight:700}
+.eyebrow{font-weight:600}
+.ws .n,.party-row b,.lv,.quest .num{font-weight:600}
