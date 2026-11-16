@@ -6,10 +6,11 @@ import os
 import re
 import stat
 import sys
+import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
-from textclean import has_bad, valid_tag, safe_start, split_project   # noqa: E402
+from textclean import has_bad, valid_tag, safe_start, split_project, read_todo_done, title_key   # noqa: E402
 from maru_ui import copy_suggestion        # noqa: E402
 
 MAX_BYTES, MAX_ITEMS = 64 * 1024, 12   # apply_todos 의 병합 결과 상한과 같다
@@ -43,10 +44,16 @@ def load_todos(path):
     return out[:MAX_ITEMS]
 
 
+def hide_done(items, donepath, now):
+    """최근 7일 안에 완료/안 함으로 표시된 항목(최상위 태그와 제목 키가 모두 같은 것)을 뺀다. 다음 회고 전에도 앱과 목록이 같아지게 한다."""
+    pairs = {(m[2], m[5]) for m in read_todo_done(donepath, int(now))}
+    return [it for it in items if (it[0], title_key(it[2])) not in pairs] if pairs else items
+
+
 def main(argv, runner=None, out=None):
     out = out or sys.stdout
     data = os.environ.get("MARU_DATA") or os.path.join(os.environ.get("MARU_HOME") or os.path.dirname(HERE), "data")
-    items = load_todos(os.path.join(data, "todos.txt"))
+    items = hide_done(load_todos(os.path.join(data, "todos.txt")), os.path.join(data, "todo-done.txt"), time.time())
     args = argv[1:]
     if not args:
         if not items:

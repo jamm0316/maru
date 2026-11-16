@@ -82,7 +82,7 @@ trap 'rm -rf "$RLOCK" "$DLOCK"; rotate_log "$LOG"' EXIT
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 TXN=$STATE/txn.dream
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
-prompt="$(render_template "$MARU_HOME/prompts/consolidate-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" OPEN_PROJECTS="$(open_projects_text)")"
+prompt="$(render_template "$MARU_HOME/prompts/consolidate-prompt.md" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")"
 mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { env_fail "작업 폴더를 만들 수 없음: $MARU_WORK"; exit 1; }
 # 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
 txn_begin "$MEM" "$TXN" || { env_fail "기억 폴더 스냅샷 실패 — 정리 건너뜀(MEM 경로·권한 확인)"; txn_end "$TXN"; exit 1; }
@@ -120,6 +120,7 @@ if [ -n "$reason" ]; then
   fail_bump dream
 else
   # 모델의 journal/ 변조 검사가 끝난 뒤에 셸이 오래된 일지를 archive/ 로 옮긴다(검사에 걸리지 않는 순서). 보관 뒤 스냅샷으로 마커를 기록한다.
+  apply_todo_marks   # 사용자가 표시한 완료/안 함을 일지에 한 번만 반영(모델의 journal 변조 검사 뒤, 보관·마커 기록 앞)
   archive_journal 14
   mem_snap "$MEM" | md5 -q > "$MARKER"
   fail_reset dream

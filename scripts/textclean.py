@@ -25,6 +25,14 @@ def strip_bad(s):
     return "".join(c for c in s if not is_bad(c))
 
 
+def safe_text(s, limit=40):
+    """신뢰할 수 없는 이름·메시지를 화면·로그에 찍기 전에 정리한다: 줄바꿈·탭은 공백으로, 제어·서식(bidi·zero-width) 문자는 제거, limit 자로 자른다.
+    bytes 가 오면 깨진 바이트는 대체 문자로 읽는다."""
+    if isinstance(s, (bytes, bytearray)): s = bytes(s).decode("utf-8", "replace")
+    s = " ".join(str(s).replace("\r", " ").replace("\n", " ").replace("\t", " ").split())
+    return strip_bad(s)[:limit]
+
+
 _ANGLE = {ord("<"): "\u2039", ord(">"): "\u203a"}   # < > -> ‹ ›
 _BRACKET = {ord("["): "(", ord("]"): ")"}
 _SECRET = None
@@ -250,3 +258,47 @@ def open_project_lines(projects_path, state_path, journal_dir=None, limit=50):
         rows.append((last.get(key, ""), idx, "%s — %s" % (key, title)))
     rows.sort(key=lambda r: (r[0] != "", r[0], r[1]), reverse=True)   # 기록 있는 것(최근 날짜순) 먼저, 같은 날·기록 없음은 나중에 등록한 것 먼저
     return [r[2] for r in rows[:limit]]
+
+
+# ---- 할 일 완료/안 함 표시(data/todo-done.txt) ----
+# 앱이 쓰는 파일이고 셸은 신뢰하지 않고 읽기만 한다. 한 줄 `<epoch초>|<done|skip>|<태그 또는 태그/슬러그>|<제목>`(정확히 4칸).
+TODO_DONE_MAX_BYTES = 32768    # 앱은 이 파일을 32KB(32768바이트)를 넘기지 않게 쓴다(앱이 보장). 셸은 그래도 넘는 파일은 통째로 무시한다
+TODO_DONE_MAX_LINES = 200
+TODO_DONE_TITLE_MAX = 60       # apply_todos 의 제목 상한과 같다
+TODO_DONE_WINDOW = 7 * 86400   # "최근" 의 기준
+
+
+def title_key(title):
+    """할 일 제목 중복 판정 키(apply_todos 와 같은 규칙): 공백 접기 + casefold."""
+    return " ".join(title.split()).casefold()
+
+
+def read_todo_done(path, now, window=TODO_DONE_WINDOW):
+    """-> [(epoch, 'done'|'skip', 태그, 슬러그 또는 None, 제목, 키)] 최근(window 초 이내)만, 오래된 순. 파일이 없거나 이상하면 [].
+    정규 파일·32KB·UTF-8 이어야 하고, 앞의 200줄만 본다. 틀린 줄(칸 수·epoch·종류·태그·제목 길이·제어/서식 문자·비밀값 모양)은 버린다.
+    제목은 neutralize_body 로 무해화한다(todos 와 같은 규칙). 미래(1일 넘게) 시각은 버린다."""
+    import os, re, stat
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > TODO_DONE_MAX_BYTES: return []
+        with open(path, "rb") as f: text = f.read(TODO_DONE_MAX_BYTES + 1).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    out = []
+    for line in text.split("\n")[:TODO_DONE_MAX_LINES]:
+        line = line.rstrip("\r")
+        if not line or has_bad(line): continue
+        parts = line.split("|")
+        if len(parts) != 4: continue
+        ep, kind, tfield, title = [p.strip(" ") for p in parts]
+        if not re.fullmatch("[0-9]{1,12}", ep) or kind not in ("done", "skip"): continue
+        tag, slug = split_project(tfield)
+        if not valid_tag(tag): continue
+        if not title or len(title) > TODO_DONE_TITLE_MAX or looks_secret(line): continue
+        title = neutralize_body(title)
+        if not title or len(title) > TODO_DONE_TITLE_MAX: continue
+        e = int(ep)
+        if e > now + 86400 or e < now - window: continue
+        out.append((e, kind, tag, slug, title, title_key(title)))
+    out.sort(key=lambda x: x[0])
+    return out

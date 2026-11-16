@@ -20,6 +20,7 @@ STATE=${MARU_STATE:-$MARU_DATA/state}
 LOGS=${MARU_LOGS:-$MARU_DATA/logs}
 DIGESTS=${MARU_DIGESTS:-$MARU_DATA/digests}
 PROPOSALS=${MARU_PROPOSALS:-$MARU_DATA/skill-proposals}    # 스킬 제안만 쌓는다. 자동 설치 없음
+SQUAD_PROPOSALS=${MARU_SQUAD_PROPOSALS:-$MARU_DATA/squad-proposals}   # 스쿼드 제안만 쌓는다(squads.py propose 가 검증해 옮김). 자동 설치 없음
 STAGE=${MARU_STAGE:-$MARU_DATA/stage}                      # 헤드리스 모델이 쓸 수 있는 임시 폴더(memory 외 유일)
 # 헤드리스 실행의 cwd. 저장소(git 루트) 밖의 빈 폴더여야 한다: 저장소 안이면 프로젝트 설정
 # (홈 전체 접근 허용)과 CLAUDE.md 가 읽히고, cwd 아래 읽기는 자동 허용되기 때문이다.
@@ -255,6 +256,8 @@ PY
 #    기존 data/todos.txt 는 신뢰하지 않고 같은 검증을 다시 거쳐 읽는다(읽기 실패·링크·크기 초과면 보존분 없이 새 것만). 제목이 겹치면 새 것이 이긴다.
 #    `<태그>|0||`(중요도 0·빈 제목·빈 프롬프트)는 "그 태그의 할 일을 비운다" 표지로만 해석한다(목록에 안 들어감, 한 실행에 최대 3개, 태그 검증 동일; replace 에서는 무시).
 #    표지 줄에 제목·프롬프트가 붙으면 중요도 0 이 범위 밖이라 일반 줄 검증에서 버려진다. 병합 결과는 최대 12줄이고 넘으면 보존된(옛) 항목 중 중요도 낮은 것부터 뺀다(새 항목은 안 뺀다).
+# 완료 표시(data/todo-done.txt, 최근 7일): 최상위 태그(`/` 앞)와 제목 키가 모두 같은 항목은 새 항목·기존 항목 모두에서 먼저 뺀 뒤(상위 7개 선택·병합·상한 계산 전) 나머지로 계산한다.
+# 제목만 같고 태그가 다르면 가리지 않는다(앱도 같은 규칙).
 # 정렬: 태그 묶음을 묶음 안 최고 중요도 내림차순으로, 묶음 안은 중요도 내림차순(안정). 성공하면 비어 있지 않은 프롬프트로 data/suggestions.txt 도 병합 결과로 다시 만든다
 # (apply_suggestions 의 검증 규칙을 그대로 거친다; 프롬프트가 하나도 없으면 빈 파일).
 apply_todos() {
@@ -264,11 +267,11 @@ apply_todos() {
   mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "할 일 목록: data 폴더 없음 — 건너뜀"; return 0; }
   tmp=$(mktemp "$MARU_DATA/.todos.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
   stg=$(mktemp "$MARU_DATA/.todos-sug.XXXXXX" 2>/dev/null) || { rm -f "$tmp"; type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
-  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" "$MARU_DATA/projects.txt" "$mode" "$dst" <<'PY' 2>&1
+  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" "$MARU_DATA/projects.txt" "$mode" "$dst" "$MARU_DATA/todo-done.txt" "$(date +%s)" <<'PY' 2>&1
 import os, re, stat, sys
-src, tmp, stg, libdir, regpath, mode, dstpath = sys.argv[1:8]
+src, tmp, stg, libdir, regpath, mode, dstpath, donepath, nowstr = sys.argv[1:10]
 sys.path.insert(0, libdir)
-from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, safe_start, split_project, read_projects
+from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, safe_start, split_project, read_projects, read_todo_done, title_key
 MAX_BYTES, MAX_NEW, MAX_TOTAL, MAX_MARKERS, MAX_TITLE, MAX_PROMPT = 32768, 7, 12, 3, 60, 120
 merge = mode == "merge"
 registry = {(t, s) for t, s, _ in read_projects(regpath)}   # 등록된 프로젝트만 참조할 수 있다
@@ -315,6 +318,16 @@ except (OSError, UnicodeDecodeError, ValueError) as e:
     print("거부: %s" % why(e)); sys.exit(1)
 items, markers, dropped = parse(text, merge)
 if not items and not markers: print("거부: 유효한 줄 없음(버린 줄 %d)" % dropped); sys.exit(1)
+# 사용자가 최근 7일 안에 완료/안 함으로 표시한 할 일은 (최상위 태그, 제목 키)가 모두 같으면 뺀다(슬러그는 비교하지 않는다; 제목만 같고 태그가 다르면 안 뺀다).
+# 앱 소유 파일을 읽기만 한다. 상위 7개 선택·병합·자리 계산보다 먼저, 새 항목과 기존 항목 모두에 적용한다(가려질 항목이 자리를 차지하지 않게).
+try: now = int(nowstr)
+except ValueError: now = 0
+donepairs = {(m[2], m[5]) for m in read_todo_done(donepath, now)} if now else set()
+def notdone(x): return (x[0], title_key(x[3])) not in donepairs
+newtags_all = {x[0] for x in items} | set(markers)   # 태그 교체 판단은 모델이 낸 줄 기준(표시로 가려진 줄도 그 태그를 새로 냈다는 뜻)
+n_hidden = len(items)
+items = [x for x in items if notdone(x)]
+n_hidden -= len(items)
 over = max(0, len(items) - MAX_NEW)
 keep = sorted(range(len(items)), key=lambda i: (-items[i][2], i))[:MAX_NEW]   # 중요도 높은 순(안정)으로 7개
 items = [items[i] for i in sorted(keep)]
@@ -324,9 +337,12 @@ if merge:
     try:
         old = parse(read_text(dstpath), False)[0]
         oldnote = ""
+        n_old = len(old)
+        old = [x for x in old if notdone(x)]
+        n_hidden += n_old - len(old)
     except FileNotFoundError: pass
     except (OSError, UnicodeDecodeError, ValueError) as e: oldnote = "기존 목록을 읽을 수 없어 보존분 없음(%s)" % why(e)
-    newtags = {x[0] for x in items} | set(markers)
+    newtags = newtags_all
     newtitles = {" ".join(x[3].split()).casefold() for x in items}
     kept = [x for x in old if x[0] not in newtags and " ".join(x[3].split()).casefold() not in newtitles]
     replaced = len(old) - len(kept)
@@ -338,6 +354,7 @@ if merge:
         kept = [kept[i] for i in keepidx]
     items = kept + items
     note = ", 보존 %d·교체 %d·상한으로 뺌 %d·비우기 표지 %d%s" % (len(kept), replaced, trimmed, len(markers), (", " + oldnote) if oldnote else "")
+if n_hidden: note += ", 완료 표시로 뺌 %d" % n_hidden
 groups, order = {}, []
 for it in items:
     if it[0] not in groups: groups[it[0]] = []; order.append(it[0])
@@ -436,6 +453,73 @@ PY
   )
   [ -n "$out" ] && printf '%s\n' "$out" || printf '(없음)\n'
   return 0
+}
+
+# 회고·정리 프롬프트에 넣을 "최근 사용자가 완료/안 함으로 표시한 할 일"(`완료|안 함: 제목` 줄, 최대 30줄, 최근 것 먼저; 없으면 `(없음)`).
+# data/todo-done.txt(앱 소유, 신뢰하지 않음)를 textclean.read_todo_done 로 검증해 읽는다. 값 안의 {{키}} 가 치환되지 않도록 중괄호는 괄호로 바꾼다. 항상 0.
+recent_marks_text() {
+  local out
+  out=$(python3 -I - "$MARU_DATA/todo-done.txt" "$_maru_lib" "$(date +%s)" <<'PY' 2>/dev/null
+import sys
+sys.path.insert(0, sys.argv[2])
+from textclean import read_todo_done
+rows = read_todo_done(sys.argv[1], int(sys.argv[3]))[::-1][:30]
+print("\n".join(("완료: " if r[1] == "done" else "안 함: ") + r[4].replace("{", "(").replace("}", ")") for r in rows))
+PY
+  )
+  [ -n "$out" ] && printf '%s\n' "$out" || printf '(없음)\n'
+  return 0
+}
+
+# 사용자가 표시한 완료/안 함(data/todo-done.txt, 최근 7일, 파일에 남아 있는 줄만)을 일지에 한 번씩만 덧붙인다: apply_todo_marks
+# done -> `[한 일] (5) @태그[/슬러그] 제목 (사용자가 완료 표시)`, skip -> `[결정] (4) @태그[/슬러그] 제목 — 하지 않기로 함`. 라벨은 고정 `사용자 표시`.
+# 검증·슬러그 처리는 apply_journal 을 그대로 탄다(한 번에 최대 8줄, 나머지는 다음에). 이미 옮긴 표시는 $STATE/todo-done.seen
+# (줄마다 `epoch 해시16`, 해시 = sha256(epoch|종류|제목 키), 최대 400줄)으로 가린다. apply_journal 이 성공해야 seen 에 적는다.
+# 호출 쪽이 기억 쓰기 잠금을 쥔 상태에서 성공 경로에서만 부른다(reflect.sh·dream.sh). 일지에 덧붙였으면 0, 아니면 1.
+apply_todo_marks() {
+  local f=$MARU_DATA/todo-done.txt tmp n
+  [ -e "$f" ] || [ -L "$f" ] || return 1
+  mkdir -p "$STATE" 2>/dev/null || return 1
+  tmp=$(mktemp "$STATE/.marks.XXXXXX" 2>/dev/null) || return 1
+  n=$(python3 -I - collect "$f" "$tmp" "$STATE/todo-done.seen" "$_maru_lib" "$(date +%s)" <<'PY' 2>/dev/null
+import hashlib, os, sys
+_, f, tmp, seenpath, libdir, nowstr = sys.argv[1:7]
+sys.path.insert(0, libdir)
+from textclean import read_todo_done
+def h(m): return hashlib.sha256(("%d|%s|%s" % (m[0], m[1], m[5])).encode("utf-8")).hexdigest()[:16]
+seen = set()
+try:
+    for l in open(seenpath, encoding="utf-8", errors="replace").read().split("\n")[-400:]:   # 깨진 바이트가 있어도 죽지 않는다(죽으면 일지 반영이 영원히 멈춘다)
+        p = l.split(" ")
+        if len(p) == 2: seen.add(p[1])
+except OSError: pass
+lines, ids = [], []
+for m in read_todo_done(f, int(nowstr)):
+    if h(m) in seen: continue
+    tag = m[2] + ("/" + m[3] if m[3] else "")
+    lines.append("done|5|%s|%s (사용자가 완료 표시)" % (tag, m[4]) if m[1] == "done" else "decision|4|%s|%s — 하지 않기로 함" % (tag, m[4]))
+    ids.append("%d %s" % (m[0], h(m)))
+    if len(lines) >= 8: break
+if lines:
+    with open(tmp, "w", encoding="utf-8") as o: o.write("\n".join(lines) + "\n")
+    with open(tmp + ".ids", "w", encoding="utf-8") as o: o.write("\n".join(ids) + "\n")
+print(len(lines))
+PY
+  )
+  if [ "${n:-0}" -gt 0 ] 2>/dev/null && apply_journal "$tmp" todo "사용자 표시"; then
+    python3 -I - "$tmp.ids" "$STATE/todo-done.seen" <<'PY' 2>/dev/null
+import os, sys
+new = [l for l in open(sys.argv[1], encoding="utf-8").read().split("\n") if l]
+old = []
+try: old = [l for l in open(sys.argv[2], encoding="utf-8", errors="replace").read().split("\n") if l]
+except OSError: pass
+tmp = sys.argv[2] + ".tmp"
+with open(tmp, "w", encoding="utf-8") as o: o.write("\n".join((old + new)[-400:]) + "\n")
+os.replace(tmp, sys.argv[2])
+PY
+    rm -f "$tmp" "$tmp.ids"; return 0
+  fi
+  rm -f "$tmp" "$tmp.ids"; return 1
 }
 
 # ---- 일지(journal): apply_journal <stage의 journal.txt> <세션 id 앞 8자> <프로젝트 라벨(없으면 빈 문자열)>
