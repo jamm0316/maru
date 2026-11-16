@@ -152,7 +152,7 @@ function startPty(cols, rows) {
     if (win && !win.isDestroyed()) win.webContents.send('pty:exit', exitCode);
   });
   // 스모크에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
-  self.write(SMOKE ? 'echo maru-ok\r' : 'command -v claude >/dev/null && exec claude\r');
+  self.write(SMOKE ? 'echo maru-ok 한글 명조 정렬 테스트 가나다라마바사\r' : 'command -v claude >/dev/null && exec claude\r');
   return true;
 }
 
@@ -162,7 +162,7 @@ function killPty() {
 }
 
 function checkSmoke() {
-  if (smokeDone || !rendered || !refreshed || !/^maru-ok\r?$/m.test(smokeOut.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''))) return;
+  if (smokeDone || !rendered || !refreshed || !/^maru-ok 한글 .*\r?$/m.test(smokeOut.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''))) return;
   smokeDone = true;
   const p = panels();
   console.log('SMOKE OK pty-output=maru-ok panels-rendered=true');

@@ -1,5 +1,7 @@
 'use strict';
 (function () {
+  // 터미널 글꼴: 영문 고정폭 유지, 한글 글리프만 명조 계열로 대체(시스템 설치 글꼴만)
+  const TERM_FONT = "MaruHangul, 'SF Mono', Menlo, monospace";
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => {
     const e = document.createElement(tag);
@@ -10,7 +12,7 @@
 
   // ---- 터미널 ----
   const term = new window.Terminal({
-    fontFamily: "'SF Mono', Menlo, monospace", fontSize: 14, lineHeight: 1.25,
+    fontFamily: TERM_FONT, fontSize: 14, lineHeight: 1.25,
     cursorBlink: true, allowProposedApi: false, scrollback: 5000,
     theme: {
       background: '#0E0B08', foreground: '#F3ECE4', cursor: '#FF8A2A', cursorAccent: '#0E0B08',
@@ -20,6 +22,8 @@
   const fit = new window.FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open($('terminal'));
+  // 한글 글꼴이 로드된 뒤 다시 적용해 글자 아틀라스를 새로 만든다
+  if (document.fonts && document.fonts.load) document.fonts.load('14px MaruHangul', '가').then(() => { term.options.fontFamily = TERM_FONT + ' '; term.options.fontFamily = TERM_FONT; }).catch(() => {});
   try {
     const gl = new window.WebglAddon.WebglAddon();
     gl.onContextLoss(() => gl.dispose());
@@ -31,6 +35,12 @@
     try { fit.fit(); window.maru.ptyResize(term.cols, term.rows); } catch (e) { /* 레이아웃 전 */ }
     if (!started) startPty(); // 시작 실패 시 다음 리사이즈에 재시도
   }
+  term.attachCustomKeyEventHandler((e) => {
+    const seq = window.MaruLib.keyToSeq(e);
+    if (seq === null) return true;
+    if (e.type === 'keydown') window.maru.ptyWrite(seq);
+    return false;
+  });
   term.onData((d) => window.maru.ptyWrite(d));
   window.maru.onPtyData((d) => term.write(d));
   window.maru.onPtyExit((code) => {

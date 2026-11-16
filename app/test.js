@@ -80,4 +80,16 @@ t('M2 시작 문자 거부', () => {
   assert.strictEqual(L.isSafeQuestStart(''), false);
 });
 t('L5 잘린 목록은 마지막 줄 버림', () => { assert.deepStrictEqual(L.parseSuggestions('하나\n둘\n세', true), ['하나', '둘']); });
+t('keyToSeq 단축키', () => {
+  const k = (o) => L.keyToSeq({ type: 'keydown', key: 'Backspace', ...o });
+  assert.strictEqual(k({ metaKey: true }), '\x15');
+  assert.strictEqual(k({ altKey: true }), '\x17');
+  assert.strictEqual(k({}), null);
+  assert.strictEqual(k({ metaKey: true, isComposing: true }), null);
+  assert.strictEqual(k({ altKey: true, keyCode: 229 }), null);
+  assert.strictEqual(k({ metaKey: true, altKey: true }), null);
+  assert.strictEqual(k({ ctrlKey: true, metaKey: true }), null);
+  assert.strictEqual(L.keyToSeq({ type: 'keyup', key: 'Backspace', metaKey: true }), null);
+  assert.strictEqual(L.keyToSeq({ type: 'keydown', key: 'a', metaKey: true }), null);
+});
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

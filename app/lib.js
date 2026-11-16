@@ -51,6 +51,16 @@ function cleanQuestText(s) {
 // 숫자·!·/ 로 시작하면 선택 프롬프트/명령으로 오해될 수 있어 써 넣지 않는다
 function isSafeQuestStart(s) { return typeof s === 'string' && s.length > 0 && !/^[0-9!\/]/.test(s); }
 
+// 터미널 단축키: keydown 이벤트 -> pty 에 보낼 시퀀스(없으면 null). IME 조합 중에는 가로채지 않는다.
+function keyToSeq(e) {
+  if (!e || e.type !== 'keydown' || e.key !== 'Backspace') return null;
+  if (e.isComposing || e.keyCode === 229) return null;
+  if (e.ctrlKey || e.shiftKey) return null;
+  if (e.metaKey && !e.altKey) return '\x15'; // Cmd+Backspace: 줄 앞부분 삭제(Ctrl+U)
+  if (e.altKey && !e.metaKey) return '\x17'; // Option+Backspace: 앞 단어 삭제(Ctrl+W)
+  return null;
+}
+
 function validSkillName(name) {
   return typeof name === 'string' && name.length > 0 && name.length <= NAME_MAX &&
     !name.startsWith('.') && !hasBadChars(name) && !/[\/\\]/.test(name);
@@ -126,8 +136,10 @@ function mergeBriefing(eventLists, max = BRIEFING_MAX) {
   return all.slice(0, max);
 }
 
-module.exports = {
+const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
-  hasBadChars, isSafeQuestStart, levelInfo, parseSuggestions, cleanQuestText, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
 };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+else globalThis.MaruLib = api; // 렌더러(번들러 없음)에서는 전역으로 노출
