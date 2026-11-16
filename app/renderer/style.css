@@ -105,8 +105,34 @@ button.todo:hover,button.todo:focus-visible{border-color:var(--or);background:va
 .empty{font-size:12px;color:var(--mute);padding:4px 2px}
 .chips{display:flex;flex-wrap:wrap;gap:8px;font-family:var(--mono);font-size:12px}
 .chip{border:1px solid #4A3A2C;color:var(--soft);border-radius:6px;padding:4px 8px}
-.brief{display:flex;gap:10px;font-size:13px;color:var(--soft)}
-.brief .at{font-family:var(--mono);color:var(--or);min-width:44px;white-space:nowrap}
+/* 알림과 승인함 */
+.badge{flex:none;min-width:20px;text-align:center;font-size:11px;font-weight:700;line-height:18px;border-radius:999px;padding:0 6px;color:#1A0F05;background:var(--or)}
+.badge[hidden]{display:none}
+.inbox-h{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.inbox-note{min-height:1.2em;color:var(--or2)}
+.apv{display:flex;flex-direction:column;gap:6px;padding:9px 10px;border:1px solid var(--line);border-radius:8px}
+.apv-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.apv-name{min-width:0;font-size:13px;font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+.apv-kind{flex:none;font-size:10px;color:var(--or2);border:1px solid #4A3A2C;border-radius:999px;padding:0 7px;white-space:nowrap;overflow-wrap:normal}
+.apv-desc{font-size:12px;color:var(--soft);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.apv-meta{display:flex;gap:6px;flex-wrap:wrap;font-size:11px;color:var(--mute)}
+.apv-meta .risk{color:#1A0F05;background:var(--or);border-radius:999px;padding:0 7px;font-weight:600}
+.apv-meta .bad{color:var(--or2);border:1px dashed #5A4630;border-radius:999px;padding:0 7px}
+.apv-acts{display:flex;gap:6px;flex-wrap:wrap}
+.apv-acts .btn{padding:3px 10px;font-size:12px}
+.inbox-toggle{display:flex;justify-content:space-between;align-items:baseline;gap:8px;width:100%;font:inherit;color:inherit;background:transparent;border:0;border-top:1px solid var(--line);padding:8px 0 0;cursor:pointer;text-align:left}
+.inbox-toggle:hover .eyebrow,.inbox-toggle:focus-visible .eyebrow{color:var(--or)}
+.inbox-toggle:focus-visible{outline:none;box-shadow:0 -2px 0 0 rgba(255,138,42,.4)}
+.inbox-toggle .eyebrow::before{content:'\25BE';display:inline-block;width:12px;font-size:10px;transition:transform .15s}
+.inbox-toggle[aria-expanded=false] .eyebrow::before{transform:rotate(-90deg)}
+.brief{display:flex;gap:10px;align-items:baseline;font-size:13px;color:var(--soft)}
+.brief .at{flex:none;min-width:56px;font-size:12px;color:var(--mute);white-space:nowrap}
+.brief.fresh .at{color:var(--or)}
+.brief .dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--or);align-self:center}
+.brief .dot.off{background:transparent}
+.id-pre{margin:0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#120C07;color:var(--soft);font-family:var(--mono);font-size:12px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto}
+.id-list{margin:0;padding-left:18px;font-size:13px;color:var(--soft)}
+.id-list.risk li{color:var(--or2)}
 @keyframes pulse{0%,100%{opacity:.55}50%{opacity:1}}
 @media (max-width:1100px){.left{flex-basis:150px}.left .card:not(.ws-card):not(.proj-card){display:none}.userbar{flex-direction:column;align-items:stretch}.ws .s,.ws .st{display:none}.ws-main{padding:8px}}
 .left,.right-col{scrollbar-width:thin;scrollbar-color:#3A2A1C transparent}
@@ -228,7 +254,8 @@ html[lang="en"] .card,html[lang="en"] .quest,html[lang="en"] .todo,html[lang="en
 .proj-cat:hover,.proj-cat:focus-visible{border-color:var(--or);color:var(--or);outline:none}
 .proj-cat:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
 .proj .pr{flex:none;display:flex;align-items:center;gap:6px}
-.kbd{flex:none;font-size:10px;line-height:15px;color:var(--mute);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap;overflow-wrap:normal}
+.kbd{display:none;flex:none;font-size:10px;line-height:15px;color:var(--mute);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap;overflow-wrap:normal}
+body.mod .kbd{display:inline-block}
 .ws .l2{display:flex;align-items:baseline;justify-content:space-between;gap:6px;min-width:0}
 .ws .l2 .s{min-width:0}
 .dragging{opacity:.45}

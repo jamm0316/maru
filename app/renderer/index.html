@@ -72,6 +72,18 @@
           <h3 class="pd-h" data-i18n="proj.sec.mem">관련 기억</h3><div id="pd-mem" class="chips"></div>
         </div>
       </section>
+      <section id="inbox-detail" class="proj-detail" role="region" aria-labelledby="id-title" hidden>
+        <div class="pd-top">
+          <button type="button" class="btn ghost" id="id-close" data-i18n="inbox.detail.close" data-i18n-aria="inbox.detail.close.aria" aria-label="제안 상세 닫기">닫기</button>
+          <span class="tag-head" id="id-kind"></span><span class="pill" id="id-state"></span>
+        </div>
+        <h2 class="pd-title" id="id-title" tabindex="-1"></h2>
+        <div class="pd-meta" id="id-desc"></div>
+        <div class="hint" data-i18n="inbox.detail.readonly">읽기 전용입니다.</div>
+        <div class="btn-row pd-actions" id="id-actions"></div>
+        <div class="pd-note" id="id-note" role="status"></div>
+        <div class="pd-body" id="id-body"></div>
+      </section>
       <div id="term-empty" class="term-empty" hidden>
         <p data-i18n="ws.empty">열린 작업 공간이 없습니다</p>
         <button type="button" class="btn primary" id="term-empty-new" data-i18n="ws.new">새 작업 공간</button>
@@ -111,9 +123,13 @@
         <div id="skills" class="chips"></div>
       </section>
 
-      <section class="card">
-        <h2 class="title" data-i18n="brief.title">밤사이 브리핑</h2>
-        <div id="briefing" class="stack gap8"></div>
+      <section class="card inbox" id="inbox" aria-labelledby="inbox-title">
+        <div class="head"><h2 class="title" id="inbox-title" data-i18n="inbox.title">알림과 승인함</h2><span class="badge" id="inbox-badge" hidden></span></div>
+        <div class="inbox-h"><span class="eyebrow" data-i18n="inbox.sec.approvals">승인 대기</span><span class="hint" id="inbox-appr-count"></span></div>
+        <div id="inbox-approvals" class="stack gap8"></div>
+        <div id="inbox-note" class="hint inbox-note" role="status"></div>
+        <button type="button" class="inbox-toggle" id="inbox-toggle" aria-expanded="false" aria-controls="inbox-notifs"><span class="eyebrow" id="inbox-toggle-t"></span><span class="hint" id="inbox-toggle-n"></span></button>
+        <div id="inbox-notifs" class="stack gap8" hidden></div>
       </section>
     </aside>
   </div>

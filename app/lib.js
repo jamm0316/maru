@@ -1466,7 +1466,257 @@ function parseCalendarOutput(text, now = new Date()) {
   return list.slice(0, CAL_MAX_EVENTS);
 }
 
+// ---- 알림과 승인함(inbox) ----
+// 제안 폴더·파일(이름과 내용)과 로그는 모두 믿지 않는다: main 이 직접 훑고(엄격한 slug·lstat·일반 파일만·크기/개수 상한), 화면에는 정리한 문자열만 보낸다.
+const INBOX_NOTIF_MAX = 8;
+const PROPOSAL_KINDS = ['squad', 'skill'];
+const PROPOSAL_SLUG_RE = { squad: /^[a-z0-9][a-z0-9-]{0,19}$/, skill: /^[a-z0-9][a-z0-9-]{0,40}$/ }; // squads.py SLUG_RE / reflect.sh 스킬 이름 규칙과 같다
+const PROPOSAL_SCAN_MAX = 40;        // 제안 폴더(종류별)에서 훑는 항목 수
+const PROPOSAL_LIST_MAX = 12;        // 종류별로 화면에 올리는 제안 수
+const PROPOSAL_FILE_MAX = 16384;     // 파일 하나(스쿼드 파일 상한과 같다)
+const PROPOSAL_SKILL_FILE_MAX = 65536; // SKILL.md 는 더 크게 허용(reflect.sh 는 100KB 까지 받는다. 화면에는 앞부분만)
+const PROPOSAL_TOTAL_MAX = 131072;   // 한 제안에서 읽는 합계
+const PROPOSAL_FILES_MAX = 16;       // 한 제안에서 보는 파일 수
+const PROPOSAL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$/;
+const INBOX_SEEN_MAX_BYTES = 512;
+const LOG_AT_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+function validProposalSlug(kind, slug) {
+  return typeof slug === 'string' && PROPOSAL_KINDS.includes(kind) && PROPOSAL_SLUG_RE[kind].test(slug);
+}
+// 한 줄 표시용: 공백 정리 + 제어·bidi·보이지 않는 문자 제거 + 코드포인트 상한
+function cleanDisplay(s, max) {
+  if (typeof s !== 'string') return '';
+  return [...s.replace(/\s+/g, ' ').replace(BAD_CHARS_G, '').trim()].slice(0, max).join('');
+}
+// 여러 줄 본문 표시용: 줄바꿈은 살리고 나머지 제어·서식 문자는 제거, 코드포인트 상한. 잘렸는지는 호출 쪽이 크기로 안다.
+function cleanProposalText(s, max) {
+  if (typeof s !== 'string') return '';
+  const t = s.replace(/\r\n?/g, '\n').replace(/\t/g, '  ').split('\n').map((l) => l.replace(BAD_CHARS_G, '')).join('\n');
+  return [...t].slice(0, max).join('').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+// SKILL.md·squad.md 머리말(--- 사이)의 name·description 한 줄 값만. 그 밖의 형식(접은 문단 등)은 ''.
+function proposalMeta(text) {
+  const out = { name: '', description: '' };
+  if (typeof text !== 'string') return out;
+  const head = text.slice(0, 4096).replace(/\r\n?/g, '\n');
+  if (!head.startsWith('---\n')) return out;
+  const end = head.indexOf('\n---', 4);
+  if (end < 0) return out;
+  for (const line of head.slice(4, end).split('\n')) {
+    const m = /^(name|description):\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[2].trim();
+    if (/^(["']).*\1$/.test(v)) v = v.slice(1, -1);
+    if (/^[>|][+-]?$/.test(v)) v = '';
+    out[m[1]] = cleanDisplay(v, m[1] === 'name' ? 40 : 200);
+  }
+  return out;
+}
+const dirOwnedOk = (st, uid) => !!st && st.isDirectory() && !st.isSymbolicLink() && (typeof uid !== 'number' || st.uid === uid) && (st.mode & 0o022) === 0;
+
+// 폴더 하나의 일반 파일만 훑는다(링크·폴더·특수 파일은 건너뛰고 skipped 로 센다). read(이름) 이 true 인 파일만 내용을 읽는다.
+// -> { files: [{ name, size, text?, oversize? }], skipped, overflow, sig }
+function scanProposalDir(dir, { uid, read, perFile = PROPOSAL_FILE_MAX, total = PROPOSAL_TOTAL_MAX, max = PROPOSAL_FILES_MAX } = {}) {
+  const fs = require('fs'); const path = require('path');
+  const out = { files: [], skipped: 0, overflow: false, sig: '' };
+  let names;
+  try { names = fs.readdirSync(dir).sort(); } catch { return out; }
+  let used = 0; const sig = [];
+  for (const name of names) {
+    if (out.files.length >= max) { out.overflow = true; break; }
+    if (!PROPOSAL_NAME_RE.test(name)) { out.skipped++; continue; }
+    let st; try { st = fs.lstatSync(path.join(dir, name)); } catch { out.skipped++; continue; }
+    if (!st.isFile() || (typeof uid === 'number' && st.uid !== uid)) { out.skipped++; continue; }
+    sig.push(name + ':' + st.size + ':' + Math.floor(st.mtimeMs));
+    const f = { name, size: st.size };
+    if (read && read(name)) {
+      // oversize: 'file'(파일 하나가 너무 큼) | 'total'(합계 상한에 닿아 읽지 않음)
+      if (st.size > perFile) f.oversize = 'file';
+      else if (used + st.size > total) f.oversize = 'total';
+      else {
+        const r = readRegular(path.join(dir, name), perFile, false);
+        if (r) { used += st.size; f.text = cleanProposalText(r.text, perFile); } else f.oversize = 'file';
+      }
+    }
+    out.files.push(f);
+  }
+  out.sig = sig.join('|');
+  return out;
+}
+
+// 제안 폴더(base) -> 목록. 폴더 이름은 slug 규칙을 통과한 것만, 링크·일반 폴더가 아닌 것·소유자가 다른 것은 건너뛴다.
+// kind 'squad': { kind, slug, name, description, members, sig } / 'skill': { kind, slug, name, description, sig, invalid? }
+function listProposals(kind, base, uid) {
+  const fs = require('fs'); const path = require('path');
+  if (!PROPOSAL_KINDS.includes(kind)) return [];
+  let st; try { st = fs.lstatSync(base); } catch { return []; }
+  if (!dirOwnedOk(st, uid)) return [];
+  let names; try { names = fs.readdirSync(base).sort(); } catch { return []; }
+  const out = [];
+  for (const slug of names.slice(0, PROPOSAL_SCAN_MAX)) {
+    if (out.length >= PROPOSAL_LIST_MAX) break;
+    if (!validProposalSlug(kind, slug)) continue;
+    const dir = path.join(base, slug);
+    let ds; try { ds = fs.lstatSync(dir); } catch { continue; }
+    if (!dirOwnedOk(ds, uid)) continue;
+    const main = kind === 'squad' ? 'squad.md' : 'SKILL.md';
+    const sc = scanProposalDir(dir, { uid, read: (n) => n === main, perFile: kind === 'squad' ? PROPOSAL_FILE_MAX : PROPOSAL_SKILL_FILE_MAX });
+    const f = sc.files.find((x) => x.name === main);
+    const meta = f && typeof f.text === 'string' ? proposalMeta(f.text) : { name: '', description: '' };
+    if (kind === 'squad') {
+      const members = sc.files.filter((x) => x.name.endsWith('.md') && x.name !== 'squad.md' && x.name !== 'lead.md').length;
+      out.push({ kind, slug, name: meta.name || slug, description: meta.description, members, sig: sc.sig });
+    } else {
+      out.push({ kind, slug, name: meta.name || slug, description: meta.description, sig: sc.sig, ...(f && f.text !== undefined ? {} : { invalid: true }) });
+    }
+  }
+  return out;
+}
+
+// 상세 보기(읽기 전용): 스쿼드는 squad.md·lead.md·팀원 파일(+같은 이름의 .note.txt), 스킬은 SKILL.md 와 파일 목록.
+// -> { sections: [{ name, text, truncated, limit? }], files: [{ name, size }], skipped }  (이름·본문 모두 정리한 문자열)
+function proposalDetail(kind, base, slug, uid) {
+  const fs = require('fs'); const path = require('path');
+  if (!validProposalSlug(kind, slug)) return null;
+  const dir = path.join(base, slug);
+  let ds; try { ds = fs.lstatSync(dir); } catch { return null; }
+  if (!dirOwnedOk(ds, uid)) return null;
+  const isSquad = kind === 'squad';
+  const sc = scanProposalDir(dir, { uid, read: (n) => (isSquad ? n.endsWith('.md') : n === 'SKILL.md'), perFile: isSquad ? PROPOSAL_FILE_MAX : PROPOSAL_SKILL_FILE_MAX });
+  const rank = (n) => (n === 'squad.md' ? 0 : n === 'lead.md' ? 1 : 2);
+  const withText = sc.files.filter((f) => f.text !== undefined || f.oversize).sort((a, b) => rank(a.name) - rank(b.name) || (a.name < b.name ? -1 : 1));
+  const sections = withText.map((f) => f.oversize
+    ? { name: cleanDisplay(f.name, 41), text: '', truncated: true, limit: f.oversize } // limit: 'file' | 'total'
+    : { name: cleanDisplay(f.name, 41), text: f.text, truncated: false });
+  if (isSquad) { // 회고가 남긴 메모(<slug>.note.txt): 같은 폴더 밖, 작은 일반 파일만
+    const note = readRegular(path.join(base, slug + '.note.txt'), 2048, false);
+    let nst = null; try { nst = fs.lstatSync(path.join(base, slug + '.note.txt')); } catch { /* 없음 */ }
+    if (note && nst && nst.isFile() && (typeof uid !== 'number' || nst.uid === uid)) sections.push({ name: 'note.txt', text: cleanProposalText(note.text, 2048), truncated: note.truncated, ...(note.truncated ? { limit: 'file' } : {}) });
+  }
+  return { sections, files: sc.files.map((f) => ({ name: cleanDisplay(f.name, 41), size: f.size })), skipped: sc.skipped + (sc.overflow ? 1 : 0) };
+}
+
+// 거절(스킬): 폴더를 앱 소유 휴지 폴더로 옮긴다(rename: 한 번에 옮겨지고 링크는 따라가지 않는다). slug 는 여기서 다시 검증한다.
+function trashProposalDir(base, trashBase, slug, uid, now = new Date()) {
+  const fs = require('fs'); const path = require('path');
+  if (!validProposalSlug('skill', slug)) return { ok: false, reason: 'invalid' };
+  const dir = path.join(base, slug);
+  let ds; try { ds = fs.lstatSync(dir); } catch { return { ok: false, reason: 'missing' }; }
+  if (!dirOwnedOk(ds, uid)) return { ok: false, reason: 'invalid' };
+  try {
+    let ts = null; try { ts = fs.lstatSync(trashBase); } catch { /* 없음 */ }
+    if (!ts) fs.mkdirSync(trashBase, { mode: 0o700 });
+    else if (!ts.isDirectory() || ts.isSymbolicLink()) return { ok: false, reason: 'trash' };
+    const stamp = now.getFullYear() + String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0') + '-' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0') + String(now.getSeconds()).padStart(2, '0');
+    const exists = (q) => { try { fs.lstatSync(q); return true; } catch { return false; } };
+    let dest = path.join(trashBase, slug + '-' + stamp);
+    for (let i = 2; exists(dest); i++) dest = path.join(trashBase, slug + '-' + stamp + '-' + i);
+    fs.renameSync(dir, dest);
+    return { ok: true };
+  } catch { return { ok: false, reason: 'trash' }; }
+}
+
+// 스킬 설치 요청 문장: 고정 템플릿(t 는 i18n 의 inbox.skillRequest) + 검증을 통과한 slug 뿐이다(제안 내용은 섞지 않는다). slug 가 틀리면 ''.
+function skillRequestText(t, slug) {
+  return validProposalSlug('skill', slug) ? String(t('inbox.skillRequest', { slug })) : '';
+}
+
+// squads.py check --json 한 줄 -> 엄격 검증한 요약(문자열은 다시 정리). 형식이 어긋나면 null. expectSlug 와 다르면 null.
+const SQUAD_CHECK_MAX_BYTES = 32768;
+const SQUAD_TOOLS_OK = ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch', 'Agent', 'Skill', 'TodoWrite', 'NotebookEdit'];
+function parseSquadCheck(text, expectSlug) {
+  if (typeof text !== 'string' || text.length > SQUAD_CHECK_MAX_BYTES || !validProposalSlug('squad', expectSlug)) return null;
+  let o; try { o = JSON.parse(text); } catch { return null; }
+  if (!isPlainObject(o) || o.slug !== expectSlug) return null;
+  if (o.ok === false) return typeof o.reason === 'string' ? { ok: false, slug: expectSlug, reason: cleanDisplay(o.reason, 200) } : null;
+  if (o.ok !== true || typeof o.digest !== 'string' || !/^[0-9a-f]{64}$/.test(o.digest)) return null;
+  const tools = (a) => (Array.isArray(a) && a.length <= 16 && a.every((x) => SQUAD_TOOLS_OK.includes(x)) ? [...new Set(a)] : null);
+  const strs = (a) => (Array.isArray(a) && a.length <= 30 && a.every((x) => typeof x === 'string') ? a.map((x) => cleanDisplay(x, 200)).filter(Boolean) : null);
+  if (!isPlainObject(o.lead) || !SQUAD_MODELS.includes(o.lead.model) || !tools(o.lead.tools)) return null;
+  if (!Array.isArray(o.members) || o.members.length < 1 || o.members.length > SQUAD_MEMBERS_MAX) return null;
+  const members = [];
+  for (const m of o.members) {
+    if (!isPlainObject(m) || typeof m.role !== 'string' || !SQUAD_SLUG_RE.test(m.role) || !SQUAD_MODELS.includes(m.model) || !tools(m.tools)) return null;
+    members.push({ role: m.role, model: m.model, tools: tools(m.tools) });
+  }
+  const warns = strs(o.warns); const risks = strs(o.risks);
+  const name = squadText(typeof o.name === 'string' ? o.name : null, SQUAD_NAME_MAX, 1); const description = squadText(typeof o.description === 'string' ? o.description : null, SQUAD_DESC_MAX, 0);
+  if (!warns || !risks || name === null || description === null || typeof o.existsPersonal !== 'boolean' || typeof o.existsBuiltin !== 'boolean') return null;
+  return { ok: true, slug: expectSlug, name, description, lead: { model: o.lead.model, tools: tools(o.lead.tools) }, members, warns, risks, existsPersonal: o.existsPersonal, existsBuiltin: o.existsBuiltin, digest: o.digest };
+}
+// 확인 창에 보일 요약: 팀원 수(총괄 제외), 모델·도구의 중복 없는 목록, 총괄·팀원별 roster
+function summarizeSquadCheck(c) {
+  const all = [c.lead, ...c.members];
+  const roster = [{ role: 'lead', model: c.lead.model, tools: c.lead.tools }, ...c.members.map((m) => ({ role: m.role, model: m.model, tools: m.tools }))]; // 확인 창에 총괄·팀원별 도구를 그대로 보인다
+  return { members: c.members.length, models: [...new Set(all.map((x) => x.model))], tools: [...new Set([].concat(...all.map((x) => x.tools)))], roster };
+}
+
+// 로그 시각 'YYYY-MM-DD HH:MM:SS'(로컬) -> 밀리초. 실제 달력에 없는 날짜(13월 등)나 형식 오류는 null.
+const SEEN_FUTURE_MS = 86400000; // 지금보다 하루 넘게 앞선 시각은 믿지 않는다
+function logAtMs(at) {
+  if (typeof at !== 'string' || !LOG_AT_RE.test(at)) return null;
+  const [y, mo, d, h, mi, se] = [+at.slice(0, 4), +at.slice(5, 7), +at.slice(8, 10), +at.slice(11, 13), +at.slice(14, 16), +at.slice(17, 19)];
+  const dt = new Date(y, mo - 1, d, h, mi, se);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d || dt.getHours() !== h || dt.getMinutes() !== mi || dt.getSeconds() !== se) return null;
+  const t = dt.getTime();
+  return Number.isFinite(t) ? t : null;
+}
+// 실제 날짜이고 지금 + 1일 이내인 시각만 true
+const plausibleLogAt = (at, now = Date.now()) => { const t = logAtMs(at); return t !== null && t <= now + SEEN_FUTURE_MS; };
+const pad2 = (n) => String(n).padStart(2, '0');
+const fmtLogAt = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+
+// 본 알림 기준 시각(data/inbox-seen.json: { version: 1, seen: 'YYYY-MM-DD HH:MM:SS' | '' })
+function validateInboxSeen(o, now = Date.now()) {
+  if (!isPlainObject(o) || o.version !== 1 || typeof o.seen !== 'string' || (o.seen !== '' && !plausibleLogAt(o.seen, now))) return null; // 하루 넘게 미래인 값은 손상으로 본다
+  if (Object.keys(o).length !== 2) return null;
+  return o.seen;
+}
+function parseInboxSeen(res, now = Date.now()) {
+  if (!res || res.truncated || typeof res.text !== 'string') return null;
+  try { return validateInboxSeen(JSON.parse(res.text), now); } catch { return null; }
+}
+// { status: 'missing'|'corrupt'|'ok', data: 본 시각('' 이면 아무것도 안 본 것) }
+function readInboxSeenFile(file, now = Date.now()) {
+  const fs = require('fs');
+  let present = true;
+  try { fs.lstatSync(file); } catch { present = false; }
+  if (!present) return { status: 'missing', data: '' };
+  const d = parseInboxSeen(readRegular(file, INBOX_SEEN_MAX_BYTES, false), now);
+  return d === null ? { status: 'corrupt', data: '' } : { status: 'ok', data: d };
+}
+function saveInboxSeen(file, seen, now = Date.now()) {
+  if (validateInboxSeen({ version: 1, seen }, now) === null) return false;
+  return writeJsonAtomic(file, { version: 1, seen }, 'inbox-seen');
+}
+// 알림 목록에 새로움 표시를 붙이고 센다. seen 보다 늦은 시각만 새것(형식이 틀린 시각은 새것이 아니다).
+function markUnseen(events, seen, now = Date.now()) {
+  const s = plausibleLogAt(seen, now) ? seen : '';
+  const list = (Array.isArray(events) ? events : []).map((e) => ({ ...e, fresh: plausibleLogAt(e.at, now) && e.at > s }));
+  return { list, unseen: list.filter((e) => e.fresh).length };
+}
+// 로그 시각('YYYY-MM-DD HH:MM:SS', 로컬) -> 지금까지 지난 시간 { unit: 'now'|'min'|'hour'|'day', n }. 형식이 틀리면 null. 미래 시각은 'now'.
+function relativeAgo(at, now = Date.now()) {
+  if (typeof at !== 'string' || !LOG_AT_RE.test(at)) return null;
+  const t = logAtMs(at);
+  if (t === null) return null;
+  const s = Math.floor((now - t) / 1000);
+  if (s < 60) return { unit: 'now', n: 0 };
+  if (s < 3600) return { unit: 'min', n: Math.floor(s / 60) };
+  if (s < 86400) return { unit: 'hour', n: Math.floor(s / 3600) };
+  return { unit: 'day', n: Math.min(99, Math.floor(s / 86400)) };
+}
+// 가장 최근 알림 시각(실제 날짜가 아니거나 하루 넘게 미래인 시각은 무시)
+const newestAt = (events, now = Date.now()) => (Array.isArray(events) ? events.reduce((m, e) => (plausibleLogAt(e && e.at, now) && e.at > m ? e.at : m), '') : '');
+// "본 것으로" 저장할 기준: min(가장 최근 알림 시각, 지금). 미래 시각이 기준으로 박혀 이후 알림을 가리지 못하게 한다.
+function seenToStore(events, now = Date.now()) {
+  const at = newestAt(events, now); const cur = fmtLogAt(new Date(now));
+  return at && at < cur ? at : (at ? cur : '');
+}
+
 const api = {
+  INBOX_NOTIF_MAX, PROPOSAL_FILE_MAX, PROPOSAL_TOTAL_MAX, PROPOSAL_FILES_MAX, logAtMs, plausibleLogAt, fmtLogAt, seenToStore, PROPOSAL_LIST_MAX, INBOX_SEEN_MAX_BYTES, validProposalSlug, cleanDisplay, cleanProposalText, proposalMeta, scanProposalDir, listProposals, proposalDetail, trashProposalDir, skillRequestText, parseSquadCheck, summarizeSquadCheck, validateInboxSeen, parseInboxSeen, readInboxSeenFile, saveInboxSeen, markUnseen, newestAt, relativeAgo,
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,

@@ -33,7 +33,7 @@ const ROOT = found ? found.root : null; // null 이면 저장소를 못 찾은 �
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
@@ -171,7 +171,7 @@ function cleanOldStateFiles() {
 }
 const INDEX_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 let cache = {
-  status: null, todosRaw: [], todos: [], skills: [], briefing: [], battery: null, disk: null,
+  status: null, todosRaw: [], todos: [], skills: [], notifs: [], battery: null, disk: null,
 };
 // 프로젝트·기억 캐시는 refresh() 가 통째로 바꾸는 cache 와 따로 둔다(예전에 cache = {...} 교체가 memMetasAt 을 지워 관련 기억이 항상 비던 회귀 방지)
 const proj = { raw: { registry: [], entries: [] }, list: [], view: { open: [], done: [], doneCount: 0 } };
@@ -289,7 +289,7 @@ async function refresh() {
         skillDirs(path.join(os.homedir(), '.claude', 'skills')),
         skillDirs(path.join(ROOT, '.claude', 'skills')),
       ),
-      briefing: L.mergeBriefing(logs),
+      notifs: L.mergeBriefing(logs, L.INBOX_NOTIF_MAX),
       battery: batt ? L.parseBattery(batt) : null,
       disk: df ? L.parseDiskFree(df) : null,
     };
@@ -299,6 +299,8 @@ async function refresh() {
     if (PERSIST || !projUiLoaded) loadProjUi(); // 시험·스모크에서는 처음 한 번만 읽는다(메모리 변경을 덮지 않게)
     readProjectsRaw();
     recomputeProjects();
+    if (PERSIST || !inboxSeenLoaded) loadInboxSeen(); // 시험·스모크에서는 처음 한 번만 읽는다
+    refreshInbox(); // 기다리지 않는다(스쿼드 검증은 바뀐 제안에만 돌고 순서대로 하나씩)
     refreshed = true;
     refreshTray();
   } finally { refreshing = false; }
@@ -356,7 +358,7 @@ function panels() {
     todos: cache.todos,
     projects: proj.view, // 목록은 가볍게(요약만). 상세는 projects:detail 로 요청 시
     skills: cache.skills,
-    briefing: cache.briefing,
+    inbox: inboxView(),
     battery: cache.battery,
     disk: cache.disk,
     party, // 기본 팀. name null = 앱 이름(i18n app.title)
@@ -984,7 +986,7 @@ function writePrompt(w, raw) {
   if (!w.term) return { ok: false, reason: 'no-term' };
   const text = L.cleanQuestText(raw);
   if (!text || !L.isSafeQuestStart(text)) return { ok: false, reason: 'unsafe-start' };
-  if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 선택 프롬프트 등에서는 쓰지 않는다
+  if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 붙여넣기 모드가 꺼진 상태(선택 메뉴 등)에서는 쓰지 않는다. 셸 프롬프트도 켜져 있어 claude 입력줄인지까지는 가리지 못한다
   w.term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만
   return { ok: true };
 }
@@ -1001,12 +1003,204 @@ ipcMain.handle('files:drop', (e, id, paths) => {
     try { const st = fs.lstatSync(p); if (!(st.isFile() || st.isDirectory() || st.isSymbolicLink())) return { ok: false, reason: 'missing' }; } catch { return { ok: false, reason: 'missing' }; }
   }
   if (!w.term) return { ok: false, reason: 'no-term' };
-  if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 셸 프롬프트 등 붙여넣기 모드가 아니면 쓰지 않는다(writePrompt 와 같다)
+  if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 붙여넣기 모드가 아니면 쓰지 않는다(writePrompt 와 같다)
   const text = L.buildDropPaste(paths);
   if (!text) return { ok: false, reason: 'invalid' };
   w.term.write(text); // Enter 는 보내지 않는다
   return { ok: true };
 });
+
+// ---- 알림과 승인함: 승인 대기(스쿼드·스킬 제안) + 알림(dream·reflect 로그 이벤트). 제안 폴더·로그는 모두 믿지 않는다(lib.js 가 엄격히 훑는다) ----
+const proposalBase = (kind) => (ROOT ? path.join(ROOT, 'data', kind === 'squad' ? 'squad-proposals' : 'skill-proposals') : null);
+const skillTrashDir = () => path.join(ROOT, 'data', 'skill-proposals-trash'); // 앱 소유 휴지 폴더(영구 삭제 아님)
+const inboxSeenFile = () => path.join(ROOT, 'data', 'inbox-seen.json');
+let inboxSeen = ''; let inboxSeenLoaded = false;
+function loadInboxSeen() {
+  if (!ROOT) return;
+  const r = L.readInboxSeenFile(inboxSeenFile(), Date.now()); // 하루 넘게 미래인 값은 손상으로 본다
+  if (r.status === 'corrupt' && PERSIST) L.backupCorruptFile(inboxSeenFile()); // 망가진 파일은 .bak 으로 옮기고 새로 시작
+  inboxSeen = r.data; inboxSeenLoaded = true;
+}
+// checks: slug -> { sig, at, c, p } — c: 검증 결과(undefined=실행 중, null=실행·형식 실패), p: 그 Promise.
+// 제안 파일이 바뀌지 않았으면(sig 같음) 검증을 다시 돌리지 않고, 실행 중이면 같은 Promise 를 나눠 쓴다(목록·상세가 같은 검증을 공유).
+const inbox = { approvals: [], checks: new Map() };
+const fmtLogAt = L.fmtLogAt;
+// 시험 전용(MARU_APP_UI=inbox): 가짜 승인·알림. 동작 버튼은 아무것도 하지 않는다.
+const fakeInbox = () => {
+  const ago = (min) => fmtLogAt(new Date(Date.now() - min * 60000));
+  return {
+    approvals: [
+      { kind: 'squad', slug: 'research-desk', name: '조사 데스크', description: '여러 출처를 나눠 조사하고 한 장으로 합쳐 보고하는 팀', members: 3, state: 'ok', digest: 'a'.repeat(64), builtin: false },
+      { kind: 'squad', slug: 'ops-runner', name: '운영 도우미', description: '반복 점검 스크립트를 돌리는 팀', members: 2, state: 'risk', digest: 'b'.repeat(64), builtin: true },
+      { kind: 'skill', slug: 'weekly-review', name: 'weekly-review', description: '한 주의 일지를 모아 회고 문서 초안을 만든다', invalid: false },
+    ],
+    notifs: [{ at: ago(12), code: 'reflect.commit' }, { at: ago(95), code: 'reflect.quests', n: 3 }, { at: ago(60 * 9), code: 'dream.commit' }, { at: ago(60 * 9 + 2), code: 'dream.sweep', n: 2 }, { at: ago(60 * 30), code: 'dream.noChange' }],
+    seen: ago(60 * 5),
+  };
+};
+function inboxView() {
+  const f = TEST_UI === 'inbox' ? fakeInbox() : null;
+  const m = L.markUnseen(f ? f.notifs : cache.notifs, f ? f.seen : inboxSeen);
+  return { approvals: f ? f.approvals : inbox.approvals, notifications: m.list, unseen: m.unseen };
+}
+// 알림을 본 것으로 표시: 기준은 main 이 가진 가장 최근 알림 시각(렌더러가 시각을 보내지 않는다)
+ipcMain.handle('inbox:mark-seen', (e) => {
+  if (!fromMain(e)) return { ok: false, reason: 'invalid' };
+  const now = Date.now();
+  const at = L.seenToStore(cache.notifs, now); // min(가장 최근 알림 시각, 지금): 미래 시각이 기준으로 박히지 않게 한다
+  if (TEST_UI === 'inbox' || !at || at <= inboxSeen) return { ok: true };
+  if (PERSIST && !L.saveInboxSeen(inboxSeenFile(), at)) return { ok: false, reason: 'save' };
+  inboxSeen = at;
+  return { ok: true };
+});
+// squads.py 호출: 고정 argv·셸 없음·python3 -I·시간/출력 상한·한 번에 하나씩(큐). 데이터 위치는 환경변수로 명시한다.
+let squadsQueue = Promise.resolve();
+function squadsCli(args) {
+  const job = async () => {
+    const script = ROOT ? path.join(ROOT, 'scripts', 'squads.py') : null;
+    const py = script && isFileSafe(script) ? pythonBin() : null;
+    if (!py) return null;
+    const env = { ...childEnv(), MARU_DATA: path.join(ROOT, 'data'), MARU_SQUAD_PROPOSALS: proposalBase('squad'), MARU_SQUADS_BUILTIN: path.join(ROOT, 'squads') };
+    return exec(py, ['-I', script, ...args], { timeout: 8000, maxBuffer: 128 * 1024, env });
+  };
+  const p = squadsQueue.then(job, job);
+  squadsQueue = p.then(() => {}, () => {});
+  return p;
+}
+async function checkSquad(slug) { // -> L.parseSquadCheck 결과 | null(실행·형식 실패)
+  if (!L.validProposalSlug('squad', slug)) return null;
+  const r = await squadsCli(['check', '--json', path.join(proposalBase('squad'), slug)]);
+  return r && (r.code === 0 || r.code === 1) ? L.parseSquadCheck(r.stdout.trim(), slug) : null;
+}
+const checkState = (c) => (!c ? 'unknown' : !c.ok ? 'invalid' : c.risks.length ? 'risk' : 'ok');
+const CHECK_RETRY_MS = 30000; // 실행·형식 실패(null)는 이 시간이 지나면 다시 시도한다
+function checkCached(slug, sig) { // -> Promise<검증 결과 | null>
+  const e = inbox.checks.get(slug);
+  if (e && e.sig === sig && (e.c !== null || Date.now() - e.at < CHECK_RETRY_MS)) return e.p;
+  const ent = { sig, at: Date.now(), c: undefined, p: null };
+  ent.p = checkSquad(slug).then((c) => { ent.c = c; ent.at = Date.now(); return c; }, () => { ent.c = null; ent.at = Date.now(); return null; });
+  inbox.checks.set(slug, ent);
+  return ent.p;
+}
+const approvalOfSquad = (x) => {
+  const e = inbox.checks.get(x.slug); const c = e && e.sig === x.sig ? e.c : undefined;
+  return { kind: 'squad', slug: x.slug, name: x.name, description: x.description, members: x.members, state: c === undefined ? 'unknown' : checkState(c),
+    digest: c && c.ok ? c.digest : '', builtin: !!(c && c.ok && c.existsBuiltin) }; // digest: 이 행이 그려진 검증 결과의 것(설치 때 main 이 다시 대조한다)
+};
+let inboxRefreshing = false; let inboxRefreshAgain = false;
+async function refreshInbox(again) { // again: 동작이 끝난 뒤 호출 — 이미 도는 중이면 끝난 뒤 한 번 더 돈다(처리한 항목이 남아 있지 않게)
+  if (!ROOT || TEST_UI === 'inbox') return;
+  if (inboxRefreshing) { if (again) inboxRefreshAgain = true; return; }
+  inboxRefreshing = true;
+  try {
+    do {
+      inboxRefreshAgain = false;
+      try { await refreshInboxOnce(); } catch { /* 다음 주기에 재시도 */ }
+    } while (inboxRefreshAgain);
+  } finally { inboxRefreshing = false; }
+}
+async function refreshInboxOnce() {
+  const uid = process.getuid();
+  const sq = L.listProposals('squad', proposalBase('squad'), uid);
+  const sk = L.listProposals('skill', proposalBase('skill'), uid);
+  const view = () => [...sq.map(approvalOfSquad), ...sk.map((x) => ({ kind: 'skill', slug: x.slug, name: x.name, description: x.description, invalid: x.invalid === true }))];
+  inbox.approvals = view();
+  for (const x of sq) {
+    const e = inbox.checks.get(x.slug);
+    if (e && e.sig === x.sig && (e.c !== null || Date.now() - e.at < CHECK_RETRY_MS)) continue;
+    await checkCached(x.slug, x.sig);
+    inbox.approvals = view();
+  }
+  for (const k of [...inbox.checks.keys()]) if (!sq.some((x) => x.slug === k)) inbox.checks.delete(k);
+  inbox.approvals = view();
+}
+// 렌더러가 보낸 {kind, slug} 는 문자열 형식만 보고, main 이 지금 폴더를 다시 훑어 있는 것만 인정한다
+const currentApproval = (kind, slug) => {
+  if (!ROOT || !L.validProposalSlug(kind, slug)) return null;
+  return L.listProposals(kind, proposalBase(kind), process.getuid()).find((x) => x.slug === slug) || null;
+};
+ipcMain.handle('inbox:detail', async (e, kind, slug) => {
+  if (!fromMain(e)) return null;
+  if (TEST_UI === 'inbox') {
+    const a = fakeInbox().approvals.find((x) => x.kind === kind && x.slug === slug);
+    if (!a) return null;
+    return { kind, slug, name: a.name, description: a.description, files: [{ name: a.kind === 'squad' ? 'squad.md' : 'SKILL.md', size: 120 }], skipped: 0,
+      sections: [{ name: a.kind === 'squad' ? 'squad.md' : 'SKILL.md', text: '---\nname: ' + a.name + '\ndescription: ' + a.description + '\n---\n\n(smoke)' }],
+      check: a.kind === 'squad' ? { state: a.state, reason: '', warns: [], risks: a.state === 'risk' ? ['lead.md: 총괄 도구에 Bash 가 있음'] : [], existsPersonal: false, existsBuiltin: !!a.builtin, digest: a.digest, summary: { members: a.members, models: ['sonnet'], tools: ['Agent', 'Read'] } } : null };
+  }
+  const it = currentApproval(kind, slug);
+  const d = it ? L.proposalDetail(kind, proposalBase(kind), slug, process.getuid()) : null;
+  if (!d) return null;
+  let check = null;
+  if (kind === 'squad') {
+    const c = await checkCached(slug, it.sig); // 목록과 같은 검증(진행 중이면 그것을 기다린다)을 쓴다. 설치 때는 main 이 따로 새로 검사한다
+    check = { state: checkState(c), reason: c && !c.ok ? c.reason : '', warns: c && c.ok ? c.warns : [], risks: c && c.ok ? c.risks : [], existsPersonal: !!(c && c.ok && c.existsPersonal), existsBuiltin: !!(c && c.ok && c.existsBuiltin), digest: c && c.ok ? c.digest : '', summary: c && c.ok ? L.summarizeSquadCheck(c) : null };
+  }
+  return { kind, slug, name: it.name, description: it.description, ...d, check };
+});
+let inboxActing = false; // 확인 창이 떠 있거나 설치·거절을 하는 동안은 다른 동작을 받지 않는다
+async function inboxAction(e, fn) {
+  if (!fromMain(e) || TEST_UI === 'inbox') return { ok: false, reason: 'invalid' };
+  if (inboxActing) return { ok: false, reason: 'busy' };
+  inboxActing = true;
+  try { return await fn(); } finally { inboxActing = false; refreshInbox(true); }
+}
+const confirmBox = async (message, detail, okLabel) => (await box({ type: 'warning', buttons: [okLabel, tr('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message, detail })).response === 0;
+const personalSquadExists = (slug) => { try { const st = fs.lstatSync(path.join(ROOT, 'data', 'squads', slug)); return st.isDirectory() && !st.isSymbolicLink(); } catch { return false; } };
+// shownDigest: 렌더러가 마지막으로 보여 준 검증 결과의 digest. 형식(64 hex)만 보고, main 이 새로 돌린 검사와 같을 때만 확인 창으로 간다(범위를 좁히기만 한다).
+ipcMain.handle('inbox:install-squad', (e, slug, shownDigest) => inboxAction(e, async () => {
+  if (typeof shownDigest !== 'string' || !/^[0-9a-f]{64}$/.test(shownDigest)) return { ok: false, reason: 'invalid' };
+  if (!currentApproval('squad', slug)) return { ok: false, reason: 'invalid' };
+  const c = await checkSquad(slug); // 캐시를 쓰지 않는 새 검사
+  if (!c) return { ok: false, reason: 'check-failed' };
+  if (!c.ok) return { ok: false, reason: 'rejected', detail: c.reason };
+  if (c.digest !== shownDigest) { inbox.checks.delete(slug); return { ok: false, reason: 'changed' }; } // 사용자가 본 것과 다르다: 목록·상세를 다시 그리게 한다
+  if (c.existsBuiltin) return { ok: false, reason: 'builtin' }; // 내장 스쿼드를 같은 이름의 개인 스쿼드가 덮어쓰게 되므로 앱에서는 설치하지 않는다(터미널에서만)
+  if (c.risks.length) return { ok: false, reason: 'risky', risks: c.risks }; // 위험 신호가 있으면 앱은 설치하지 않는다(터미널에서 --ack-warnings 는 사용자가 직접)
+  if (c.existsPersonal) return { ok: false, reason: 'exists' }; // 앱은 --replace 를 쓰지 않는다
+  const sum = L.summarizeSquadCheck(c);
+  const roster = sum.roster.map((x) => x.role + ' (' + x.model + '): ' + (x.tools.join(', ') || '-')).join('\n');
+  const yes = await confirmBox(tr('dlg.sqInstall.title', { name: c.name }), tr('dlg.sqInstall.detail', { slug, n: sum.members, roster }), tr('inbox.act.install'));
+  if (!yes) return { ok: false, reason: 'cancel' };
+  if (!currentApproval('squad', slug)) return { ok: false, reason: 'invalid' };
+  // --expect-digest: 확인 창에 보인 내용 그대로일 때만 설치된다(그사이 파일이 바뀌면 squads.py 가 거부). 위험 신호가 있으면 squads.py 도 거부한다.
+  const r = await squadsCli(['install', path.join(proposalBase('squad'), slug), '--expect-digest', c.digest]);
+  if (!r) return { ok: false, reason: 'check-failed' };
+  if (r.code === 3) return { ok: false, reason: 'changed' };
+  // 시간 초과·비정상 종료여도 설치가 이미 끝났을 수 있다: 개인 스쿼드 폴더가 생겼는지 다시 보고 그대로 알린다(없던 폴더였음을 위에서 확인했다)
+  if (r.code !== 0 && !personalSquadExists(slug)) return { ok: false, reason: 'install-failed' };
+  const rm = await squadsCli(['remove', '--proposal', slug]);
+  refreshSquads();
+  return { ok: true, name: c.name, removed: !!rm && rm.code === 0 };
+}));
+ipcMain.handle('inbox:reject', (e, kind, slug) => inboxAction(e, async () => {
+  const it = currentApproval(kind, slug);
+  if (!it) return { ok: false, reason: 'invalid' };
+  const isSquad = kind === 'squad';
+  const yes = await confirmBox(tr('dlg.reject.title', { name: it.name }), tr(isSquad ? 'dlg.reject.detail.squad' : 'dlg.reject.detail.skill'), tr('inbox.act.reject'));
+  if (!yes) return { ok: false, reason: 'cancel' };
+  if (!currentApproval(kind, slug)) return { ok: false, reason: 'invalid' };
+  if (isSquad) { const r = await squadsCli(['remove', '--proposal', slug]); return r && r.code === 0 ? { ok: true } : { ok: false, reason: 'trash' }; }
+  const r = L.trashProposalDir(proposalBase('skill'), skillTrashDir(), slug, process.getuid());
+  return r.ok ? { ok: true } : { ok: false, reason: r.reason === 'missing' ? 'invalid' : 'trash' };
+}));
+// 스킬 "설치 요청": 앱은 아무것도 복사하지 않는다. 고정 문장(slug 뿐)을 활성 마루 작업 공간의 입력줄에 채운다(Enter 는 보내지 않는다. projects:continue 와 같다).
+const isMaruWs = (w) => { try { return !!ROOT && fs.realpathSync(w.cwd) === fs.realpathSync(ROOT); } catch { return false; } };
+ipcMain.handle('inbox:request-skill', (e, id, slug) => inboxAction(e, async () => {
+  const w = wsFrom(e, id);
+  const it = w ? currentApproval('skill', slug) : null;
+  if (!w || !it || it.invalid) return { ok: false, reason: 'invalid' }; // SKILL.md 를 읽을 수 없는 제안은 버튼 상태와 무관하게 main 이 거부한다
+  if (w.id !== activeId) return { ok: false, reason: 'inactive' };
+  if (!isMaruWs(w)) return { ok: false, reason: 'not-maru' };
+  if (!w.term) return { ok: false, reason: 'no-term' };
+  // 붙여넣기 모드(bracketed)는 claude 입력줄뿐 아니라 셸 프롬프트도 켠다. state 파일(첫 질문 뒤에야 생김)로도 "claude 가 떴다"를 확정할 수 없어 구분하지 못한다 — 확인 창에서 사용자에게 알린다.
+  if (!w.bracketed) return { ok: false, reason: 'not-ready' };
+  const text = L.skillRequestText(tr, slug);
+  if (!text) return { ok: false, reason: 'invalid' };
+  if (!(await confirmBox(tr('dlg.skRequest.title', { slug }), tr('dlg.skRequest.detail', { text }), tr('inbox.act.request')))) return { ok: false, reason: 'cancel' };
+  if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' }; // 묻는 동안 바뀌었을 수 있다
+  return writePrompt(w, text);
+}));
 // ---- 프로젝트 IPC: 키는 main 의 요약 목록과 대조하고, 문장·이름·상태는 main 이 가진 값으로 다시 만든다 ----
 ipcMain.handle('projects:detail', (e, key) => {
   if (!fromMain(e)) return null;

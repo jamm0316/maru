@@ -1112,7 +1112,7 @@ t('journal·memory 읽기: 기억 폴더가 링크여도 둘 다 읽지 않는�
 });
 t('화면 시험 모드·상세와 터미널 전환 정적 검사', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
-  assert.ok(/!app\.isPackaged && \['menu', 'settings', 'update', 'project', 'party'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main)); // 패키징 빌드에서는 무시
+  assert.ok(/!app\.isPackaged && \['menu', 'settings', 'update', 'project', 'party', 'inbox'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main)); // 패키징 빌드에서는 무시
   assert.ok(/uiOpen === 'project'\) openFirstProject/.test(rd) && /x\.kind === 'project'\) \|\| all\[0\]/.test(rd));
   assert.ok(/closeDetail\(false\); showActive\(true\)/.test(rd)); // 작업 공간이 바뀌면 상세를 닫고 나서 그린다
   assert.ok(/function showActive\(focus\) \{\s*if \(detailOpen\) return;/.test(rd)); // 숨은 컨테이너에서 xterm open 금지
@@ -1458,6 +1458,273 @@ t('main·preload·renderer 정적 검사: 완료/안 함 IPC 와 UI', () => {
   for (const lg of I.LANGS) { assert.ok(I.t(lg, 'dlg.projDone.title', { n: 3 }).includes('3')); assert.ok(I.t(lg, 'todo.done.aria', { title: 'T' }).includes('T')); }
   assert.strictEqual(I.STR.ko['todo.marked.done'] + ' · ' + I.STR.ko['todo.undo'], '완료로 표시했습니다 · 되돌리기');
   assert.ok(!/MARU_APP_UI[\s\S]{0,40}todo-done/.test(main));
+});
+
+// ---- 알림과 승인함 ----
+const UID = process.getuid();
+const mkProp = (base, slug, files) => { const d = path.join(base, slug); fs.mkdirSync(d, { recursive: true }); for (const [n, c] of Object.entries(files || {})) fs.writeFileSync(path.join(d, n), c); return d; };
+t('inbox: 제안 slug 검증(종류별 규칙)', () => {
+  for (const s of ['a', 'dev-team', 'a'.repeat(20), '0x']) assert.ok(L.validProposalSlug('squad', s), s);
+  for (const s of ['', 'A', '-a', 'a_b', 'a'.repeat(21), '../x', 'a/b', 'a\n', 'a b', '가', '.hidden', 42, null]) assert.ok(!L.validProposalSlug('squad', s), String(s));
+  assert.ok(L.validProposalSlug('skill', 'a'.repeat(41)) && !L.validProposalSlug('skill', 'a'.repeat(42)));
+  assert.ok(!L.validProposalSlug('other', 'abc') && !L.validProposalSlug(undefined, 'abc'));
+});
+t('inbox: cleanDisplay·cleanProposalText 는 제어·bidi·ESC 를 지우고 상한을 지킨다', () => {
+  assert.strictEqual(L.cleanDisplay('a‮b\u001b[31mc​d\n e\t f', 50), 'ab[31mcd e f');
+  assert.strictEqual(L.cleanDisplay('가'.repeat(300), 200).length, 200);
+  assert.strictEqual(L.cleanDisplay(5, 10), '');
+  const x = L.cleanProposalText('줄1\r\n줄2‮\u0007\n\n\n\n줄3\ttab', 100);
+  assert.strictEqual(x, '줄1\n줄2\n\n줄3  tab');
+  assert.ok(!/[\u0000-\u0009\u000B-\u001F‮]/.test(x));
+});
+t('inbox: proposalMeta 는 머리말의 한 줄 name·description 만 읽는다', () => {
+  assert.deepStrictEqual(L.proposalMeta('---\nname: "내 팀"\ndescription: 설명 ‮입니다\n---\n본문 name: x'), { name: '내 팀', description: '설명 입니다' });
+  assert.deepStrictEqual(L.proposalMeta('머리말 없음\nname: x'), { name: '', description: '' });
+  assert.deepStrictEqual(L.proposalMeta('---\ndescription: >\n  접은 문단\n---\n'), { name: '', description: '' });
+  assert.strictEqual(L.proposalMeta('---\nname: ' + 'n'.repeat(100) + '\n---\n').name.length, 40);
+  assert.deepStrictEqual(L.proposalMeta(null), { name: '', description: '' });
+});
+t('inbox: listProposals 는 나쁜 이름·링크·일반 파일·큰 파일을 걸러 낸다', () => {
+  const base = fs.mkdtempSync(path.join(tmp, 'prop-sq-'));
+  mkProp(base, 'good-team', { 'squad.md': '---\nname: 좋은 팀\ndescription: 설명‮ 줄\n---\n', 'lead.md': 'x', 'a.md': 'x', 'b.md': 'x' });
+  mkProp(base, 'Bad_Slug', { 'squad.md': 'x' }); mkProp(base, 'a'.repeat(21), { 'squad.md': 'x' }); mkProp(base, '-lead', { 'squad.md': 'x' });
+  fs.writeFileSync(path.join(base, 'plainfile'), 'x'); fs.writeFileSync(path.join(base, 'good-team.note.txt'), 'memo');
+  const outside = fs.mkdtempSync(path.join(tmp, 'outside-')); fs.writeFileSync(path.join(outside, 'squad.md'), '---\nname: 밖\n---\n');
+  fs.symlinkSync(outside, path.join(base, 'linked'));
+  const big = mkProp(base, 'big-one', { 'lead.md': 'x' }); fs.writeFileSync(path.join(big, 'squad.md'), 'z'.repeat(L.PROPOSAL_FILE_MAX + 1));
+  const sl = mkProp(base, 'sym-file', { 'lead.md': 'x' }); fs.symlinkSync(path.join(outside, 'squad.md'), path.join(sl, 'squad.md'));
+  const r = L.listProposals('squad', base, UID);
+  assert.deepStrictEqual(r.map((x) => x.slug), ['big-one', 'good-team', 'sym-file']); // 정렬된 유효 slug 폴더만, 링크·일반 파일·나쁜 이름 제외
+  const g = r.find((x) => x.slug === 'good-team');
+  assert.deepStrictEqual([g.kind, g.name, g.description, g.members], ['squad', '좋은 팀', '설명 줄', 2]);
+  assert.strictEqual(r.find((x) => x.slug === 'big-one').name, 'big-one'); // 너무 큰 squad.md 는 읽지 않는다(이름은 slug)
+  assert.strictEqual(r.find((x) => x.slug === 'sym-file').name, 'sym-file'); // 링크 파일은 따라가지 않는다
+  assert.ok(g.sig.includes('squad.md:') && !JSON.stringify(r).includes('밖'));
+  assert.deepStrictEqual(L.listProposals('squad', path.join(base, 'linked'), UID), []); // 기준 폴더가 링크면 비움
+  assert.deepStrictEqual(L.listProposals('squad', path.join(base, 'none'), UID), []);
+  assert.deepStrictEqual(L.listProposals('squad', base, UID + 1), []); // 소유자가 다르면 거부
+  assert.deepStrictEqual(L.listProposals('nope', base, UID), []);
+});
+t('inbox: listProposals 개수 상한과 스킬 제안(SKILL.md 없는 폴더는 invalid)', () => {
+  const base = fs.mkdtempSync(path.join(tmp, 'prop-sk-'));
+  for (let i = 0; i < 30; i++) mkProp(base, 's' + String(i).padStart(2, '0'), { 'SKILL.md': '---\nname: n' + i + '\ndescription: d' + i + '\n---\n' });
+  assert.strictEqual(L.listProposals('skill', base, UID).length, L.PROPOSAL_LIST_MAX);
+  const b2 = fs.mkdtempSync(path.join(tmp, 'prop-sk2-'));
+  mkProp(b2, 'ok-skill', { 'SKILL.md': '---\nname: ok-skill\ndescription: 쓸모\n---\n', 'PROPOSAL.md': 'x' }); mkProp(b2, 'empty-one', { 'PROPOSAL.md': 'x' });
+  const outside = path.join(tmp, 'outside-skill.md'); fs.writeFileSync(outside, '---\nname: leak\n---\n'); const lk = mkProp(b2, 'link-md', {}); fs.symlinkSync(outside, path.join(lk, 'SKILL.md'));
+  const r = L.listProposals('skill', b2, UID);
+  assert.deepStrictEqual(r.map((x) => [x.slug, !!x.invalid, x.description]), [['empty-one', true, ''], ['link-md', true, ''], ['ok-skill', false, '쓸모']]);
+});
+t('inbox: proposalDetail 은 일반 파일만 보여 주고 링크·큰 파일·이상한 이름은 건너뛴다', () => {
+  const base = fs.mkdtempSync(path.join(tmp, 'prop-d-'));
+  const outside = path.join(tmp, 'secret.txt'); fs.writeFileSync(outside, 'SECRET');
+  const d = mkProp(base, 'team-x', { 'squad.md': 'S‮본문', 'lead.md': 'L', 'zed.md': 'Z', 'alpha.md': 'A' });
+  fs.symlinkSync(outside, path.join(d, 'evil.md')); fs.mkdirSync(path.join(d, 'subdir')); fs.writeFileSync(path.join(d, 'bad name.md'), 'x'); fs.writeFileSync(path.join(d, 'huge.md'), 'h'.repeat(L.PROPOSAL_FILE_MAX + 5));
+  fs.writeFileSync(path.join(base, 'team-x.note.txt'), '메모\u0007');
+  const r = L.proposalDetail('squad', base, 'team-x', UID);
+  assert.deepStrictEqual(r.sections.map((x) => x.name), ['squad.md', 'lead.md', 'alpha.md', 'huge.md', 'zed.md', 'note.txt']); // squad.md, lead.md, 팀원(이름순), 메모
+  assert.strictEqual(r.sections[0].text, 'S본문');
+  assert.ok(r.sections.find((x) => x.name === 'huge.md').truncated && r.sections.find((x) => x.name === 'huge.md').text === '');
+  assert.strictEqual(r.sections[5].text, '메모');
+  assert.ok(!JSON.stringify(r).includes('SECRET') && r.skipped === 3 && !r.files.some((f) => /evil|subdir|bad/.test(f.name))); // 링크·폴더·이름 규칙 위반 3개
+  assert.strictEqual(L.proposalDetail('squad', base, '../team-x', UID), null);
+  assert.strictEqual(L.proposalDetail('squad', base, 'nothere', UID), null);
+  const sk = mkProp(base, 'my-skill', { 'SKILL.md': '---\nname: my-skill\n---\n내용', 'PROPOSAL.md': '메모', 'extra.txt': 'x' });
+  const k = L.proposalDetail('skill', base, 'my-skill', UID);
+  assert.deepStrictEqual(k.sections.map((x) => x.name), ['SKILL.md']); assert.deepStrictEqual(k.files.map((f) => f.name), ['PROPOSAL.md', 'SKILL.md', 'extra.txt']);
+});
+t('inbox: 총 읽기 상한 — 상한을 실제로 넘기면 나머지는 읽지 않고 이유를 구분한다', () => {
+  const base = fs.mkdtempSync(path.join(tmp, 'prop-tot-'));
+  const files = { 'squad.md': 'a'.repeat(16000), 'lead.md': 'b'.repeat(16000) }; for (let i = 0; i < 7; i++) files['m' + i + '.md'] = 'c'.repeat(16000); // 9개 x 16000 = 144000 > 131072(8개 128000 까지만 읽힌다)
+  mkProp(base, 'tot', files);
+  const r = L.proposalDetail('squad', base, 'tot', UID);
+  const read = r.sections.filter((s) => s.text); const cut = r.sections.filter((s) => s.truncated);
+  assert.strictEqual(read.length, 8); assert.strictEqual(read.reduce((n, s) => n + s.text.length, 0), 128000);
+  assert.deepStrictEqual(cut.map((s) => [s.name, s.limit, s.text]), [['squad.md', 'total', '']]); // 합계 한도 때문에 읽지 않은 파일(이름순으로 읽으므로 마지막인 squad.md)
+  const b2 = fs.mkdtempSync(path.join(tmp, 'prop-big-')); mkProp(b2, 'one', { 'squad.md': 'x', 'lead.md': 'y'.repeat(L.PROPOSAL_FILE_MAX + 1), 'a.md': 'z' });
+  const r2 = L.proposalDetail('squad', b2, 'one', UID);
+  assert.deepStrictEqual(r2.sections.filter((s) => s.truncated).map((s) => [s.name, s.limit]), [['lead.md', 'file']]); // 파일 하나가 너무 큼
+  assert.ok(r2.sections.filter((s) => !s.truncated).every((s) => s.limit === undefined));
+});
+t('inbox: PROPOSAL_TOTAL_MAX 는 스쿼드 최대 구성(squad+lead+팀원 최대)을 다 읽을 만큼 크다', () => {
+  assert.ok(L.PROPOSAL_TOTAL_MAX >= (L.SQUAD_MEMBERS_MAX + 2) * L.PROPOSAL_FILE_MAX, String(L.PROPOSAL_TOTAL_MAX));
+  assert.ok(L.PROPOSAL_FILES_MAX >= L.SQUAD_MEMBERS_MAX + 2);
+  const base = fs.mkdtempSync(path.join(tmp, 'prop-max-')); const f = { 'squad.md': 'a'.repeat(L.PROPOSAL_FILE_MAX), 'lead.md': 'b'.repeat(L.PROPOSAL_FILE_MAX) };
+  for (let i = 0; i < L.SQUAD_MEMBERS_MAX; i++) f['m' + i + '.md'] = 'c'.repeat(L.PROPOSAL_FILE_MAX);
+  mkProp(base, 'full', f);
+  assert.ok(L.proposalDetail('squad', base, 'full', UID).sections.every((s) => !s.truncated)); // 최대 구성은 전부 읽힌다
+});
+t('inbox: 미래 시각 — logAtMs·plausibleLogAt·newestAt·markUnseen·seenToStore', () => {
+  const now = new Date(2026, 5, 10, 12, 0, 0).getTime();
+  assert.ok(L.logAtMs('2026-06-10 12:00:00') === now && L.logAtMs('2026-13-01 00:00:00') === null && L.logAtMs('2026-02-30 00:00:00') === null && L.logAtMs('2026-06-10 25:00:00') === null && L.logAtMs('x') === null);
+  assert.ok(L.plausibleLogAt('2026-06-11 11:59:59', now) && !L.plausibleLogAt('2026-06-11 12:00:01', now) && !L.plausibleLogAt('9999-12-31 23:59:59', now));
+  const ev = [{ at: '2026-06-10 11:00:00' }, { at: '9999-12-31 23:59:59' }, { at: '2026-13-45 99:99:99' }, { at: '2026-06-20 00:00:00' }];
+  assert.strictEqual(L.newestAt(ev, now), '2026-06-10 11:00:00'); // 미래·가짜 날짜는 무시
+  const m = L.markUnseen(ev, '', now); assert.strictEqual(m.unseen, 1); assert.deepStrictEqual(m.list.map((e) => e.fresh), [true, false, false, false]);
+  assert.strictEqual(L.markUnseen(ev, '9999-12-31 23:59:59', now).unseen, 1); // 미래 기준값은 쓰지 않는다(기준 없음으로)
+  assert.strictEqual(L.seenToStore(ev, now), '2026-06-10 11:00:00');
+  assert.strictEqual(L.seenToStore([{ at: '2026-06-10 12:30:00' }], now), '2026-06-10 12:00:00'); // 가까운 미래는 지금으로 제한
+  assert.strictEqual(L.seenToStore([{ at: '9999-12-31 23:59:59' }], now), ''); assert.strictEqual(L.seenToStore([], now), '');
+  // 파일: 하루 넘게 미래인 값은 손상, 하루 이내는 정상
+  assert.strictEqual(L.validateInboxSeen({ version: 1, seen: '2026-06-12 12:00:01' }, now), null); assert.strictEqual(L.validateInboxSeen({ version: 1, seen: '2026-06-11 11:00:00' }, now), '2026-06-11 11:00:00');
+  assert.strictEqual(L.validateInboxSeen({ version: 1, seen: '2026-02-30 00:00:00' }, now), null); // 달력에 없는 날짜
+  const f = path.join(tmp, 'seen-future.json');
+  fs.writeFileSync(f, JSON.stringify({ version: 1, seen: '9999-12-31 23:59:59' })); assert.strictEqual(L.readInboxSeenFile(f, now).status, 'corrupt');
+  assert.ok(!L.saveInboxSeen(f, '9999-12-31 23:59:59', now)); assert.ok(L.saveInboxSeen(f, '2026-06-10 11:00:00', now)); assert.strictEqual(L.readInboxSeenFile(f, now).data, '2026-06-10 11:00:00');
+  fs.rmSync(f);
+});
+t('inbox: 정적 검사 — 내장 이름 거절·digest 대조·request-skill 거부·재검사·캐시', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const sec = main.split('// ---- 알림과 승인함')[1].split('// ---- 프로젝트 IPC')[0];
+  const inst = sec.split("ipcMain.handle('inbox:install-squad'")[1].split("ipcMain.handle('inbox:reject'")[0];
+  const at = (re) => inst.search(re);
+  // 1: 내장 이름 거절(위험·존재 거절과 같은 줄 모양), 확인 창보다 앞
+  assert.ok(/c\.existsBuiltin\) return \{ ok: false, reason: 'builtin' \}/.test(inst) && at(/reason: 'builtin'/) < at(/confirmBox\(/));
+  // 2: digest 형식(64 hex) 검사 -> 새 검사(checkSquad) -> 같을 때만 다음 단계, 확인 창보다 앞
+  assert.ok(/\^\[0-9a-f\]\{64\}\$/.test(inst) && at(/\^\[0-9a-f\]\{64\}/) < at(/await checkSquad\(slug\)/) && at(/c\.digest !== shownDigest/) < at(/reason: 'builtin'/) && /c\.digest !== shownDigest\) \{[^}]*reason: 'changed'/.test(inst) && at(/c\.digest !== shownDigest/) < at(/confirmBox\(/));
+  assert.ok(/inboxInstallSquad: \(slug, digest\) =>/.test(pre) && /\(e, slug, shownDigest\) => inboxAction/.test(inst));
+  assert.ok(/inboxInstall\(a\.slug, a\.digest\)/.test(rd) && /inboxInstall\(d\.slug, d\.check \? d\.check\.digest : ''\)/.test(rd)); // 화면에 보인 digest 를 싣는다
+  assert.ok(/digest: c && c\.ok \? c\.digest : ''/.test(sec) && /builtin: !!\(c && c\.ok && c\.existsBuiltin\)/.test(sec)); // 목록·상세가 digest 와 builtin 을 싣는다
+  // 4: request-skill 은 invalid 제안을 main 이 거부
+  const rq = sec.split("ipcMain.handle('inbox:request-skill'")[1];
+  assert.ok(/it\.invalid\) return \{ ok: false, reason: 'invalid' \}/.test(rq) && rq.search(/it\.invalid/) < rq.search(/confirmBox\(/));
+  // 5: 동작 뒤 새로고침은 진행 중이면 한 번 더
+  assert.ok(/refreshInbox\(true\)/.test(sec) && /if \(inboxRefreshing\) \{ if \(again\) inboxRefreshAgain = true; return; \}/.test(sec) && /while \(inboxRefreshAgain\)/.test(sec));
+  // 8: 상세는 검사를 캐시·공유한다
+  const det = sec.split("ipcMain.handle('inbox:detail'")[1].split('let inboxActing')[0];
+  assert.ok(/checkCached\(slug, it\.sig\)/.test(det) && !/checkSquad\(/.test(det) && /return e\.p;/.test(sec));
+  // 11: 설치 자식이 시간 초과·오류여도 폴더 존재로 판단
+  assert.ok(/r\.code !== 0 && !personalSquadExists\(slug\)\) return \{ ok: false, reason: 'install-failed'/.test(inst));
+  // 6, 9: 렌더러
+  assert.ok(/seenSent = ''; inboxNote\(T\('inbox\.err\.save'\)\)/.test(rd) && /r && r\.ok/.test(rd));
+  assert.ok(/for \(const ev of \['pointermove', 'mousedown'\]\) document\.addEventListener\(ev, \(e\) => \{ if \(!e\.metaKey\) setMod\(false\)/.test(rd));
+  assert.ok(/s\.limit === 'total' \? 'inbox\.truncated\.total' : 'inbox\.truncated'/.test(rd));
+  // 10: 문구
+  for (const lg of I.LANGS) {
+    for (const k of ['inbox.builtin', 'inbox.check.builtin', 'inbox.err.builtin', 'inbox.truncated.total']) assert.ok(I.STR[lg][k], lg + ':' + k);
+    const d = I.t(lg, 'dlg.sqInstall.detail', { slug: 'x', n: 1, roster: 'R' }); assert.ok(!/안전합니다|is safe|No risk signals were found/.test(d), d);
+  }
+  assert.ok(I.t('ko', 'dlg.sqInstall.detail', { slug: 'x', n: 1, roster: 'R' }).includes('자동 검사에서 위험 신호가 발견되지 않았습니다(본문은 직접 확인하세요)'));
+  assert.ok(/마루 폴더/.test(I.STR.ko['inbox.err.risky']) && /Maru folder/.test(I.STR.en['inbox.err.risky']));
+  assert.ok(/내장 스쿼드와 같은 이름/.test(I.STR.ko['inbox.builtin']));
+  assert.ok(/inbox-seen\.json/.test(sec) && /L\.seenToStore\(cache\.notifs, now\)/.test(sec)); // 3: 본 기준은 min(최근 알림, 지금)
+});
+t('inbox: trashProposalDir 는 폴더를 휴지 폴더로 옮기고 링크·나쁜 slug·링크 휴지는 거부한다', () => {
+  const base = fs.mkdtempSync(path.join(tmp, 'prop-t-')); const trash = path.join(tmp, 'trash-' + Date.now());
+  mkProp(base, 'gone-skill', { 'SKILL.md': 'x' }); mkProp(base, 'gone-two', { 'SKILL.md': 'x' });
+  const now = new Date(2026, 0, 2, 3, 4, 5);
+  assert.deepStrictEqual(L.trashProposalDir(base, trash, 'gone-skill', UID, now), { ok: true });
+  assert.ok(!fs.existsSync(path.join(base, 'gone-skill')) && fs.existsSync(path.join(trash, 'gone-skill-20260102-030405', 'SKILL.md')));
+  assert.strictEqual(fs.statSync(trash).mode & 0o777, 0o700);
+  mkProp(base, 'gone-skill', { 'SKILL.md': 'y' }); // 같은 초에 같은 이름: 덮어쓰지 않고 번호를 붙인다
+  assert.ok(L.trashProposalDir(base, trash, 'gone-skill', UID, now).ok && fs.readFileSync(path.join(trash, 'gone-skill-20260102-030405-2', 'SKILL.md'), 'utf8') === 'y' && fs.readFileSync(path.join(trash, 'gone-skill-20260102-030405', 'SKILL.md'), 'utf8') === 'x');
+  assert.strictEqual(L.trashProposalDir(base, trash, '../etc', UID).reason, 'invalid');
+  assert.strictEqual(L.trashProposalDir(base, trash, 'Bad', UID).reason, 'invalid');
+  assert.strictEqual(L.trashProposalDir(base, trash, 'nothere', UID).reason, 'missing');
+  const real = fs.mkdtempSync(path.join(tmp, 'real-')); fs.writeFileSync(path.join(real, 'keep.txt'), 'k'); fs.symlinkSync(real, path.join(base, 'link-skill'));
+  assert.strictEqual(L.trashProposalDir(base, trash, 'link-skill', UID).reason, 'invalid'); assert.ok(fs.existsSync(path.join(real, 'keep.txt')) && fs.lstatSync(path.join(base, 'link-skill')).isSymbolicLink()); // 링크는 건드리지 않는다
+  const lt = path.join(tmp, 'trash-link'); fs.symlinkSync(real, lt);
+  assert.strictEqual(L.trashProposalDir(base, lt, 'gone-two', UID).reason, 'trash'); assert.ok(fs.existsSync(path.join(base, 'gone-two')) && fs.readdirSync(real).join() === 'keep.txt'); // 링크 휴지 폴더로는 옮기지 않는다
+  assert.strictEqual(L.trashProposalDir(base, trash, 'gone-two', UID + 1).reason, 'invalid');
+});
+t('inbox: 본 알림 기준 파일 검증·저장(0600, 원자적)·손상 처리', () => {
+  assert.strictEqual(L.validateInboxSeen({ version: 1, seen: '2026-01-02 03:04:05' }), '2026-01-02 03:04:05');
+  assert.strictEqual(L.validateInboxSeen({ version: 1, seen: '' }), '');
+  for (const bad of [null, [], {}, { version: 2, seen: '' }, { version: 1 }, { version: 1, seen: '2026-01-02' }, { version: 1, seen: '2026-01-02 03:04:05\n' }, { version: 1, seen: '2026-01-02 03:04:05', extra: 1 }, { version: 1, seen: 5 }]) assert.strictEqual(L.validateInboxSeen(bad), null, JSON.stringify(bad));
+  const f = path.join(tmp, 'inbox-seen.json');
+  assert.deepStrictEqual(L.readInboxSeenFile(f), { status: 'missing', data: '' });
+  assert.ok(L.saveInboxSeen(f, '2026-01-02 03:04:05')); assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  assert.deepStrictEqual(L.readInboxSeenFile(f), { status: 'ok', data: '2026-01-02 03:04:05' });
+  assert.ok(!L.saveInboxSeen(f, 'not a date') && !L.saveInboxSeen(f, '2026-01-02 03:04:05‮'));
+  assert.ok(!fs.readdirSync(tmp).some((n) => /^\.inbox-seen\..*\.tmp$/.test(n)));
+  fs.writeFileSync(f, '{broken'); assert.strictEqual(L.readInboxSeenFile(f).status, 'corrupt');
+  fs.writeFileSync(f, JSON.stringify({ version: 1, seen: '' }) + ' '.repeat(L.INBOX_SEEN_MAX_BYTES)); assert.strictEqual(L.readInboxSeenFile(f).status, 'corrupt'); // 상한 초과
+  fs.rmSync(f); const target = path.join(tmp, 'seen-target.json'); fs.writeFileSync(target, JSON.stringify({ version: 1, seen: '2026-01-02 03:04:05' })); fs.symlinkSync(target, f);
+  assert.strictEqual(L.readInboxSeenFile(f).status, 'corrupt'); // 링크는 따르지 않는다
+  fs.rmSync(f);
+});
+t('inbox: markUnseen·newestAt — 새 알림 수는 기준 시각보다 늦은 것만', () => {
+  const ev = [{ at: '2026-01-02 10:00:00', code: 'a' }, { at: '2026-01-02 09:00:00', code: 'b' }, { at: '2026-01-01 23:59:59', code: 'c' }, { at: 'garbage', code: 'd' }];
+  const m = L.markUnseen(ev, '2026-01-02 09:00:00');
+  assert.strictEqual(m.unseen, 1); assert.deepStrictEqual(m.list.map((e) => e.fresh), [true, false, false, false]);
+  assert.strictEqual(L.markUnseen(ev, '').unseen, 3); // 기준이 없으면 형식이 맞는 것 전부
+  assert.strictEqual(L.markUnseen(ev, 'bad').unseen, 3);
+  assert.strictEqual(L.markUnseen(ev, '2026-01-02 10:00:00').unseen, 0);
+  assert.deepStrictEqual(L.markUnseen(undefined, ''), { list: [], unseen: 0 });
+  assert.strictEqual(L.newestAt(ev), '2026-01-02 10:00:00'); assert.strictEqual(L.newestAt([]), ''); assert.strictEqual(L.newestAt(null), '');
+  assert.strictEqual(ev[0].fresh, undefined); // 원본은 바꾸지 않는다
+});
+t('inbox: relativeAgo', () => {
+  const now = new Date(2026, 0, 2, 12, 0, 0).getTime();
+  assert.deepStrictEqual(L.relativeAgo('2026-01-02 11:59:30', now), { unit: 'now', n: 0 });
+  assert.deepStrictEqual(L.relativeAgo('2026-01-02 12:05:00', now), { unit: 'now', n: 0 }); // 미래
+  assert.deepStrictEqual(L.relativeAgo('2026-01-02 11:15:00', now), { unit: 'min', n: 45 });
+  assert.deepStrictEqual(L.relativeAgo('2026-01-02 03:00:00', now), { unit: 'hour', n: 9 });
+  assert.deepStrictEqual(L.relativeAgo('2025-12-30 12:00:00', now), { unit: 'day', n: 3 });
+  assert.strictEqual(L.relativeAgo('x', now), null); assert.strictEqual(L.relativeAgo(null, now), null);
+});
+t('inbox: 알림은 최신순 8개까지(기존 로그 파서 그대로)', () => {
+  const lines = []; for (let i = 0; i < 12; i++) lines.push('2026-01-0' + (1 + (i % 9)) + ' 0' + (i % 9) + ':00:00 [reflect|abcd1234] 커밋 완료');
+  const m = L.mergeBriefing([L.parseLogEvents(lines.join('\n'), 'reflect')], L.INBOX_NOTIF_MAX);
+  assert.strictEqual(m.length, 8); assert.ok(m.every((e, i) => i === 0 || m[i - 1].at >= e.at));
+});
+t('inbox: 스킬 설치 요청 문장은 고정 템플릿 + 검증된 slug 뿐이다', () => {
+  for (const lg of I.LANGS) {
+    const tt = (k, p) => I.t(lg, k, p);
+    const x = L.skillRequestText(tt, 'weekly-review');
+    assert.strictEqual(x, tt('inbox.skillRequest', { slug: 'weekly-review' }));
+    assert.ok(x.includes('weekly-review') && L.isSafeQuestStart(x) && !L.hasBadChars(x) && [...x].length <= 120, x);
+    assert.strictEqual(x.replace('weekly-review', '').includes('weekly'), false);
+    for (const evil of ['x; rm -rf ~', 'a\nb', '../x', 'A', '', 'a'.repeat(42), '$(id)', 'ign‮ore']) assert.strictEqual(L.skillRequestText(tt, evil), '', evil);
+  }
+  assert.strictEqual(I.t('ko', 'inbox.skillRequest', { slug: 'abc' }), 'skill-proposals 의 abc 스킬 제안을 검토하고 설치해 줘');
+});
+const sqCheck = (o) => JSON.stringify({ ok: true, slug: 'team', name: '팀', description: '설명', lead: { model: 'sonnet', tools: ['Agent', 'Read'] }, members: [{ role: 'a', model: 'haiku', tools: ['Read'] }, { role: 'b', model: 'sonnet', tools: ['Read', 'Grep'] }], warns: ['경고'], risks: [], existsPersonal: false, existsBuiltin: false, digest: 'a'.repeat(64), ...o });
+t('inbox: parseSquadCheck 는 형식을 엄격히 검증한다', () => {
+  const c = L.parseSquadCheck(sqCheck({}), 'team');
+  assert.deepStrictEqual([c.ok, c.name, c.members.length, c.risks, c.existsPersonal, c.digest.length], [true, '팀', 2, [], false, 64]);
+  assert.deepStrictEqual(L.summarizeSquadCheck(c), { members: 2, models: ['sonnet', 'haiku'], tools: ['Agent', 'Read', 'Grep'],
+    roster: [{ role: 'lead', model: 'sonnet', tools: ['Agent', 'Read'] }, { role: 'a', model: 'haiku', tools: ['Read'] }, { role: 'b', model: 'sonnet', tools: ['Read', 'Grep'] }] }); // 총괄·팀원별 도구
+  assert.strictEqual(L.parseSquadCheck(sqCheck({}), 'other'), null); // 요청한 slug 와 다르면 거부
+  assert.strictEqual(L.parseSquadCheck(sqCheck({}), '../team'), null);
+  for (const bad of [{ digest: 'zz' }, { digest: 'A'.repeat(64) }, { lead: { model: 'gpt', tools: [] } }, { lead: { model: 'sonnet', tools: ['Rm'] } }, { members: [] }, { members: [{ role: 'lead!', model: 'haiku', tools: [] }] }, { risks: 'x' }, { name: 'x‮y' }, { name: '' }, { existsPersonal: 'no' }, { ok: 'true' }]) assert.strictEqual(L.parseSquadCheck(sqCheck(bad), 'team'), null, JSON.stringify(bad));
+  assert.strictEqual(L.parseSquadCheck('not json', 'team'), null); assert.strictEqual(L.parseSquadCheck(null, 'team'), null);
+  assert.strictEqual(L.parseSquadCheck(' '.repeat(40000) + sqCheck({}), 'team'), null); // 출력 상한
+  const r = L.parseSquadCheck(JSON.stringify({ ok: false, slug: 'team', reason: '사유‮\u001b[31m' }), 'team');
+  assert.deepStrictEqual(r, { ok: false, slug: 'team', reason: '사유[31m' });
+  assert.deepStrictEqual(L.parseSquadCheck(sqCheck({ risks: ['위험 ‮신호'] }), 'team').risks, ['위험 신호']); // 위험 신호는 다시 정리돼 남는다
+});
+t('inbox: 정적 검사 — IPC 송신자 검사·고정 argv·slug 재검증·textContent·스킬 폴더 불변', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8'); const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+  const sec = main.split('// ---- 알림과 승인함')[1].split('// ---- 프로젝트 IPC')[0];
+  for (const ch of ['inbox:detail', 'inbox:install-squad', 'inbox:reject', 'inbox:request-skill', 'inbox:mark-seen']) {
+    assert.ok(pre.includes("'" + ch + "'") && sec.includes("ipcMain.handle('" + ch + "'"), ch);
+  }
+  assert.ok(/ipcMain\.handle\('inbox:detail', async \(e, kind, slug\) => \{\n  if \(!fromMain\(e\)\) return null;/.test(sec) && /ipcMain\.handle\('inbox:mark-seen', \(e\) => \{\n  if \(!fromMain\(e\)\)/.test(sec));
+  assert.ok(/async function inboxAction\(e, fn\) \{\n  if \(!fromMain\(e\)/.test(sec));
+  for (const ch of ['inbox:install-squad', 'inbox:reject', 'inbox:request-skill']) assert.ok(new RegExp("ipcMain\\.handle\\('" + ch + "', \\(e, [^)]*\\) => inboxAction\\(e,").test(sec), ch);
+  assert.ok(/-I', script, \.\.\.args\]/.test(sec) && /timeout: 8000, maxBuffer: 128 \* 1024/.test(sec) && !/shell:|execSync|exec\(.*`/.test(sec)); // 고정 argv·셸 없음·python -I·시간·출력 상한
+  assert.ok(/squadsQueue = p\.then/.test(sec)); // 한 번에 하나
+  assert.ok(/const currentApproval = \(kind, slug\) =>[\s\S]*L\.validProposalSlug\(kind, slug\)[\s\S]*L\.listProposals/.test(sec)); // 형식 검사 + main 의 현재 목록과 대조
+  assert.strictEqual((sec.match(/confirmBox\(/g) || []).length, 3); // 설치·거절·설치 요청 각각 네이티브 확인
+  assert.ok(/'--expect-digest', c\.digest/.test(sec) && !/--replace|--ack-warnings/.test(sec.replace(/\/\/.*$/gm, ''))); // 앱은 덮어쓰기·경고 승인을 쓰지 않는다
+  assert.ok(/c\.risks\.length\) return \{ ok: false, reason: 'risky'/.test(sec) && /c\.existsPersonal\) return \{ ok: false, reason: 'exists'/.test(sec));
+  assert.ok(!/\.claude|skills'\)|copyFile|cpSync/.test(sec.replace(/\/\/.*$/gm, '')), '앱이 스킬 폴더에 쓰지 않는다');
+  assert.ok(/L\.skillRequestText\(tr, slug\)/.test(sec) && /writePrompt\(w, text\)/.test(sec) && !/writePrompt\([^)]*(description|name|sections)/.test(sec));
+  const ui = rd.split('// ---- 알림과 승인함 ----')[1].split('// ---- 프로젝트: 왼쪽 목록')[0];
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/.test(ui)); // 제안·로그 문자열은 textContent 로만
+  assert.ok(/body\.mod \.kbd\{display:inline-block\}/.test(css) && /\.kbd\{display:none;/.test(css)); // ⌘ 힌트는 ⌘ 를 누르는 동안만
+  assert.ok(/classList\.toggle\('mod', on\)/.test(rd) && /'blur', \(\) => setMod\(false\)/.test(rd));
+  assert.ok(/id="inbox-badge"/.test(html) && !/id="briefing"/.test(html) && /id="inbox-detail"/.test(html));
+  for (const k of ['inbox.title', 'inbox.sec.approvals', 'inbox.sec.notifs', 'inbox.approvals.empty', 'inbox.notifs.empty', 'inbox.act.view', 'inbox.act.install', 'inbox.act.request', 'inbox.act.reject', 'inbox.skillRequest', 'dlg.sqInstall.title', 'dlg.sqInstall.detail', 'dlg.reject.title', 'dlg.reject.detail.squad', 'dlg.reject.detail.skill', 'dlg.skRequest.title', 'dlg.skRequest.detail', 'inbox.err.risky', 'inbox.err.exists', 'inbox.err.changed', 'inbox.ago.min', 'inbox.ago.hour', 'inbox.ago.day', 'inbox.ago.now', 'inbox.members']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
+  for (const lg of I.LANGS) assert.ok(I.t(lg, 'dlg.sqInstall.detail', { slug: 'x', n: 2, roster: 'lead (sonnet): Agent, Read' }).includes('lead (sonnet): Agent, Read'));
+  assert.ok(/MARU_APP_UI/.test(main) && /'inbox'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main) && /TEST_UI === 'inbox'\) return \{ ok: false, reason: 'invalid' \}/.test(sec)); // 시험 모드는 동작을 하지 않는다
+});
+t('inbox: parseSquadCheck 는 existsBuiltin 을 그대로 싣고 형식을 요구한다', () => {
+  assert.strictEqual(L.parseSquadCheck(sqCheck({ existsBuiltin: true }), 'team').existsBuiltin, true);
+  assert.strictEqual(L.parseSquadCheck(sqCheck({ existsBuiltin: false }), 'team').existsBuiltin, false);
+  assert.strictEqual(L.parseSquadCheck(sqCheck({ existsBuiltin: 'yes' }), 'team'), null);
 });
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

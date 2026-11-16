@@ -210,6 +210,47 @@ SQrc remove '../x'; check "remove 의 잘못된 slug 거부" [ "$LASTRC" = 1 ]
 mksquad "$B/builtin1"; SQrc remove builtin1; checkall "내장 스쿼드는 remove 못 함" [ "$LASTRC" = 1 ] '&&' [ -d "$B/builtin1" ]
 rm -rf "$B"/*
 
+echo "== check --json / install --expect-digest (앱용)"
+rm -rf "$DATA/squads" "$DATA/squads-trash"
+cj=$(SQ check --json "$R/clean"); rc=$?
+check "check --json 종료 0·한 줄" [ "$rc" = 0 -a "$(printf '%s\n' "$cj" | wc -l | tr -d ' ')" = 1 ]
+check "check --json 필드(ok·slug·lead·members·risks·exists·digest)" [ "$(printf '%s' "$cj" | jget 'print(d["ok"], d["slug"], d["lead"]["model"], [m["role"] for m in d["members"]], d["risks"], d["existsPersonal"], len(d["digest"]))')" = "True clean sonnet ['helper', 'worker'] [] False 64" ]
+check "check --json 은 도구 목록을 낸다(총괄 Agent 추가)" [ "$(printf '%s' "$cj" | jget 'print(",".join(d["lead"]["tools"]), d["members"][0]["tools"])')" = "Agent,Read,Grep ['Read']" ]
+rj=$(SQ check --json "$R/risk1"); rrc=$?
+checkall "check --json 위험 신호는 risks 에 담고 종료 0" [ "$rrc" = 0 ] '&&' [ "$(printf '%s' "$rj" | jget 'print(len(d["risks"])>0)')" = True ]
+bj=$(SQ check --json "$R/ctl"); brc=$?
+checkall "check --json 거부는 ok false·종료 1" [ "$brc" = 1 ] '&&' [ "$(printf '%s' "$bj" | jget 'print(d["ok"], bool(d["reason"]))')" = "False True" ]
+check "check --json 거부 사유에 제어·서식 문자가 없다" [ "$(printf '%s' "$bj" | LC_ALL=C grep -c $'\x1b\|\xe2\x80\xae')" = 0 ]
+SQrc check --json; check "check --json 인자 없으면 사용법(rc 2)" [ "$LASTRC" = 2 ]
+dg=$(printf '%s' "$cj" | jget 'print(d["digest"])')
+check "같은 내용의 digest 는 같다" [ "$(SQ check --json "$R/clean" | jget 'print(d["digest"])')" = "$dg" ]
+SQrc install "$R/clean" --expect-digest "$(printf '0%.0s' $(seq 64))"; checkall "digest 가 다르면 거부(rc 3)·설치 안 됨" [ "$LASTRC" = 3 ] '&&' [ ! -e "$DATA/squads/clean" ]
+SQrc install "$R/clean" --expect-digest abc; check "잘못된 digest 형식은 사용법(rc 2)" [ "$LASTRC" = 2 ]
+SQrc install "$R/risk1" --expect-digest "$(printf '%s' "$rj" | jget 'print(d["digest"])')"; checkall "digest 가 맞아도 위험 신호는 --ack-warnings 없이 거부" [ "$LASTRC" = 1 ] '&&' [ ! -e "$DATA/squads/risk1" ]
+SQrc install "$R/clean" --expect-digest "$dg"; checkall "digest 가 맞으면 설치" [ "$LASTRC" = 0 ] '&&' [ -d "$DATA/squads/clean" ]
+check "설치 뒤 check --json 은 existsPersonal true" [ "$(SQ check --json "$R/clean" | jget 'print(d["existsPersonal"])')" = True ]
+# digest 는 바이트·파일 구성이 달라지면 바뀐다(앱이 보여 준 내용 = 설치되는 내용)
+dgof() { SQ check --json "$1" | jget 'print(d["digest"])'; }
+rm -rf "$R/dg1" "$R/dg2" "$R/dg3" "$R/dg4"
+mksquad "$R/dg1"; base_dg=$(dgof "$R/dg1")
+check "digest: 같은 내용을 복사하면 같다" [ "$(cp -R "$R/dg1" "$R/dg1b" && dgof "$R/dg1b")" = "$base_dg" ]
+rm -rf "$R/dg1b"
+mksquad "$R/dg2"; printf 'x' >> "$R/dg2/worker.md"
+check "digest: 한 바이트만 달라져도 바뀐다(팀원 본문)" [ "$(dgof "$R/dg2")" != "$base_dg" ]
+mksquad "$R/dg3"; mv "$R/dg3/helper.md" "$R/dg3/aide.md"
+check "digest: 팀원 파일 이름만 바꿔도(내용 동일) 바뀐다" [ "$(dgof "$R/dg3")" != "$base_dg" ]
+mksquad "$R/dg4"; mv "$R/dg4/worker.md" "$R/dg4/worker2.md"; mv "$R/dg4/worker2.md" "$R/dg4/worker.md"
+check "digest: 이름을 바꿨다 되돌리면 같다" [ "$(dgof "$R/dg4")" = "$base_dg" ]
+mksquad "$R/dg5"; agent "$R/dg5/extra.md" '추가' haiku 'Read' '더 한다.'
+check "digest: 파일을 하나 더하면 바뀐다" [ "$(dgof "$R/dg5")" != "$base_dg" ]
+rm -rf "$R"/dg*
+# 내장 스쿼드와 같은 slug 면 existsBuiltin(앱은 이 경우 설치를 거절한다)
+mksquad "$B/shadowme"; mksquad "$R/shadowme"; mksquad "$R/notbuiltin"
+check "check --json: 내장과 같은 slug 면 existsBuiltin true" [ "$(SQ check --json "$R/shadowme" | jget 'print(d["existsBuiltin"], d["existsPersonal"])')" = "True False" ]
+check "check --json: 내장에 없는 slug 면 existsBuiltin false" [ "$(SQ check --json "$R/notbuiltin" | jget 'print(d["existsBuiltin"])')" = False ]
+rm -rf "$B/shadowme" "$R/shadowme" "$R/notbuiltin"
+rm -rf "$DATA/squads" "$DATA/squads-trash"
+
 echo "== 제안함(propose, reflect.sh 가 부름)"
 export_prop() { run_env MARU_SQUAD_PROPOSALS="$T/props" -- "$REAL_PY" -I "$REPO/scripts/squads.py" propose "$1"; }
 out=$(export_prop "$R/clean"); rc=$?

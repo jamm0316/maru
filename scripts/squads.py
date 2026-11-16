@@ -5,6 +5,7 @@
 위치: 저장소 내장 squads/<slug>/ (추적) 와 개인 data/squads/<slug>/ (비추적). 같은 slug 면 개인 것이 우선.
 에이전트 이름은 셸이 만든다: sq-<slug>-lead, sq-<slug>-<role> (파일 안의 name 은 무시). 이 접두가 소속의 근거다.
 스쿼드 파일(모델·사용자가 쓴 데이터)은 믿지 않는다: 형식·크기·문자·도구를 엄격히 검사하고, 고정 머리말은 코드에 둔다."""
+import hashlib
 import json
 import os
 import re
@@ -462,10 +463,41 @@ def folder_slug(path):
     return os.path.basename(os.path.abspath(path).rstrip("/"))
 
 
+def squad_digest(sq):
+    """검사한 파일 바이트 전체의 sha256(이름순). 앱이 보여 준 내용과 설치되는 내용이 같음을 확인하는 데 쓴다."""
+    h = hashlib.sha256()
+    for rel in sorted(sq["files"]):
+        data = sq["files"][rel]
+        h.update(rel.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0" + data)
+    return h.hexdigest()
+
+
+def check_json(path, slug):
+    """check --json: 한 줄 JSON(앱용). 통과 0 / 거부 1. 문자열은 모두 제어·서식 문자를 지운 짧은 텍스트."""
+    st = lambda v, n=200: textclean.safe_text(v, n)
+    try:
+        sq = load_squad(path, slug)
+    except Reject as e:
+        print(json.dumps({"ok": False, "slug": st(slug, 40), "reason": st(e, 200)}, ensure_ascii=False, separators=(",", ":")))
+        return 1
+    out = {"ok": True, "slug": slug, "name": st(sq["name"], NAME_MAX), "description": st(sq["description"], SQUAD_DESC_MAX),
+           "lead": {"model": sq["lead"]["model"], "tools": list(sq["lead"]["tools"])},
+           "members": [{"role": m["role"], "model": m["model"], "tools": list(m["tools"])} for m in sq["members"]],
+           "warns": [st(w) for w in sq["warns"]], "risks": [st(r) for r in sq["risks"]],
+           "existsPersonal": os.path.lexists(os.path.join(PERSONAL_DIR, slug)),
+           "existsBuiltin": os.path.isdir(os.path.join(BUILTIN_DIR, slug)),
+           "digest": squad_digest(sq)}
+    print(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
 def cmd_check(args):
-    if len(args) != 1: return usage()
-    path = args[0]
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 1 or len(args) - len(rest) > 1: return usage()
+    path = rest[0]
     slug = folder_slug(path)
+    if as_json: return check_json(path, slug)
     print("검사: %s (slug: %s)" % (textclean.safe_text(path, 200), textclean.safe_text(slug, 40)))
     try:
         sq = load_squad(path, slug)
@@ -534,10 +566,15 @@ def to_trash(path, slug):
 
 def cmd_install(args):
     replace = ack = False
+    expect = None
     paths = []
-    for a in args:
+    it = iter(args)
+    for a in it:
         if a == "--replace": replace = True
         elif a == "--ack-warnings": ack = True
+        elif a == "--expect-digest":   # 앱용: 사용자가 검토한 내용(check --json 의 digest)과 다르면 설치하지 않는다
+            expect = next(it, None)
+            if expect is None or not re.fullmatch(r"[0-9a-f]{64}", expect): return usage()
         elif a.startswith("-"): return usage()
         else: paths.append(a)
     if len(paths) != 1: return usage()
@@ -547,6 +584,9 @@ def cmd_install(args):
     except Reject as e:
         print("거부: %s" % e)
         return 1
+    if expect is not None and squad_digest(sq) != expect:
+        print("거부: 검토한 뒤 내용이 바뀌었음(다시 확인하세요)")
+        return 3
     if sq["risks"] and not ack:
         print("거부: 위험 신호가 있어 설치하지 않음. 내용을 검토한 뒤 사용자가 받아들이면 --ack-warnings 를 붙여 다시 실행하세요.")
         for r in sq["risks"]: print("  - " + r)
@@ -647,7 +687,7 @@ def cmd_propose(args):
 
 
 def usage():
-    print("사용: squads.py json | meta | list | check <폴더> | install <폴더> [--replace] [--ack-warnings] | remove [--proposal] <slug>", file=sys.stderr)
+    print("사용: squads.py json | meta | list | check [--json] <폴더> | install <폴더> [--replace] [--ack-warnings] [--expect-digest <sha256>] | remove [--proposal] <slug>", file=sys.stderr)
     return 2
 
 

@@ -46,7 +46,7 @@
   }
   function focusTerm() {
     if (modalOpen()) return;
-    if (detailOpen) { $('pd-title').focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
+    if (detailOpen) { (detailMode === 'inbox' ? $('id-title') : $('pd-title')).focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
     const e = terms.get(activeId); if (e && e.opened) e.term.focus();
   }
   // Tab 순환(모달 안에서만)
@@ -62,6 +62,7 @@
 
   // ---- 터미널: 작업 공간마다 xterm 하나를 살려 두고 활성만 보인다 ----
   // WebGL 은 활성 터미널에만 붙이고, 숨길 때 dispose 한다(컨텍스트 수 제한 회피). 비활성 터미널은 DOM 렌더러 없이도 버퍼만 유지한다.
+  let detailMode = 'project'; // 'project' | 'inbox': 가운데 상세가 무엇인지(둘 다 detailOpen 으로 터미널을 가린다)
   let detailOpen = false; let detailKey = null; let detail = null; let detailSig = ''; let detailSeq = 0; // 프로젝트 상세(아래 '프로젝트' 절). 열려 있으면 터미널은 숨기기만 한다
   const terms = new Map(); // id -> { id, term, fit, host, gl, opened, started, starting }
   let activeId = null;
@@ -432,18 +433,198 @@
     }
 
     renderProjects(p.projects);
-    if (detailOpen) fetchDetail(false);
+    if (detailOpen && detailMode === 'project') fetchDetail(false);
+    renderInbox(p.inbox);
+    if (detailOpen && detailMode === 'inbox') refreshInboxDetail();
 
     const sk = $('skills'); sk.replaceChildren();
     for (const n of p.skills) sk.append(el('span', 'chip', n));
     $('skills-count').textContent = T('skills.count', { n: p.skills.length, p: p.pendingSkillProposals });
-
-    const br = $('briefing'); br.replaceChildren();
-    if (!p.briefing.length) br.append(el('div', 'empty', T('brief.empty')));
-    for (const e of p.briefing) {
-      const row = el('div', 'brief'); row.append(el('span', 'at', fmtAt(e.at)), el('span', '', T('ev.' + e.code, { n: e.n }))); br.append(row);
-    }
   }
+
+  // ---- 알림과 승인함 ----
+  // 제안의 이름·설명·본문과 로그 문구는 믿지 않는다: 전부 textContent 로만 넣는다. 항목은 {kind, slug} 로만 가리키고 main 이 다시 대조한다.
+  let notifsOpen = false; let notifSeenBase = ''; let inboxNoteTimer = null; let inboxBusy = false;
+  let inboxDet = null; let inboxDetSeq = 0; let inboxReloading = false;
+  function inboxNote(msg, ms) {
+    const n = $('inbox-note'); n.textContent = msg;
+    clearTimeout(inboxNoteTimer); inboxNoteTimer = setTimeout(() => { n.textContent = ''; }, ms || 6000);
+  }
+  function agoText(at) {
+    const r = Lib.relativeAgo(at);
+    if (!r) return fmtAt(at);
+    return r.unit === 'now' ? T('inbox.ago.now') : T('inbox.ago.' + r.unit, { n: r.n });
+  }
+  function setNotifsOpen(on) {
+    notifsOpen = on;
+    if (on && lastPanels) { notifSeenBase = lastPanels.inbox.notifications.filter((e) => e.fresh).map((e) => e.at).sort()[0] || ''; markSeenNow(); }
+    if (lastPanels) renderInbox(lastPanels.inbox);
+  }
+  let seenSent = '';
+  async function markSeenNow() {
+    const p = lastPanels && lastPanels.inbox; if (!p || !p.unseen) return;
+    const newest = p.notifications.reduce((m, e) => (e.at > m ? e.at : m), '');
+    if (newest === seenSent) return; seenSent = newest;
+    let ok = false;
+    try { const r = await window.maru.inboxMarkSeen(); ok = !!(r && r.ok); } catch (x) { ok = false; }
+    if (!ok) { seenSent = ''; inboxNote(T('inbox.err.save')); } // 저장하지 못했으면 다음에 다시 시도한다
+    poll();
+  }
+  $('inbox-toggle').addEventListener('click', () => setNotifsOpen(!notifsOpen));
+  const inboxStateKey = (st) => 'inbox.state.' + (['ok', 'risk', 'invalid', 'unknown'].includes(st) ? st : 'unknown');
+  function approvalRow(a) {
+    const row = el('div', 'apv'); row.dataset.kind = a.kind; row.dataset.slug = a.slug;
+    const top = el('div', 'apv-top'); top.append(el('span', 'apv-kind', T('inbox.kind.' + (a.kind === 'squad' ? 'squad' : 'skill'))), el('span', 'apv-name', a.name));
+    row.append(top);
+    if (a.description) row.append(el('div', 'apv-desc', a.description));
+    const meta = el('div', 'apv-meta');
+    if (a.kind === 'squad') {
+      meta.append(el('span', '', T('inbox.members', { n: a.members })));
+      const cls = a.state === 'risk' ? 'risk' : a.state === 'ok' ? '' : 'bad';
+      meta.append(el('span', cls, T(inboxStateKey(a.state))));
+      if (a.builtin) meta.append(el('span', 'risk', T('inbox.builtin')));
+    } else if (a.name !== a.slug) meta.append(el('span', '', a.slug));
+    row.append(meta);
+    const acts = el('div', 'apv-acts');
+    const btn = (k, cls, fn, disabled) => {
+      const b = el('button', 'btn' + (cls ? ' ' + cls : ''), T('inbox.act.' + k)); b.type = 'button'; b.dataset.act = k; b.disabled = !!disabled;
+      b.setAttribute('aria-label', T('inbox.act.aria', { act: T('inbox.act.' + k), name: a.name })); b.addEventListener('click', fn); acts.append(b);
+    };
+    btn('view', '', () => openInboxDetail(a.kind, a.slug));
+    // 위험 신호·내장 이름 충돌이 있으면 설치 버튼을 주된 색으로 두지 않는다
+    if (a.kind === 'squad') btn('install', a.state === 'risk' || a.builtin ? '' : 'primary', () => inboxInstall(a.slug, a.digest), a.state === 'invalid' || a.state === 'unknown' || !a.digest);
+    else btn('request', 'primary', () => inboxRequestSkill(a.slug), a.invalid);
+    btn('reject', 'ghost', () => inboxReject(a.kind, a.slug));
+    row.append(acts);
+    return row;
+  }
+  function renderInbox(ib) {
+    if (!ib) return;
+    const total = ib.approvals.length + ib.unseen; // 머리말 배지: 승인 대기 + 새 알림(승인 대기 개수는 아래 구역 제목에 따로)
+    const bd = $('inbox-badge'); bd.hidden = total === 0; bd.textContent = String(total); bd.setAttribute('aria-label', T('inbox.badge.aria', { n: total }));
+    $('inbox-appr-count').textContent = ib.approvals.length ? String(ib.approvals.length) : '';
+    const box = $('inbox-approvals');
+    const focused = document.activeElement && box.contains(document.activeElement) ? [document.activeElement.closest('.apv').dataset.kind + ':' + document.activeElement.closest('.apv').dataset.slug, document.activeElement.dataset.act] : null;
+    box.replaceChildren();
+    if (!ib.approvals.length) box.append(el('div', 'empty', T('inbox.approvals.empty')));
+    for (const a of ib.approvals) box.append(approvalRow(a));
+    if (focused) { const r = [...box.querySelectorAll('.apv')].find((x) => x.dataset.kind + ':' + x.dataset.slug === focused[0]); const b = r && r.querySelector('[data-act="' + focused[1] + '"]:not(:disabled)'); if (b) b.focus(); }
+    const tg = $('inbox-toggle'); tg.setAttribute('aria-expanded', String(notifsOpen));
+    $('inbox-toggle-t').textContent = T('inbox.sec.notifs');
+    $('inbox-toggle-n').textContent = ib.unseen ? T('inbox.new.n', { n: ib.unseen }) : (ib.notifications.length ? String(ib.notifications.length) : '');
+    tg.setAttribute('aria-label', T('inbox.notifs.toggle.aria', { n: ib.notifications.length, state: T(notifsOpen ? 'inbox.notifs.open' : 'inbox.notifs.closed') }) + (ib.unseen ? ', ' + T('inbox.new.n', { n: ib.unseen }) : ''));
+    const nb = $('inbox-notifs'); nb.hidden = !notifsOpen; nb.replaceChildren();
+    if (!notifsOpen) return;
+    if (!ib.notifications.length) nb.append(el('div', 'empty', T('inbox.notifs.empty')));
+    for (const e of ib.notifications) {
+      const fresh = e.fresh || (notifSeenBase && e.at >= notifSeenBase); // 펼친 직후에는 방금 새것이던 줄을 표시해 둔다(접으면 사라진다)
+      const row = el('div', 'brief' + (fresh ? ' fresh' : ''));
+      const dot = el('span', 'dot' + (fresh ? '' : ' off')); dot.setAttribute('aria-hidden', 'true');
+      const at = el('span', 'at', agoText(e.at)); at.title = e.at;
+      row.append(dot, at, el('span', '', T('ev.' + e.code, { n: e.n })));
+      if (fresh) row.setAttribute('aria-label', T('inbox.new') + ': ' + at.textContent + ' ' + T('ev.' + e.code, { n: e.n }));
+      nb.append(row);
+    }
+    if (ib.unseen) markSeenNow(); // 펼쳐 둔 동안 새로 온 알림도 본 것으로
+  }
+  // 결과 문구: 사유 -> 안내(문장은 i18n 에서만, 제안에서 온 문자열은 textContent 로 한 줄)
+  function inboxResultText(res, slug) {
+    const r = res && res.reason;
+    if (r === 'risky') return T('inbox.err.risky', { cmd: 'maru squad install data/squad-proposals/' + slug + ' --ack-warnings' }) + (res.risks && res.risks.length ? '  ' + res.risks.join(' / ') : '');
+    if (r === 'rejected') return T('inbox.err.rejected', { detail: res.detail || '' });
+    if (r === 'check-failed') return T('inbox.err.check');
+    if (r === 'install-failed') return T('inbox.err.install');
+    if (['exists', 'changed', 'builtin', 'trash', 'save', 'busy', 'not-maru'].includes(r)) return T('inbox.err.' + r);
+    if (['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive'].includes(r)) return T(Lib.fillNoticeKey(r));
+    return T('inbox.err.invalid');
+  }
+  async function inboxRun(fn, okText, slug) {
+    if (inboxBusy) return; inboxBusy = true;
+    let res = null; try { res = await fn(); } catch (x) { res = null; }
+    inboxBusy = false;
+    const note = detailOpen && detailMode === 'inbox' ? $('id-note') : $('inbox-note');
+    let msg = '';
+    if (res && res.ok) msg = okText(res); else if (!(res && res.reason === 'cancel')) msg = inboxResultText(res, slug);
+    note.textContent = msg; if (note.id === 'inbox-note') inboxNote(msg, 12000);
+    await poll();
+    if (res && res.ok && detailOpen && detailMode === 'inbox') closeDetail(true);
+    else if (res && res.reason === 'invalid' && detailOpen && detailMode === 'inbox') closeDetail(true);
+    else if (res && res.reason === 'changed' && detailOpen && detailMode === 'inbox' && inboxDet) await reloadInboxDetail(); // 본 내용이 바뀌었다: 새 내용을 다시 보여 준다
+  }
+  // digest: 지금 화면(행 또는 상세)에 보이는 검증 결과의 것. main 이 새로 돌린 검사와 같을 때만 설치 확인으로 간다.
+  const inboxInstall = (slug, digest) => inboxRun(() => window.maru.inboxInstallSquad(slug, digest || ''), (r) => T(r.removed === false ? 'inbox.ok.installKeep' : 'inbox.ok.install', { name: r.name || slug }), slug);
+  const inboxReject = (kind, slug) => inboxRun(() => window.maru.inboxReject(kind, slug), () => T('inbox.ok.reject'), slug);
+  const inboxRequestSkill = (slug) => inboxRun(() => window.maru.inboxRequestSkill(activeId || '', slug), () => T('inbox.ok.request'), slug);
+
+  // 상세(읽기 전용): 터미널 자리에 보인다. 본문은 <pre> 에 textContent 로만.
+  async function openInboxDetail(kind, slug) {
+    detailMode = 'inbox'; detailOpen = true; detailKey = null; detail = null; detailSig = ''; detailSeq++;
+    inboxDet = { kind, slug, loading: true }; const my = ++inboxDetSeq;
+    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = false;
+    $('id-note').textContent = '';
+    if (lastPanels) renderProjects(lastPanels.projects);
+    renderInboxDetail(true);
+    let d = null; try { d = await window.maru.inboxDetail(kind, slug); } catch (x) { d = null; }
+    if (my !== inboxDetSeq || !detailOpen || detailMode !== 'inbox') return;
+    if (!d || d.kind !== kind || d.slug !== slug) { closeDetail(true); inboxNote(T('inbox.err.invalid')); return; }
+    inboxDet = d; renderInboxDetail(true);
+  }
+  async function reloadInboxDetail() { // 열어 둔 상세를 새로 받아 다시 그린다(알림 문구는 그대로 둔다)
+    if (!inboxDet) return;
+    const { kind, slug } = inboxDet; const my = ++inboxDetSeq;
+    let d = null; try { d = await window.maru.inboxDetail(kind, slug); } catch (x) { d = null; }
+    if (my !== inboxDetSeq || !detailOpen || detailMode !== 'inbox') return;
+    if (!d || d.kind !== kind || d.slug !== slug) { closeDetail(true); return; }
+    inboxDet = d; renderInboxDetail(false);
+  }
+  async function refreshInboxDetail() { // 목록이 바뀔 때: 열어 둔 제안이 사라졌으면 닫고, 검증 내용(digest)이 달라졌으면 다시 받는다
+    const ib = lastPanels && lastPanels.inbox; if (!ib || !inboxDet || inboxDet.loading) return;
+    const row = ib.approvals.find((a) => a.kind === inboxDet.kind && a.slug === inboxDet.slug);
+    if (!row) { closeDetail(true); return; }
+    if (row.digest && inboxDet.check && inboxDet.check.digest !== row.digest && !inboxReloading) { inboxReloading = true; try { await reloadInboxDetail(); } finally { inboxReloading = false; } }
+  }
+  function renderInboxDetail(focusTitle) {
+    const d = inboxDet; if (!d) return;
+    const f = document.activeElement; const had = f && $('id-actions').contains(f) ? f.dataset.k : null;
+    const ib = lastPanels && lastPanels.inbox; const row = ib && ib.approvals.find((a) => a.kind === d.kind && a.slug === d.slug);
+    $('inbox-detail').setAttribute('aria-label', T('inbox.detail.aria'));
+    $('id-kind').textContent = T('inbox.kind.' + (d.kind === 'squad' ? 'squad' : 'skill'));
+    $('id-title').textContent = d.name || d.slug;
+    $('id-desc').textContent = d.description || '';
+    const st = $('id-state'); const cs = d.check ? d.check.state : null; st.hidden = !cs; st.className = 'pill' + (cs === 'ok' ? ' ok' : cs === 'risk' ? ' need' : ' unknown'); if (cs) st.textContent = T(inboxStateKey(cs));
+    const acts = $('id-actions'); acts.replaceChildren();
+    const btn = (k, cls, fn, disabled) => { const b = el('button', 'btn' + (cls ? ' ' + cls : ''), T('inbox.act.' + k)); b.type = 'button'; b.dataset.k = k; b.disabled = !!disabled; b.addEventListener('click', fn); acts.append(b); };
+    if (d.kind === 'squad') btn('install', cs === 'risk' || (d.check && d.check.existsBuiltin) ? '' : 'primary', () => inboxInstall(d.slug, d.check ? d.check.digest : ''), !d.check || cs === 'invalid' || cs === 'unknown' || !d.check.digest);
+    else btn('request', 'primary', () => inboxRequestSkill(d.slug), !!(row && row.invalid));
+    btn('reject', 'ghost', () => inboxReject(d.kind, d.slug), !!d.loading);
+    const body = $('id-body'); body.replaceChildren();
+    if (!d.loading) {
+      if (d.check) {
+        body.append(el('h3', 'pd-h', T('inbox.sec.check')));
+        const c = d.check;
+        if (c.reason) body.append(el('div', 'pd-meta', c.reason));
+        if (c.summary) body.append(el('div', 'pd-meta', T('inbox.check.summary', { n: c.summary.members, models: c.summary.models.join(', '), tools: c.summary.tools.join(', ') })));
+        if (c.existsPersonal) body.append(el('div', 'pd-note', T('inbox.check.exists')));
+        if (c.existsBuiltin) body.append(el('div', 'pd-note', T('inbox.check.builtin')));
+        for (const [key, list, cls] of [['inbox.sec.risks', c.risks, ' risk'], ['inbox.sec.warns', c.warns, '']]) {
+          if (!list.length) continue;
+          body.append(el('h3', 'pd-h', T(key)));
+          const ul = el('ul', 'id-list' + cls); for (const x of list) ul.append(el('li', '', x)); body.append(ul);
+        }
+      }
+      if (row && row.invalid) body.append(el('div', 'pd-note', T('inbox.invalid.skill')));
+      for (const s of d.sections) {
+        body.append(el('h3', 'pd-h', s.name));
+        if (s.text) { const pre = el('pre', 'id-pre', s.text); pre.tabIndex = 0; body.append(pre); }
+        if (s.truncated) body.append(el('div', 'hint', T(s.limit === 'total' ? 'inbox.truncated.total' : 'inbox.truncated')));
+      }
+      body.append(el('h3', 'pd-h', T('inbox.sec.files')));
+      const ul = el('ul', 'id-list'); for (const x of d.files) ul.append(el('li', '', x.name + ' (' + x.size + ' B)')); body.append(ul);
+      if (d.skipped) body.append(el('div', 'hint', T('inbox.skipped', { n: d.skipped })));
+    }
+    if (had) { const n = acts.querySelector('[data-k="' + had + '"]:not(:disabled)'); if (n) n.focus(); } else if (focusTitle) $('id-title').focus();
+  }
+  $('id-close').addEventListener('click', () => closeDetail(true));
 
   // ---- 프로젝트: 왼쪽 목록(카테고리 > 프로젝트)과 가운데 상세 ----
   // 모든 문구는 textContent 로만 넣는다. 키는 main 의 목록에서 온 값이고, 상태 변경·이어서 하기는 main 이 키를 다시 대조한다.
@@ -618,6 +799,7 @@
   });
 
   function openDetail(key) {
+    detailMode = 'project'; inboxDet = null; inboxDetSeq++; $('inbox-detail').hidden = true;
     detailKey = key; detailOpen = true; detail = null; detailSig = '';
     $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = false;
     $('pd-note').textContent = '';
@@ -632,8 +814,8 @@
   }
   function closeDetail(refocus) {
     if (!detailOpen) return;
-    detailOpen = false; detailKey = null; detail = null; detailSig = ''; detailSeq++;
-    $('proj-detail').hidden = true; $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
+    detailOpen = false; detailKey = null; detail = null; detailSig = ''; detailSeq++; inboxDet = null; inboxDetSeq++;
+    $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
     if (lastPanels) renderProjects(lastPanels.projects);
     showActive(false); // 숨겨 둔 동안 바뀐 크기를 다시 맞추고 그린다(pty 는 그대로 살아 있다)
     if (refocus) focusTerm();
@@ -823,7 +1005,8 @@
     applyStatic();
     if (lastPanels) renderStatic(lastPanels);
     wsKey = null; renderWs();
-    if (detailOpen && detail) renderDetail(false);
+    if (detailOpen && detailMode === 'project' && detail) renderDetail(false);
+    if (detailOpen && detailMode === 'inbox' && inboxDet) renderInboxDetail(false);
     if (setRows) renderSettings();
     if (!$('pop-update').hidden) renderUpdate();
     renderLangSeg();
@@ -1175,7 +1358,7 @@
     if (kind !== 'project' || modalOpen()) return;
     if (!projView.open.some((g) => g.items.some((it) => it.key === id))) return;
     closeMenu(false); closeUpdate(false);
-    if (detailOpen && detailKey === id) return; // 이미 열려 있으면 그대로
+    if (detailOpen && detailMode === 'project' && detailKey === id) return; // 이미 열려 있으면 그대로
     openDetail(id);
   });
 
@@ -1198,6 +1381,14 @@
   });
   window.addEventListener('blur', () => { closeMenu(false); });
   window.maru.onOpenSettings(() => openSettings());
+  // ⌘숫자 힌트는 ⌘ 를 누르고 있는 동안에만 보인다(평소에는 이름이 전체 폭을 쓴다)
+  const setMod = (on) => document.body.classList.toggle('mod', on);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Meta' || e.metaKey) setMod(true); }, true);
+  document.addEventListener('keyup', (e) => { if (!e.metaKey) setMod(false); }, true);
+  // 네이티브 창·앱 전환 뒤에는 keyup 을 못 받을 수 있다: 포인터가 움직이거나 눌릴 때 ⌘ 가 눌려 있지 않으면 힌트를 끈다
+  for (const ev of ['pointermove', 'mousedown']) document.addEventListener(ev, (e) => { if (!e.metaKey) setMod(false); }, true);
+  window.addEventListener('blur', () => setMod(false));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) setMod(false); });
 
   // ---- 시작 ----
   async function boot() {
@@ -1216,8 +1407,9 @@
     else if (init && init.uiOpen === 'settings') openSettings();
     else if (init && init.uiOpen === 'update') openUpdate();
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
+    setInterval(() => { if (lastPanels) renderInbox(lastPanels.inbox); }, 30000); // 상대 시각(N분 전)을 갱신
     setInterval(syncWs, 1000); // 상태 파일은 이벤트가 없으므로 주기적으로 읽는다
   }
   boot();

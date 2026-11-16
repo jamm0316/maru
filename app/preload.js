@@ -39,6 +39,12 @@ contextBridge.exposeInMainWorld('maru', {
   renameProject: (key, title) => ipcRenderer.invoke('projects:rename', String(key).slice(0, 40), String(title).slice(0, 400)),
   mergeProject: (key, into) => ipcRenderer.invoke('projects:merge', String(key).slice(0, 40), String(into).slice(0, 40)),
   continueProject: (id, key, shown) => ipcRenderer.invoke('projects:continue', String(id), String(key).slice(0, 40), String(shown).slice(0, 200)),
+  // 알림과 승인함: 종류('squad'|'skill')와 slug 문자열만 싣는다(내용·경로는 받지 않는다). main 이 자기 목록과 대조하고 설치·거절은 네이티브 확인 창을 띄운다.
+  inboxDetail: (kind, slug) => ipcRenderer.invoke('inbox:detail', String(kind).slice(0, 8), String(slug).slice(0, 48)),
+  inboxInstallSquad: (slug, digest) => ipcRenderer.invoke('inbox:install-squad', String(slug).slice(0, 48), typeof digest === 'string' ? digest.slice(0, 80) : ''), // digest: 화면에 보인 검증 결과의 것(main 이 64 hex 와 새 검사 결과를 대조한다)
+  inboxReject: (kind, slug) => ipcRenderer.invoke('inbox:reject', String(kind).slice(0, 8), String(slug).slice(0, 48)),
+  inboxRequestSkill: (id, slug) => ipcRenderer.invoke('inbox:request-skill', String(id), String(slug).slice(0, 48)),
+  inboxMarkSeen: () => ipcRenderer.invoke('inbox:mark-seen'),
   // 순서·접힘: 종류·키·태그·불리언만 싣는다. main 이 자기 목록과 대조하고 다른 카테고리로의 이동은 거부한다.
   setCategoryCollapsed: (tag, on) => ipcRenderer.invoke('projects:set-collapsed', String(tag).slice(0, 12), on === true),
   reorderProject: (kind, id, before) => ipcRenderer.invoke('projects:reorder', String(kind).slice(0, 8), String(id).slice(0, 40), before === null || before === undefined ? null : String(before).slice(0, 40)),
