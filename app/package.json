@@ -67,6 +67,16 @@
     "dmg": {
       "sign": false
     },
-    "afterPack": "tools/after-pack.js"
+    "afterPack": "tools/after-pack.js",
+    "extraResources": [
+      {
+        "from": "build/trayTemplate.png",
+        "to": "tray/trayTemplate.png"
+      },
+      {
+        "from": "build/trayTemplate@2x.png",
+        "to": "tray/trayTemplate@2x.png"
+      }
+    ]
   }
 }

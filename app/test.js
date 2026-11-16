@@ -194,7 +194,7 @@ t('parseTodos 안전하지 않은 프롬프트 시작은 비움', () => {
   assert.strictEqual(L.parseTodos('a|5|/title|')[0].title, '/title'); // 제목은 영향 없음
 });
 t('fillNoticeKey 사유별 키·문구', () => {
-  const rs = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'invalid'];
+  const rs = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive', 'invalid'];
   const msgs = rs.map((r) => I.t('ko', L.fillNoticeKey(r)));
   assert.strictEqual(new Set(msgs).size, rs.length);
   assert.strictEqual(L.fillNoticeKey('???'), 'fill.invalid');
@@ -399,11 +399,317 @@ t('화면이 쓰는 키가 표에 모두 있다', () => {
   const used = new Set();
   for (const m of src.matchAll(/\bT\('([a-z][\w.-]*)'/g)) used.add(m[1]);
   for (const m of src.matchAll(/\btr\('([a-z][\w.-]*)'/g)) used.add(m[1]);
-  for (const m of src.matchAll(/data-i18n(?:-aria)?="([^"]+)"/g)) used.add(m[1]);
+  for (const m of src.matchAll(/data-i18n(?:-aria|-title)?="([^"]+)"/g)) used.add(m[1]);
   for (const m of src.matchAll(/\brow\('\w+',\s*'\w+',\s*'([\w.-]+)'/g)) used.add(m[1]);
-  for (const m of src.matchAll(/'(copyLogin|install|open[A-Z]\w+)'/g)) used.add('act.' + m[1]); // 행 동작 버튼 문구
+  for (const m of src.matchAll(/'(copyLogin|install|open(?!Directory)[A-Z]\w+)'/g)) used.add('act.' + m[1]); // 행 동작 버튼 문구
   assert.ok(used.size > 40);
   for (const k of used) if (!k.endsWith('.')) assert.ok(Object.prototype.hasOwnProperty.call(I.STR.ko, k), '표에 없음: ' + k);
+});
+
+// ---- 작업 공간 ----
+const WSDIRS = new Set(['/h/a/blog', '/h/b/blog', '/h/maru', '/h/x', '/h/y', '/h/z', '/h/w', '/h/v', '/']);
+const wsExists = (p) => WSDIRS.has(p);
+t('workspaceTitle·uniqueTitle 번호 매기기', () => {
+  assert.strictEqual(L.workspaceTitle('/h/a/blog'), 'blog');
+  assert.strictEqual(L.workspaceTitle('/h/a/blog/'), 'blog');
+  assert.strictEqual(L.workspaceTitle('/'), '/');
+  assert.strictEqual(L.workspaceTitle('/h/\u202E\u200B'), 'workspace');
+  assert.strictEqual(L.workspaceTitle('/h/\u202E\u200B', I.t('ko', 'ws.untitled')), '작업 공간'); // 대체 제목은 i18n
+  assert.strictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/ ' }] }, { exists: () => true, fallbackTitle: I.t('en', 'ws.untitled') }).list[0].title, 'Workspace');
+  assert.strictEqual([...L.workspaceTitle('/h/' + '가'.repeat(60))].length, 40);
+  assert.strictEqual(L.uniqueTitle('blog', []), 'blog');
+  assert.strictEqual(L.uniqueTitle('blog', ['blog']), 'blog 2');
+  assert.strictEqual(L.uniqueTitle('blog', ['blog', 'blog 2', 'blog 3']), 'blog 4');
+  assert.strictEqual(L.uniqueTitle('blog', ['blog 2']), 'blog');
+  assert.ok([...L.uniqueTitle('가'.repeat(40), ['가'.repeat(40)])].length <= 40);
+});
+t('normalizeWorkspaces: 정상·중복 제목·활성 위치', () => {
+  const r = L.normalizeWorkspaces({ active: 1, workspaces: [{ cwd: '/h/a/blog', title: 'blog' }, { cwd: '/h/b/blog', title: 'blog' }, { cwd: '/h/maru' }] }, { exists: wsExists });
+  assert.deepStrictEqual(r, { list: [{ cwd: '/h/a/blog', title: 'blog' }, { cwd: '/h/b/blog', title: 'blog 2' }, { cwd: '/h/maru', title: 'maru' }], active: 1 });
+  const same = L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/x' }, { cwd: '/h/x' }, { cwd: '/h/x/' }] }, { exists: (p) => p === '/h/x' });
+  assert.deepStrictEqual(same.list.map((x) => x.title), ['x', 'x 2', 'x 3']);
+  assert.strictEqual(same.list[2].cwd, '/h/x');
+});
+t('normalizeWorkspaces: 없는 폴더는 사용 불가로 남기고 나쁜 항목은 버리며 활성 위치를 보정', () => {
+  const r = L.normalizeWorkspaces({ active: 2, workspaces: [{ cwd: '/h/gone' }, { cwd: '/h/x' }, { cwd: '/h/y' }, { cwd: 5 }, null, 'str', [], { cwd: 'rel/path' }, { cwd: '/h/x/../y' }, { cwd: '/h/x\u202E' }, { cwd: '/h/z', title: 42 }] }, { exists: wsExists });
+  assert.deepStrictEqual(r.list.map((x) => x.cwd), ['/h/gone', '/h/x', '/h/y', '/h/z']); // 없는 폴더(/h/gone)도 버리지 않는다
+  assert.deepStrictEqual(r.list.map((x) => !!x.unavailable), [true, false, false, false]);
+  assert.strictEqual(r.active, 2); // 원래 2번(/h/y)이 새 목록의 2번
+  assert.strictEqual(L.normalizeWorkspaces({ active: 0, workspaces: [{ cwd: '/h/gone' }, { cwd: '/h/x' }] }, { exists: wsExists }).active, 0); // 사용 불가여도 활성 위치는 그대로
+  for (const a of [-1, 99, 1.5, '1', null, undefined]) assert.strictEqual(L.normalizeWorkspaces({ active: a, workspaces: [{ cwd: '/h/x' }] }, { exists: wsExists }).active, 0);
+  assert.strictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/x', title: 'a\u202Eb\nc' }] }, { exists: wsExists }).list[0].title, 'abc');
+});
+t('normalizeWorkspaces: 6개 초과·잘못된 최상위 형식·exists 오류', () => {
+  const many = ['/h/x', '/h/y', '/h/z', '/h/w', '/h/v', '/h/maru', '/h/a/blog', '/h/b/blog'].map((cwd) => ({ cwd }));
+  const r = L.normalizeWorkspaces({ workspaces: many }, { exists: wsExists });
+  assert.strictEqual(r.list.length, 6); assert.strictEqual(r.list[5].cwd, '/h/maru');
+  for (const bad of [null, undefined, 'x', 5, [], {}, { workspaces: 'x' }, { workspaces: {} }]) assert.deepStrictEqual(L.normalizeWorkspaces(bad, { exists: wsExists }), { list: [], active: 0 });
+  const un = [{ cwd: '/h/x', title: 'x', unavailable: true }];
+  assert.deepStrictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/x' }] }, { exists: () => { throw new Error('x'); } }).list, un);
+  assert.deepStrictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/x' }] }, {}).list, un); // exists 없으면 아무것도 믿지 않는다(사용 불가로 표시)
+  assert.deepStrictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/x' }] }, { exists: () => 'yes' }).list, un);
+  assert.strictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/' + 'a'.repeat(1100) }] }, { exists: () => true }).list.length, 0);
+});
+t('parseWorkspaces: 나쁜 JSON·잘림은 null(없는 것으로 취급)', () => {
+  const ok = JSON.stringify({ version: 1, active: 0, workspaces: [{ cwd: '/h/x', title: 'x' }] });
+  assert.deepStrictEqual(L.parseWorkspaces({ text: ok, truncated: false }, wsExists), { list: [{ cwd: '/h/x', title: 'x' }], active: 0 });
+  assert.strictEqual(L.parseWorkspaces({ text: ok, truncated: true }, wsExists), null);
+  for (const text of ['', 'nope', '{', '[]', 'null', '5', '{"workspaces":5}', '{}']) assert.strictEqual(L.parseWorkspaces({ text, truncated: false }, wsExists), null, text);
+  assert.strictEqual(L.parseWorkspaces(null, wsExists), null);
+  assert.deepStrictEqual(L.parseWorkspaces({ text: '{"workspaces":[]}', truncated: false }, wsExists), { list: [], active: 0 });
+});
+t('작업 공간 저장(0600·원자적·필드 제한)과 읽기, 심볼릭 링크 거부', () => {
+  const dir = path.join(tmp, 'wsdata'); const f = path.join(dir, 'workspaces.json');
+  assert.strictEqual(L.loadWorkspaces(f, () => true), null);
+  assert.strictEqual(L.saveWorkspaces(f, [{ cwd: '/h/x', title: 'x', extra: 'secret', state: 'busy' }, { cwd: '/h/y', title: 'y' }], 1), true);
+  assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  assert.deepStrictEqual(fs.readdirSync(dir), ['workspaces.json']);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(f, 'utf8')), { version: 1, active: 1, workspaces: [{ cwd: '/h/x', title: 'x' }, { cwd: '/h/y', title: 'y' }] });
+  assert.deepStrictEqual(L.loadWorkspaces(f, wsExists), { list: [{ cwd: '/h/x', title: 'x' }, { cwd: '/h/y', title: 'y' }], active: 1 });
+  assert.deepStrictEqual(L.loadWorkspaces(f, (p) => p === '/h/y'), { list: [{ cwd: '/h/x', title: 'x', unavailable: true }, { cwd: '/h/y', title: 'y' }], active: 1 }); // 없어진 폴더는 사용 불가로 남기고, 파일에서도 지우지 않는다
+  fs.writeFileSync(f, 'x'.repeat(40000)); assert.strictEqual(L.loadWorkspaces(f, wsExists), null);
+  const link = path.join(dir, 'link.json'); fs.symlinkSync(f, link); assert.strictEqual(L.loadWorkspaces(link, wsExists), null);
+  const real = path.join(tmp, 'wsreal'); fs.mkdirSync(real); const ld = path.join(tmp, 'wslink'); fs.symlinkSync(real, ld);
+  assert.strictEqual(L.saveWorkspaces(path.join(ld, 'workspaces.json'), [{ cwd: '/h/x' }], 0), false);
+  assert.deepStrictEqual(fs.readdirSync(real), []);
+});
+t('workspaceDirOk: 디렉터리이고 소유자가 현재 사용자', () => {
+  const d = (uid) => ({ isDirectory: () => true, uid }); const fl = { isDirectory: () => false, uid: 501 };
+  assert.strictEqual(L.workspaceDirOk(d(501), 501), true);
+  assert.strictEqual(L.workspaceDirOk(d(0), 501), false);
+  assert.strictEqual(L.workspaceDirOk(fl, 501), false);
+  assert.strictEqual(L.workspaceDirOk(null, 501), false);
+  assert.strictEqual(L.workspaceDirOk(fs.statSync(tmp), process.getuid()), true);
+  assert.strictEqual(L.workspaceDirOk(fs.statSync(__filename), process.getuid()), false);
+});
+t('newSessionId: agent-state.sh 형식([A-Za-z0-9-]{8,64})', () => {
+  const crypto = require('crypto');
+  const ids = new Set();
+  for (let i = 0; i < 20; i++) { const id = L.newSessionId(() => crypto.randomUUID()); assert.ok(L.isSessionId(id)); assert.ok(/^[A-Za-z0-9-]{8,64}$/.test(id)); ids.add(id); }
+  assert.strictEqual(ids.size, 20);
+  for (const bad of ['short', 'a/b/c/d/e/f/g', 'x'.repeat(65), 5, null]) assert.strictEqual(L.newSessionId(() => bad), null);
+  assert.strictEqual(L.newSessionId(() => { throw new Error('x'); }), null);
+});
+t('shortenPath', () => {
+  assert.strictEqual(L.shortenPath('/h/me', '/h/me'), '~');
+  assert.strictEqual(L.shortenPath('/h/me/maru', '/h/me'), '~/maru');
+  assert.strictEqual(L.shortenPath('/h/mex/maru', '/h/me'), '/h/mex/maru'); // 접두사만 같은 다른 폴더
+  assert.strictEqual(L.shortenPath('/opt/x', '/h/me'), '/opt/x');
+  assert.strictEqual(L.shortenPath('/', '/h/me'), '/');
+  assert.strictEqual(L.shortenPath('/h/me/a/very/deep/nested/project/blog', '/h/me', 20), '~/…/project/blog');
+  assert.strictEqual(L.shortenPath('/opt/a/very/deep/nested/project/blog', '/h/me', 20), '/…/project/blog');
+  const long = L.shortenPath('/h/me/' + 'x'.repeat(80), '/h/me', 20);
+  assert.ok([...long].length <= 20 && long.startsWith('…'));
+  for (const bad of ['', null, undefined, 5]) assert.strictEqual(L.shortenPath(bad, '/h/me'), '');
+  assert.strictEqual(L.shortenPath('/h/me/한글/프로젝트', '/h/me'), '~/한글/프로젝트');
+});
+const trK = (k, p) => I.t('ko', k, p); const trE = (k, p) => I.t('en', k, p);
+t('traySummary·trayTitle 혼합 상태', () => {
+  assert.strictEqual(L.traySummary(['busy', 'busy', 'waiting'], trK), '작업 중 2 · 확인 필요 1');
+  assert.strictEqual(L.traySummary(['idle', 'waiting', 'busy', 'busy', 'exited', 'none'], trK), '작업 중 2 · 확인 필요 1 · 입력 대기 1 · 대기 1 · 종료됨 1');
+  assert.strictEqual(L.traySummary(['idle'], trE), 'Ready 1');
+  assert.strictEqual(L.traySummary(['busy', 'waiting'], trE), 'Working 1 · Needs you 1');
+  assert.strictEqual(L.traySummary([], trK), '열린 작업 공간 없음');
+  assert.strictEqual(L.traySummary(undefined, trE), 'No workspaces open');
+  assert.strictEqual(L.traySummary(['bogus', 'none'], trK), '대기 2');
+  assert.strictEqual(L.trayTitle(['busy', 'waiting']), '!');
+  assert.strictEqual(L.trayTitle(['busy', 'idle', 'exited']), '');
+  assert.strictEqual(L.trayTitle([]), ''); assert.strictEqual(L.trayTitle(null), '');
+});
+t('trayTodoTitles: 정리·40자 상한·최대 3개', () => {
+  const r = L.trayTodoTitles([{ title: '하나' }, { title: 'a\u202Eb\u200Bc' }, { title: '' }, { title: '가'.repeat(60) }, { title: '넷' }, null, { title: 5 }]);
+  assert.deepStrictEqual(r, ['하나', 'abc', '가'.repeat(39) + '…']);
+  assert.strictEqual([...r[2]].length, 40);
+  assert.strictEqual(L.trayTodoTitles([{ title: '가'.repeat(40) }])[0], '가'.repeat(40));
+  assert.deepStrictEqual(L.trayTodoTitles(undefined), []);
+});
+t('trayMenuModel: ko·en 라벨 모델', () => {
+  const workspaces = [{ id: 'a', title: 'blog', state: 'busy' }, { id: 'b', title: 'maru', state: 'waiting' }, { id: 'c', title: 'notes 2', state: 'exited' }];
+  const todos = [{ title: '글 초안 점검' }, { title: '병원 예약' }, { title: '영수증' }, { title: '넷째는 안 보임' }];
+  const ko = L.trayMenuModel({ workspaces, activeId: 'b', todos, t: trK });
+  assert.deepStrictEqual(ko.map((m) => [m.type, m.label || '']), [
+    ['header', '작업 중 1 · 확인 필요 1 · 종료됨 1'], ['workspace', 'blog · 작업 중'], ['workspace', 'maru · 확인 필요'], ['workspace', 'notes 2 · 종료됨'],
+    ['separator', ''], ['todo', '글 초안 점검'], ['todo', '병원 예약'], ['todo', '영수증'], ['separator', ''],
+    ['action', '창 열기'], ['action', '새 작업 공간…'], ['action', '설정…'], ['action', '종료'],
+  ]);
+  assert.strictEqual(ko[0].enabled, false);
+  assert.ok(ko.filter((m) => m.type === 'todo').every((m) => m.enabled === false));
+  assert.deepStrictEqual(ko.filter((m) => m.type === 'workspace').map((m) => m.checked), [false, true, false]);
+  assert.deepStrictEqual(ko.filter((m) => m.type === 'action').map((m) => m.id), ['show', 'new', 'settings', 'quit']);
+  const en = L.trayMenuModel({ workspaces, activeId: 'a', todos: [], t: trE });
+  assert.deepStrictEqual(en.map((m) => m.label || ''), ['Working 1 · Needs you 1 · Exited 1', 'blog · Working', 'maru · Needs you', 'notes 2 · Exited', '', 'Show Window', 'New Workspace…', 'Settings…', 'Quit']);
+  const empty = L.trayMenuModel({ workspaces: [], todos: undefined, t: trK });
+  assert.deepStrictEqual(empty.map((m) => m.label || ''), ['열린 작업 공간 없음', '', '창 열기', '새 작업 공간…', '설정…', '종료']);
+});
+t('trayIconPath: 개발·패키징 경로', () => {
+  assert.strictEqual(L.trayIconPath({ isPackaged: false, resourcesPath: '/R', appDir: '/A' }), '/A/build/trayTemplate.png');
+  assert.strictEqual(L.trayIconPath({ isPackaged: true, resourcesPath: '/R', appDir: '/A' }), '/R/tray/trayTemplate.png');
+});
+t('트레이 아이콘 파일: 18·36px PNG, 패키징 설정에 포함', () => {
+  const png = (f) => { const b = fs.readFileSync(path.join(__dirname, 'build', f)); assert.strictEqual(b.toString('latin1', 1, 4), 'PNG'); return [b.readUInt32BE(16), b.readUInt32BE(20)]; };
+  assert.deepStrictEqual(png('trayTemplate.png'), [18, 18]);
+  assert.deepStrictEqual(png('trayTemplate@2x.png'), [36, 36]);
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+  const to = pkg.build.extraResources.map((r) => r.to).sort();
+  assert.deepStrictEqual(to, ['tray/trayTemplate.png', 'tray/trayTemplate@2x.png']);
+  for (const r of pkg.build.extraResources) assert.ok(fs.existsSync(path.join(__dirname, r.from)));
+});
+t('작업 공간·트레이 i18n 키가 ko·en 모두 있고 비어 있지 않다', () => {
+  const keys = ['agent.exited', 'agent.exited.sub', 'ws.add', 'ws.add.aria', 'ws.close.aria', 'ws.row.aria', 'ws.empty', 'ws.new', 'term.fail', 'fill.inactive',
+    'menu.workspace', 'menu.newWs', 'menu.closeWs', 'menu.nextWs', 'menu.prevWs', 'menu.gotoWs', 'dlg.pick.title', 'dlg.pick.ok', 'dlg.max.title', 'dlg.max.detail',
+    'dlg.dir.title', 'dlg.dir.detail', 'dlg.close.title', 'dlg.close.detail', 'dlg.close.ok', 'dlg.quit.title', 'dlg.quit.detail', 'dlg.quit.ok',
+    'tray.none', 'tray.tip', 'tray.open', 'tray.new', 'tray.settings', 'tray.quit'];
+  for (const k of keys) for (const lg of I.LANGS) assert.ok(Object.prototype.hasOwnProperty.call(I.STR[lg], k) && [].concat(I.STR[lg][k]).every((x) => x.length > 0), lg + ':' + k);
+  assert.strictEqual(I.t('en', 'dlg.quit.detail', { n: 1 }).startsWith('1 workspace is'), true);
+  assert.strictEqual(I.t('ko', 'dlg.close.title', { title: 'blog' }), '"blog" 작업 공간을 닫을까요?');
+});
+t('main.js 가 쓰는 작업 공간 IPC 채널이 preload 와 맞는다', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'quest:fill', 'ws:get', 'ws:activate', 'ws:new', 'ws:close']) {
+    assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch);
+  }
+  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'ws:activate', 'ws:close']) assert.ok(new RegExp("'" + ch + "', String\\(id\\)").test(pre), 'id 를 싣는지: ' + ch);
+  assert.ok(/'quest:fill', String\(id\)/.test(pre));
+});
+
+// ---- 로고·링 움직임 ----
+t('LOGO 도안: 135 타일, 지정한 반지름·선 굵기, 헤더 SVG 와 일치', () => {
+  assert.strictEqual(L.LOGO.tile, 135);
+  assert.deepStrictEqual([L.LOGO.ring.r, L.LOGO.ring.w, L.LOGO.dash.r, L.LOGO.dash.w, L.LOGO.dash.on, L.LOGO.dash.off, L.LOGO.dot.r], [40, 6, 24, 2, 4, 5, 10]);
+  assert.strictEqual(L.LOGO.color, '#FF8A2B'); assert.strictEqual(L.LOGO.tileColor, '#17110B');
+  const mark = L.logoShapesSvg(L.LOGO.color, 'mark');
+  assert.ok(mark.includes('r="40"') && mark.includes('stroke-width="6"') && mark.includes('stroke-dasharray="4 5"') && mark.includes('r="10"'));
+  const tray = L.logoShapesSvg('#000000', 'tray');
+  assert.ok(!tray.includes('stroke-dasharray') && (tray.match(/<circle/g) || []).length === 2); // 고리 + 점만
+  const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+  assert.ok(html.includes(mark), '헤더 SVG 가 도안과 다름');
+});
+const runRing = (st, ms, mode, step = 16) => { let s = st; for (let t0 = 0; t0 < ms; t0 += step) s = L.stepRing(s, step, mode); return s; };
+t('stepRing: busy 로 빠르게 가속(400ms 에 목표의 90% 가까이)', () => {
+  const s0 = L.ringInit();
+  const s = runRing(s0, 400, 'busy', 10);
+  const frac = (s.v - L.RING.vDrift) / (L.RING.vBusy - L.RING.vDrift);
+  assert.ok(frac > 0.88 && frac < 0.95, 'frac ' + frac);
+  assert.ok(runRing(s0, 2000, 'busy').v > 0.99 * L.RING.vBusy);
+  const w = runRing(s0, 3000, 'waiting'); assert.ok(Math.abs(w.v - L.RING.vWaiting) < 2);
+  assert.strictEqual(runRing(s0, 3000, 'exited').v < 0.5, true);
+});
+t('stepRing: busy→idle 은 마찰처럼 천천히(300ms 에 여전히 빠름, 2s 에 15% 미만, 단조 감소)', () => {
+  let s = runRing(L.ringInit(), 3000, 'busy');
+  const vb = s.v; assert.ok(vb > 530);
+  let prev = vb; let v300 = null; let v2000 = null; let t = 0;
+  for (; t < 5000; t += 10) {
+    s = L.stepRing(s, 10, 'idle');
+    assert.ok(s.v <= prev + 1e-9, '단조 감소'); prev = s.v;
+    if (t + 10 === 300) v300 = s.v;
+    if (t + 10 === 2000) v2000 = s.v;
+  }
+  assert.ok(v300 > 0.5 * vb, 'v300 ' + v300);
+  assert.ok(v2000 < 0.15 * vb, 'v2000 ' + v2000);
+  assert.ok(s.v < 12 && s.v >= L.RING.vDrift - 1e-9); // 결국 drift 로 안정
+  assert.ok(s.busy < 0.05); // 호 숨쉬기·점 맥동 진폭도 같은 곡선으로 사라진다
+});
+t('stepRing: dt 상한(50ms)·각도 범위·진폭 포락선·뜨는 느낌', () => {
+  const a = L.stepRing(L.ringInit(), 5000, 'busy'); const b = L.stepRing(L.ringInit(), 50, 'busy');
+  assert.deepStrictEqual(a, b);
+  assert.deepStrictEqual(L.stepRing(L.ringInit(), -10, 'busy'), L.stepRing(L.ringInit(), 0, 'busy'));
+  assert.deepStrictEqual(L.stepRing(L.ringInit(), NaN, 'busy'), L.stepRing(L.ringInit(), 0, 'busy'));
+  let s = L.ringInit(); for (let i = 0; i < 2000; i++) s = L.stepRing(s, 16, 'busy');
+  assert.ok(s.a1 >= 0 && s.a1 < 360 && s.a2 >= 0 && s.a2 < 360);
+  const busyV = []; let u = s; for (let i = 0; i < 200; i++) { u = L.stepRing(u, 16, 'busy'); busyV.push(L.ringView(u)); }
+  assert.ok(Math.max(...busyV.map((v) => v.dot)) > 1.1 && Math.min(...busyV.map((v) => v.dot)) < 0.9); // 점 ±12%
+  assert.ok(Math.max(...busyV.map((v) => v.arc)) > 160 && Math.min(...busyV.map((v) => v.arc)) < 80); // 호가 숨쉰다
+  assert.ok(busyV.every((v) => Math.abs(v.ty) < 0.5 && Math.abs(v.scale - 1) < 0.01)); // busy 에서는 떠오르지 않는다
+  let i2 = L.ringInit(); const idleV = []; for (let i = 0; i < 600; i++) { i2 = L.stepRing(i2, 16, 'idle'); idleV.push(L.ringView(i2)); }
+  assert.ok(Math.max(...idleV.map((v) => v.ty)) > 2.5 && Math.min(...idleV.map((v) => v.ty)) < -2.5 && idleV.every((v) => Math.abs(v.ty) <= 3 + 1e-9)); // ±3px
+  assert.ok(idleV.every((v) => v.scale <= 1.015 + 1e-9 && v.scale >= 0.985 - 1e-9 && v.dot === 1));
+  const rot = L.stepRing(L.stepRing(L.ringInit(), 50, 'busy'), 50, 'busy'); assert.ok(rot.a1 > 0 && rot.a2 > 180); // 안쪽 고리는 반대 방향(−0.6×)
+});
+t('stepRing: reduced-motion 이면 정지 상태', () => {
+  let s = runRing(L.ringInit(), 1000, 'busy');
+  for (const mode of ['busy', 'idle', 'waiting', 'exited']) {
+    s = L.stepRing(s, 16, mode, true);
+    assert.deepStrictEqual(s, { a1: 0, a2: 0, v: 0, busy: 0, fl: 0, t: 0 });
+    const v = L.ringView(s); assert.deepStrictEqual([v.rot1, v.rot2, v.ty, v.scale, v.dot, v.arc], [0, 0, 0, 1, 1, 120]);
+  }
+});
+t('main.js: 시스템 종료(powerMonitor shutdown)는 확인 창 없이 종료 허용', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(/powerMonitor\.on\('shutdown', \(\) => \{ quitting = true; cleanup\(\); \}\)/.test(main));
+  assert.ok(/before-quit[\s\S]{0,80}if \(quitting\) return;/.test(main));
+});
+
+// ---- 동작 결정·복원·id 검증 ----
+t('confirmClose·confirmRestart: 상태별 확인 여부', () => {
+  const all = ['busy', 'waiting', 'idle', 'none', 'pending', 'exited', 'unavailable'];
+  assert.deepStrictEqual(all.filter(L.confirmClose), ['busy', 'waiting', 'idle', 'none']); // 세션이 살아 있으면 확인
+  assert.deepStrictEqual(all.filter(L.confirmRestart), ['busy', 'waiting']);
+  for (const bad of [undefined, null, '', 'bogus', 5]) { assert.strictEqual(L.confirmClose(bad), false); assert.strictEqual(L.confirmRestart(bad), false); }
+  assert.deepStrictEqual(L.WS_STATES, ['busy', 'waiting', 'idle', 'none', 'pending', 'exited', 'unavailable']);
+});
+t('closeRequestAction: 열린 창이 있으면 그것부터 닫는다', () => {
+  assert.strictEqual(L.closeRequestAction({ overlayOpen: true, hasActive: true }), 'overlay');
+  assert.strictEqual(L.closeRequestAction({ overlayOpen: true, hasActive: false }), 'overlay');
+  assert.strictEqual(L.closeRequestAction({ overlayOpen: false, hasActive: true }), 'workspace');
+  assert.strictEqual(L.closeRequestAction({ overlayOpen: false, hasActive: false }), 'none');
+});
+t('lookupWs: 모르는·닫힌·이상한 id 는 버린다', () => {
+  const table = new Map([['abc', { id: 'abc' }], ['def', { id: 'def' }]]);
+  assert.strictEqual(L.lookupWs(table, 'abc').id, 'abc');
+  table.delete('abc');
+  for (const bad of ['abc', 'zzz', '', '__proto__', 'constructor', 'toString', 5, null, undefined, {}, ['def'], Symbol.iterator]) assert.strictEqual(L.lookupWs(table, bad), null, String(typeof bad));
+  assert.strictEqual(L.lookupWs(null, 'def'), null);
+  assert.strictEqual(L.lookupWs({}, 'def'), null);
+});
+t('readWorkspacesFile: 없음·정상·망가짐 구분, 망가진 파일은 .bak 으로(예전 .bak 덮어씀)', () => {
+  const dir = path.join(tmp, 'wsrest'); fs.mkdirSync(dir); const f = path.join(dir, 'workspaces.json');
+  assert.strictEqual(L.readWorkspacesFile(f, wsExists).status, 'missing');
+  assert.strictEqual(L.saveWorkspaces(f, [{ cwd: '/h/x', title: 'x' }, { cwd: '/h/gone', title: 'gone' }], 0), true);
+  const ok = L.readWorkspacesFile(f, wsExists);
+  assert.strictEqual(ok.status, 'ok'); assert.deepStrictEqual(ok.data.list.map((x) => !!x.unavailable), [false, true]);
+  fs.writeFileSync(f + '.bak', 'old backup');
+  fs.writeFileSync(f, '{broken');
+  assert.strictEqual(L.readWorkspacesFile(f, wsExists).status, 'corrupt');
+  assert.strictEqual(L.backupCorruptFile(f), true);
+  assert.strictEqual(fs.readFileSync(f + '.bak', 'utf8'), '{broken'); assert.ok(!fs.existsSync(f));
+  assert.strictEqual(L.readWorkspacesFile(f, wsExists).status, 'missing');
+  assert.strictEqual(L.saveWorkspaces(f, [{ cwd: '/h/y', title: 'y' }], 0), true); // 새 파일이 깨끗하게 쓰인다
+  assert.strictEqual(L.readWorkspacesFile(f, wsExists).data.list[0].cwd, '/h/y');
+  fs.writeFileSync(f, '[]'); assert.strictEqual(L.readWorkspacesFile(f, wsExists).status, 'corrupt'); // 형식 오류도 망가진 파일
+  assert.strictEqual(L.backupCorruptFile(path.join(dir, 'nope.json')), false);
+});
+t('ringFrameInterval: 조용하면 30fps, 가라앉으면 멈춤, 활동 중엔 매 프레임', () => {
+  const busyS = runRing(L.ringInit(), 2000, 'busy');
+  assert.strictEqual(L.ringFrameInterval(busyS, 'busy'), 0);
+  assert.strictEqual(L.ringFrameInterval(busyS, 'idle'), 0); // 아직 도는 중(감속)
+  assert.strictEqual(L.ringFrameInterval(L.ringInit(), 'idle'), 33);
+  assert.strictEqual(L.ringFrameInterval(L.ringInit(), 'none'), 33);
+  assert.strictEqual(L.ringFrameInterval(L.ringInit(), 'waiting'), 0);
+  const settled = runRing(L.ringInit(), 20000, 'exited');
+  assert.strictEqual(L.ringFrameInterval(settled, 'exited'), -1);
+  assert.strictEqual(L.ringFrameInterval(settled, 'pending'), -1);
+  assert.notStrictEqual(L.ringFrameInterval(L.ringInit(), 'pending'), -1);
+});
+t('작업 공간 상태 문구(시작 전·사용 불가)와 요약', () => {
+  assert.strictEqual(I.t('ko', 'agent.pending'), '시작 전'); assert.strictEqual(I.t('en', 'agent.pending'), 'Not started');
+  assert.strictEqual(I.t('ko', 'agent.unavailable'), '사용 불가'); assert.strictEqual(I.t('en', 'agent.unavailable'), 'Unavailable');
+  assert.strictEqual(L.traySummary(['busy', 'pending', 'unavailable'], trK), '작업 중 1 · 시작 전 1 · 사용 불가 1');
+  for (const k of ['agent.pending.sub', 'agent.unavailable.sub', 'ws.untitled', 'term.unavailable', 'dlg.restart.title', 'dlg.restart.detail', 'dlg.restart.ok', 'dlg.hang.title', 'dlg.hang.detail', 'dlg.hang.reload', 'dlg.hang.wait'])
+    for (const lg of I.LANGS) assert.ok(I.STR[lg][k] && [].concat(I.STR[lg][k]).every((x) => x.length > 0), lg + ':' + k);
+});
+t('main.js: 설치 때 종료 확인 생략(beforeQuit)·종료 경로·화면 복구·패키징 스모크', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(/installAndRelaunch\(upd\.dmgPath, \{ beforeQuit: \(\) => \{ quitting = true; \} \}\)/.test(main));
+  assert.ok(main.includes("'render-process-gone'") && main.includes("'unresponsive'"));
+  assert.ok(/function killAllSync[\s\S]*SIGHUP[\s\S]*Atomics\.wait[\s\S]*SIGKILL/.test(main));
+  assert.ok(/if \(app\.isPackaged\) \{ app\.exit\(ROOT \? 0 : 1\); return; \}/.test(main)); // 패키징 스모크는 한 줄 뒤 바로 종료
+  assert.ok(/!\(!app\.isPackaged && \(SMOKE \|\| TEST_FX\)\) && attention/.test(main)); // 확인 생략은 개발 실행에서만
+  assert.ok(main.includes("sendToRenderer('ui:close-request')"));
+});
+t('렌더러: ⌘W 요청·reduced-motion CSS', () => {
+  const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8');
+  assert.ok(/prefers-reduced-motion:reduce\)\{[^}]*animation:none!important/.test(css));
+  assert.ok(fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8').includes("'ui:close-request'"));
 });
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

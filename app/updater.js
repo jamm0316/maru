@@ -395,7 +395,7 @@ function create(userOpts = {}) {
     return out;
   }
 
-  async function installAndRelaunch(dmgPath) {
+  async function installAndRelaunch(dmgPath, opts) {
     const rec = produced.get(dmgPath);
     if (typeof dmgPath !== 'string' || !rec) throw new Error('이 프로세스가 검증해 받은 dmg 가 아님');
     if (process.platform !== 'darwin') throw new Error('macOS 에서만 설치할 수 있음');
@@ -449,6 +449,8 @@ function create(userOpts = {}) {
         if (helperDir) { try { fs.rmSync(helperDir, { recursive: true, force: true }); } catch {} }
       }
     }
+    // 헬퍼가 정상 spawn 된 뒤에만, quit 직전에 호출한다(호출 쪽이 종료 확인을 건너뛰게 하는 용도)
+    if (opts && typeof opts.beforeQuit === 'function') { try { opts.beforeQuit(); } catch { /* 무시 */ } }
     electron.app.quit();
   }
 

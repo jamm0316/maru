@@ -31,27 +31,54 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family
 .title{margin:0;font-size:15px;font-weight:700}
 .head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
 .hint{font-size:12px;color:var(--mute)}
-.ws{display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;min-height:44px;border:1px solid transparent}
+.gap4{gap:4px}
+.ws{position:relative;display:flex;align-items:stretch;border-radius:8px;min-height:44px;border:1px solid transparent}
 .ws.active{background:var(--sel);border-color:var(--or)}
+.ws:hover:not(.active){background:#1A140E;border-color:var(--line)}
+.ws-main{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:10px;padding:8px 10px;border:0;border-radius:8px;background:transparent;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+.ws-main:focus-visible{outline:2px solid var(--or);outline-offset:-2px}
 .ws .dot{width:8px;height:8px;border-radius:4px;background:#5C4D40;flex:none}
-.ws.active .dot{background:var(--or);animation:pulse 1.4s ease-in-out infinite}
-.ws .n{font-weight:600;font-size:14px}.ws .s{font-size:12px;color:var(--soft)}
+.ws .dot.busy{background:var(--or);animation:pulse 1.4s ease-in-out infinite}
+.ws .dot.waiting{background:var(--or2);box-shadow:0 0 0 3px rgba(255,180,107,.3);animation:pulse 1s ease-in-out infinite}
+.ws .dot.idle{background:#8FCB8F}
+.ws .dot.exited{background:transparent;border:1.5px solid #9A5A48}
+.ws .dot.pending{background:transparent;border:1.5px solid #6E5F50}
+.ws .dot.unavailable{background:transparent;border:1.5px dashed #C0705A}
+.ws .st.unavailable{color:#E0907A}
+.ws .l1{display:flex;align-items:baseline;justify-content:space-between;gap:6px;min-width:0}
+.ws .n{font-weight:600;font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws .st{flex:none;font-size:11px;color:var(--soft);white-space:nowrap;overflow-wrap:normal}
+.ws .st.busy,.ws .st.waiting{color:var(--or2)}
+.ws .s{font-size:11px;color:var(--mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws .col{min-width:0;flex:1 1 auto;gap:1px}
+.ws-x{position:absolute;top:4px;right:4px;width:22px;height:22px;display:flex;align-items:center;justify-content:center;border:0;border-radius:6px;background:var(--panel);color:var(--soft);font:inherit;font-size:14px;line-height:1;cursor:pointer;opacity:0;pointer-events:none}
+.ws:hover .ws-x,.ws:focus-within .ws-x{opacity:1;pointer-events:auto}
+.ws-x:hover{background:#2A1A0C;color:var(--or)}
+.ws-x:focus-visible{outline:2px solid var(--or);opacity:1}
+.ws-add{flex:none;width:24px;height:24px;border-radius:6px;border:1px solid #4A3A2C;background:transparent;color:var(--or2);font:inherit;font-size:16px;line-height:1;cursor:pointer;padding:0}
+.ws-add:hover:not(:disabled),.ws-add:focus-visible{border-color:var(--or);color:var(--or);outline:none}
+.ws-add:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
+.ws-add:disabled{opacity:.4;cursor:default}
 .party-row{display:flex;align-items:center;justify-content:space-between;font-size:13px;color:var(--mute)}
 .party-row b{color:var(--soft)}.party-row.lead{color:var(--ink)}.party-row.lead b{color:var(--or)}
 .party-row .m{font-family:var(--mono);font-size:12px;color:var(--mute)}
 .term-wrap{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;background:#0E0B08;border:1px solid #3A2A1C;border-radius:12px;box-shadow:0 0 0 1px rgba(255,138,42,.08),0 0 40px rgba(255,138,42,.06);overflow:hidden}
 .term-bar{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mute);font-family:var(--mono);flex:none}
 .term-bar .accent{color:var(--or)}.term-bar .right{margin-left:auto}
-#terminal{flex:1 1 auto;min-height:0;padding:10px 12px}
-#terminal .xterm{height:100%}
+#terminal{flex:1 1 auto;min-height:0;position:relative}
+.term-host{position:absolute;inset:0;padding:10px 12px}
+.term-host[hidden]{display:none}
+.term-host .xterm{height:100%}
+.term-empty{position:absolute;inset:44px 0 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--mute);font-size:14px}
+.term-empty[hidden]{display:none}
+.term-empty p{margin:0}
 .core .status-main{font-size:20px;font-weight:700;color:var(--or)}
 .core.idle .status-main{color:var(--mute)}
 .status-sub{font-size:13px;color:var(--soft)}
-.ring1{transform-origin:110px 110px;animation:spin 18s linear infinite}
-.ring2{transform-origin:110px 110px;animation:spinrev 11s linear infinite}
-.core-dot{animation:pulse 2.6s ease-in-out infinite}
-.core.idle .ring1,.core.idle .ring2{animation-play-state:paused;opacity:.5}
-.core.idle .core-dot{animation-duration:5s}
+/* 링 움직임은 renderer.js 가 requestAnimationFrame 으로 transform 을 직접 쓴다(lib.js stepRing). 여기서는 색·투명도만. */
+#core{will-change:transform}
+.core.idle .ring1,.core.idle .ring2{opacity:.5}
+.core.still .ring1,.core.still .ring2{opacity:.35}
 .quest{display:flex;align-items:center;gap:10px;text-align:left;min-height:44px;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--ink);font:inherit;font-size:13px;cursor:pointer}
 .quest:hover,.quest:focus-visible{border-color:var(--or);background:var(--sel);outline:none}
 .quest .num{color:var(--or);font-weight:700}.quest .t{flex:1 1 auto}
@@ -70,10 +97,8 @@ button.todo:hover,button.todo:focus-visible{border-color:var(--or);background:va
 .chip{border:1px solid #4A3A2C;color:var(--soft);border-radius:6px;padding:4px 8px}
 .brief{display:flex;gap:10px;font-size:13px;color:var(--soft)}
 .brief .at{font-family:var(--mono);color:var(--or);min-width:44px;white-space:nowrap}
-@keyframes spin{to{transform:rotate(360deg)}}
-@keyframes spinrev{to{transform:rotate(-360deg)}}
 @keyframes pulse{0%,100%{opacity:.55}50%{opacity:1}}
-@media (max-width:1100px){.left{flex-basis:150px}.left .card{display:none}.userbar{flex-direction:column;align-items:stretch}}
+@media (max-width:1100px){.left{flex-basis:150px}.left .card:not(.ws-card){display:none}.userbar{flex-direction:column;align-items:stretch}.ws .s,.ws .st{display:none}.ws-main{padding:8px}}
 .left,.right-col{scrollbar-width:thin;scrollbar-color:#3A2A1C transparent}
 ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:#3A2A1C;border-radius:4px}::-webkit-scrollbar-track{background:transparent}
 
@@ -182,3 +207,6 @@ html[lang="en"] .card,html[lang="en"] .quest,html[lang="en"] .todo,html[lang="en
 #cal-group{padding-bottom:6px;border-bottom:1px solid var(--line);margin-bottom:2px}
 #cal-group[hidden]{display:none}
 .app[inert]{filter:saturate(.7)}
+
+/* 움직임 줄이기: CSS 애니메이션·전환을 끄고 상태는 색·글자로만 보인다(링 움직임은 renderer.js 가 따로 멈춘다) */
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}

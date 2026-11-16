@@ -92,7 +92,7 @@ function matchTodo(items, index, shown) {
 }
 
 // 채우기 거부 사유 -> 문구 키(문구는 i18n.js 의 'fill.<사유>')
-const FILL_REASONS = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'invalid'];
+const FILL_REASONS = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive', 'invalid'];
 function fillNoticeKey(reason) { return 'fill.' + (FILL_REASONS.includes(reason) ? reason : 'invalid'); }
 
 // pty 에 써 넣을 문장 정리: 개행·\r·제어문자·보이지 않는 문자 제거
@@ -299,12 +299,10 @@ function parseProfile(res) {
 function loadProfile(file) { return parseProfile(readRegular(file, PROFILE_MAX_BYTES, false)); }
 
 // 원자적 저장(임시 파일 0600 + rename). data 폴더가 심볼릭 링크면 거부. 성공 여부를 돌려준다.
-function saveProfile(file, profile) {
+function writeJsonAtomic(file, value, tmpPrefix) {
   const fs = require('fs'); const path = require('path'); const crypto = require('crypto');
-  const v = validateProfile(profile);
-  if (!v) return false;
   const dir = path.dirname(file);
-  const tmp = path.join(dir, '.profile.' + crypto.randomBytes(6).toString('hex') + '.tmp');
+  const tmp = path.join(dir, '.' + tmpPrefix + '.' + crypto.randomBytes(6).toString('hex') + '.tmp');
   let fd = null;
   try {
     let st = null;
@@ -312,7 +310,7 @@ function saveProfile(file, profile) {
     if (!st) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     else if (st.isSymbolicLink() || !st.isDirectory()) return false;
     fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-    fs.writeSync(fd, JSON.stringify(v, null, 2) + '\n');
+    fs.writeSync(fd, JSON.stringify(value, null, 2) + '\n');
     fs.fsyncSync(fd); fs.closeSync(fd); fd = null;
     fs.renameSync(tmp, file);
     return true;
@@ -321,6 +319,214 @@ function saveProfile(file, profile) {
     try { fs.unlinkSync(tmp); } catch { /* 없음 */ }
     return false;
   }
+}
+function saveProfile(file, profile) {
+  const v = validateProfile(profile);
+  return v ? writeJsonAtomic(file, v, 'profile') : false;
+}
+
+// ---- 작업 공간(탭) ----
+const WS_MAX = 6;
+const WS_TITLE_MAX = 40;
+const WS_PATH_MAX = 1024;
+const WS_FILE_MAX_BYTES = 32 * 1024;
+
+// 폴더 이름 -> 제목(보이지 않는 문자 제거, 40자 상한). 비면 'workspace'.
+function workspaceTitle(cwd, fallback) {
+  const base = typeof cwd === 'string' ? cwd.replace(/\/+$/, '').split('/').pop() : '';
+  const c = [...cleanQuestText(base || (cwd === '/' ? '/' : ''))].slice(0, WS_TITLE_MAX).join('').trim();
+  return c || (typeof fallback === 'string' && fallback ? fallback : 'workspace');
+}
+// 이미 쓰는 제목(taken)과 겹치면 " 2", " 3" … 을 붙인다
+function uniqueTitle(base, taken) {
+  const used = new Set(taken);
+  if (!used.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const cand = [...base].slice(0, WS_TITLE_MAX - String(n).length - 1).join('') + ' ' + n;
+    if (!used.has(cand)) return cand;
+  }
+}
+// 저장된 목록 -> { list: [{cwd, title}], active }. 잘못된 항목·없는 폴더는 버리고 6개까지만 쓴다. exists(cwd): boolean
+function normalizeWorkspaces(raw, { exists, max = WS_MAX, fallbackTitle } = {}) {
+  const out = { list: [], active: 0 };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.workspaces)) return out;
+  const origIdx = [];
+  raw.workspaces.forEach((e, i) => {
+    if (out.list.length >= max || !e || typeof e !== 'object' || Array.isArray(e)) return;
+    let cwd = e.cwd;
+    if (typeof cwd !== 'string' || cwd.length > WS_PATH_MAX || !cwd.startsWith('/') || hasBadChars(cwd)) return;
+    cwd = cwd.length > 1 ? cwd.replace(/\/+$/, '') : cwd;
+    if (cwd.split('/').some((s) => s === '..' || s === '.')) return;
+    let ok = false;
+    try { ok = typeof exists === 'function' && exists(cwd) === true; } catch { ok = false; }
+    const t = typeof e.title === 'string' ? [...cleanQuestText(e.title)].slice(0, WS_TITLE_MAX).join('').trim() : '';
+    const entry = { cwd, title: uniqueTitle(t || workspaceTitle(cwd, fallbackTitle), out.list.map((x) => x.title)) };
+    if (!ok) entry.unavailable = true; // 폴더가 잠시 없을 수 있다(연결 해제된 디스크): 버리지 않고 '사용 불가'로 남긴다
+    out.list.push(entry);
+    origIdx.push(i);
+  });
+  const a = origIdx.indexOf(raw.active);
+  out.active = a >= 0 ? a : 0;
+  return out;
+}
+// readRegular 결과 -> normalizeWorkspaces 결과|null (파일 없음·잘림·나쁜 JSON 은 null)
+function parseWorkspaces(res, exists, extra) {
+  if (!res || res.truncated || typeof res.text !== 'string') return null;
+  let o; try { o = JSON.parse(res.text); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o) || !Array.isArray(o.workspaces)) return null;
+  return normalizeWorkspaces(o, { exists, ...(extra || {}) });
+}
+function loadWorkspaces(file, exists, extra) { return parseWorkspaces(readRegular(file, WS_FILE_MAX_BYTES, false), exists, extra); }
+// 시작 때 읽기: { status: 'missing' | 'corrupt' | 'ok', data }. 파일이 있는데 못 읽으면 corrupt(링크·잘림·나쁜 JSON·형식 오류 포함).
+function readWorkspacesFile(file, exists, extra) {
+  const fs = require('fs');
+  let present = true;
+  try { fs.lstatSync(file); } catch { present = false; }
+  if (!present) return { status: 'missing', data: null };
+  const data = loadWorkspaces(file, exists, extra);
+  return data ? { status: 'ok', data } : { status: 'corrupt', data: null };
+}
+// 망가진 파일을 <file>.bak 으로 옮긴다(예전 .bak 은 덮어씀). 성공 여부.
+function backupCorruptFile(file) {
+  const fs = require('fs');
+  try { fs.renameSync(file, file + '.bak'); return true; } catch { return false; }
+}
+// 저장: cwd·제목·활성 위치만(다른 필드는 쓰지 않는다)
+function saveWorkspaces(file, list, active) {
+  const n = normalizeWorkspaces({ workspaces: list, active }, { exists: () => true });
+  return writeJsonAtomic(file, { version: 1, active: n.active, workspaces: n.list }, 'workspaces');
+}
+// 폴더 stat -> 사용 가능한가(디렉터리이고 소유자가 현재 사용자)
+function workspaceDirOk(st, uid) { return !!st && typeof st.isDirectory === 'function' && st.isDirectory() && st.uid === uid; }
+// MARU_APP_SESSION 새 id (rand: () => uuid 문자열). 형식이 틀리면 null.
+function newSessionId(rand) { let s; try { s = rand(); } catch { return null; } return isSessionId(s) ? s : null; }
+// 홈은 ~ 로, max 코드포인트를 넘으면 가운데를 …로 줄인다
+function shortenPath(p, home, max = 30) {
+  if (typeof p !== 'string' || !p) return '';
+  let prefix = ''; let rest = p;
+  if (typeof home === 'string' && home.length > 1 && (p === home || p.startsWith(home + '/'))) { prefix = '~'; rest = p.slice(home.length); }
+  const full = prefix + rest || '/';
+  if ([...full].length <= max) return full;
+  const segs = rest.split('/').filter(Boolean);
+  for (let k = segs.length - 1; k >= 1; k--) {
+    const s = prefix + '/…/' + segs.slice(-k).join('/');
+    if ([...s].length <= max) return s;
+  }
+  const last = segs[segs.length - 1] || '';
+  return '…' + [...last].slice(-(max - 1)).join('');
+}
+
+// ---- 로고(앱 아이콘·헤더·트레이가 같은 도안을 쓴다) ----
+// 135 단위 타일 기준. 도안을 바꿀 때는 LOGO 와 logoShapesSvg 만 고친다(renderer/index.html 헤더 SVG 는 test.js 가 같은지 검사한다).
+const LOGO = {
+  tile: 135, tileColor: '#17110B', color: '#FF8A2B',
+  ring: { r: 40, w: 6 }, dash: { r: 24, w: 2, on: 4, off: 5 }, dot: { r: 10 },
+  tray: { r: 52, w: 16, dot: 22 }, // 트레이는 18px 에서 읽히도록 바깥 고리 + 점만, 굵게
+};
+function logoShapesSvg(color, variant) {
+  const c = LOGO.tile / 2;
+  if (variant === 'tray') {
+    return `<circle cx="${c}" cy="${c}" r="${LOGO.tray.r}" fill="none" stroke="${color}" stroke-width="${LOGO.tray.w}"/><circle cx="${c}" cy="${c}" r="${LOGO.tray.dot}" fill="${color}"/>`;
+  }
+  return `<circle cx="${c}" cy="${c}" r="${LOGO.ring.r}" fill="none" stroke="${color}" stroke-width="${LOGO.ring.w}"/>` +
+    `<circle cx="${c}" cy="${c}" r="${LOGO.dash.r}" fill="none" stroke="${color}" stroke-width="${LOGO.dash.w}" stroke-dasharray="${LOGO.dash.on} ${LOGO.dash.off}"/>` +
+    `<circle cx="${c}" cy="${c}" r="${LOGO.dot.r}" fill="${color}"/>`;
+}
+
+// ---- 상태 링 움직임(속도 기반) ----
+// 상태: { a1, a2, v, busy, fl, t }. 속도 v 가 목표 vTarget 을 쫓는다: 올릴 때는 빠르게(400ms 에 90%), 내릴 때는 마찰처럼 천천히(시정수 650ms).
+const RING = { vBusy: 540, vWaiting: 120, vDrift: 6, upMs: 400 / Math.LN10, downMs: 650, fadeMs: 650, dtMax: 50 };
+function ringInit() { return { a1: 0, a2: 0, v: RING.vDrift, busy: 0, fl: 1, t: 0 }; }
+function ringTarget(mode) {
+  if (mode === 'busy') return RING.vBusy;
+  if (mode === 'waiting') return RING.vWaiting;
+  if (mode === 'idle' || mode === 'none') return RING.vDrift;
+  return 0; // exited·알 수 없음
+}
+const chase = (cur, target, dt) => cur + (target - cur) * (1 - Math.exp(-dt / (target > cur ? RING.upMs : RING.downMs)));
+// reduced: 움직임 없이 정지 상태(색·투명도로만 표시)
+function stepRing(st, dtMs, mode, reduced) {
+  if (reduced) return { a1: 0, a2: 0, v: 0, busy: 0, fl: 0, t: 0 };
+  const s = st || ringInit();
+  const dt = Math.max(0, Math.min(RING.dtMax, Number.isFinite(dtMs) ? dtMs : 0));
+  const v = chase(s.v, ringTarget(mode), dt);
+  const busy = chase(s.busy, mode === 'busy' ? 1 : 0, dt);
+  const fl = chase(s.fl, mode === 'idle' || mode === 'none' ? 1 : 0, dt);
+  const mod = (x) => ((x % 360) + 360) % 360;
+  return { a1: mod(s.a1 + v * dt / 1000), a2: mod(s.a2 - 0.6 * v * dt / 1000), v, busy, fl, t: (s.t + dt) % 1e7 };
+}
+// 상태 -> 그릴 값(회전각, 바깥 호 길이, 점 배율, 떠오름 이동·배율)
+function ringView(st) {
+  const TAU = Math.PI * 2;
+  return {
+    rot1: st.a1, rot2: st.a2,
+    arc: 120 + 50 * st.busy * Math.sin(TAU * st.t / 1200),
+    dot: 1 + 0.12 * st.busy * Math.sin(TAU * st.t / 600),
+    ty: 3 * st.fl * Math.sin(TAU * st.t / 4000),
+    scale: 1 + 0.015 * st.fl * Math.sin(TAU * st.t / 3300 + 1),
+  };
+}
+
+// ---- 작업 공간 동작 결정(순수) ----
+// 세션이 아직 살아 있는(시작 전·종료됨·사용 불가가 아닌) 작업 공간을 닫으면 확인한다
+const confirmClose = (state) => ['busy', 'waiting', 'idle', 'none'].includes(state);
+// 다시 시작은 진행 중이거나 확인을 기다리는 작업일 때만 확인한다
+const confirmRestart = (state) => state === 'busy' || state === 'waiting';
+// ⌘W 를 렌더러가 받았을 때: 열린 창·메뉴가 있으면 그것을 닫고, 아니면 활성 작업 공간 닫기를 요청
+function closeRequestAction({ overlayOpen, hasActive }) {
+  if (overlayOpen) return 'overlay';
+  return hasActive ? 'workspace' : 'none';
+}
+// IPC 의 작업 공간 id 확인: main 표(Map)에 있는 문자열 id 만 통과(없는·닫힌·이상한 id 는 null)
+function lookupWs(table, id) { return table && typeof id === 'string' && typeof table.get === 'function' ? table.get(id) || null : null; }
+// 링 애니메이션 프레임 간격: 0 = 매 프레임, 33 = 약 30fps(조용할 때), -1 = 멈춤(정지 상태가 다 가라앉음)
+function ringFrameInterval(st, mode) {
+  const still = ['exited', 'pending', 'unavailable'].includes(mode);
+  if (still && st.v < 0.05 && st.busy < 0.001 && st.fl < 0.001) return -1;
+  if (st.v < 30 && st.busy < 0.02 && mode !== 'busy' && mode !== 'waiting') return 33;
+  return 0;
+}
+
+// ---- 트레이(메뉴 막대) ----
+const WS_STATES = ['busy', 'waiting', 'idle', 'none', 'pending', 'exited', 'unavailable'];
+const stateLabel = (t, s) => t('agent.' + (WS_STATES.includes(s) ? s : 'none'));
+// states: 작업 공간별 상태 배열 -> "작업 중 2 · 확인 필요 1"
+function traySummary(states, t) {
+  const list = Array.isArray(states) ? states : [];
+  if (!list.length) return t('tray.none');
+  const parts = [];
+  for (const s of WS_STATES) { const n = list.filter((x) => (WS_STATES.includes(x) ? x : 'none') === s).length; if (n) parts.push(stateLabel(t, s) + ' ' + n); }
+  return parts.join(' · ');
+}
+const trayTitle = (states) => (Array.isArray(states) && states.includes('waiting') ? '!' : '');
+// 메뉴에 올릴 할 일 제목: 정리 후 40자(넘으면 …), 최대 3개
+function trayTodoTitles(todos) {
+  const out = [];
+  for (const it of Array.isArray(todos) ? todos : []) {
+    if (out.length >= 3) break;
+    const c = it && typeof it.title === 'string' ? cleanQuestText(it.title) : '';
+    if (!c) continue;
+    const cps = [...c];
+    out.push(cps.length > 40 ? cps.slice(0, 39).join('') + '…' : c);
+  }
+  return out;
+}
+// 트레이 메뉴 모델(라벨만). workspaces: [{id,title,state}], todos: 할 일 항목, t: (key,params)=>문구
+function trayMenuModel({ workspaces, activeId, todos, t }) {
+  const ws = Array.isArray(workspaces) ? workspaces : [];
+  const items = [{ type: 'header', label: traySummary(ws.map((w) => w.state), t), enabled: false }];
+  for (const w of ws) items.push({ type: 'workspace', id: w.id, label: w.title + ' · ' + stateLabel(t, w.state), checked: w.id === activeId });
+  items.push({ type: 'separator' });
+  const titles = trayTodoTitles(todos);
+  if (titles.length) { for (const x of titles) items.push({ type: 'todo', label: x, enabled: false }); items.push({ type: 'separator' }); }
+  items.push({ type: 'action', id: 'show', label: t('tray.open') }, { type: 'action', id: 'new', label: t('tray.new') },
+    { type: 'action', id: 'settings', label: t('tray.settings') }, { type: 'action', id: 'quit', label: t('tray.quit') });
+  return items;
+}
+// 트레이 아이콘 경로: 개발에서는 app/build, 패키징에서는 Resources/tray (extraResources)
+function trayIconPath({ isPackaged, resourcesPath, appDir }) {
+  const path = require('path');
+  return isPackaged ? path.join(resourcesPath, 'tray', 'trayTemplate.png') : path.join(appDir, 'build', 'trayTemplate.png');
 }
 
 // ---- 설정 화면 판정 ----
@@ -488,6 +694,10 @@ const api = {
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
   SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput,
+  confirmClose, confirmRestart, closeRequestAction, lookupWs, ringFrameInterval, readWorkspacesFile, backupCorruptFile,
+  WS_MAX, WS_STATES, workspaceTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,
+  LOGO, logoShapesSvg, RING, ringInit, stepRing, ringView,
+  traySummary, trayTitle, trayTodoTitles, trayMenuModel, trayIconPath,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.MaruLib = api; // 렌더러(번들러 없음)에서는 전역으로 노출

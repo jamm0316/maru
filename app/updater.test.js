@@ -330,23 +330,24 @@ for (const [name, id, ver, expectOk] of [['inst-ok', 'com.maru.app', '1.2.3', tr
     const sc = await installScenario(name, id, ver);
     if (!sc) { console.log('  (SKIP: hdiutil create 불가)'); return; }
     // 이 시나리오 전용 서버: dmg 와 sums 를 직접 서빙
-    const h = sha(sc.bytes); let quit = 0, spawned = null;
+    const h = sha(sc.bytes); let quit = 0, spawned = null, bq = []; const order = [];
     const sumsText = `${h}  Maru-1.2.3-arm64.dmg\n`;
     const srv = http.createServer((q, s) => { if (q.url === '/sig') { s.writeHead(200); s.end(signB64(sumsText)); } else if (q.url === '/sums') { s.writeHead(200); s.end(sumsText); } else { s.writeHead(200, { 'content-length': sc.bytes.length }); s.end(sc.bytes); } });
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     const b = `http://127.0.0.1:${srv.address().port}`;
     try {
-      const fakeSpawn = (cmd, args, opts) => { spawned = { cmd, args, opts }; const { EventEmitter } = require('events'); const e = new EventEmitter(); e.unref = () => {}; setImmediate(() => e.emit('spawn')); return e; };
-      const u = mk({ execPath: path.join(sc.apps, 'Maru.app', 'Contents', 'MacOS', 'Maru'), electron: { app: { quit: () => { quit++; } } }, spawn: fakeSpawn, skipCodesign: true, stateDir: path.join(sc.apps, '..', name + '-state'), trashDir: path.join(sc.apps, '..', name + '-trash') });
+      const fakeSpawn = (cmd, args, opts) => { spawned = { cmd, args, opts }; order.push('spawn'); const { EventEmitter } = require('events'); const e = new EventEmitter(); e.unref = () => {}; setImmediate(() => e.emit('spawn')); return e; };
+      const u = mk({ execPath: path.join(sc.apps, 'Maru.app', 'Contents', 'MacOS', 'Maru'), electron: { app: { quit: () => { quit++; order.push('quit'); } } }, spawn: fakeSpawn, skipCodesign: true, stateDir: path.join(sc.apps, '..', name + '-state'), trashDir: path.join(sc.apps, '..', name + '-trash') });
       const inf = { _release: { version: '1.2.3', dmgName: 'Maru-1.2.3-arm64.dmg', dmgUrl: b + '/dmg', sumsUrl: b + '/sums', sigUrl: b + '/sig', dmgSize: sc.bytes.length } };
       const { dmgPath } = await u.downloadAndVerify(inf, () => {});
       if (!expectOk) {
-        await rejects(u.installAndRelaunch(dmgPath), /번들 ID|버전/);
-        eq(quit, 0); eq(spawned, null);
+        await rejects(u.installAndRelaunch(dmgPath, { beforeQuit: () => bq.push(1) }), /번들 ID|버전/);
+        eq(quit, 0); eq(spawned, null); eq(bq, [], '실패 경로에서는 beforeQuit 호출 안 함');
         eq(fs.readdirSync(sc.apps).filter((n) => n.startsWith('.Maru.app.new-')), [], '스테이징 정리');
         return;
       }
-      await u.installAndRelaunch(dmgPath);
+      await u.installAndRelaunch(dmgPath, { beforeQuit: () => { bq.push(1); order.push('beforeQuit'); } });
+      eq(order, ['spawn', 'beforeQuit', 'quit'], 'spawn 뒤, quit 직전에 beforeQuit'); eq(bq, [1]);
       eq(quit, 1); eq(spawned.cmd, '/bin/sh'); eq(spawned.opts.detached, true); eq(spawned.opts.stdio, 'ignore');
       const [helper, pid, cur, stg, old, o, t] = spawned.args;
       eq(cur, path.join(sc.apps, 'Maru.app')); ok(path.basename(stg).startsWith('.Maru.app.new-')); ok(path.basename(old).startsWith('.Maru.app.old-'));

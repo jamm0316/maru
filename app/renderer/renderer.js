@@ -23,7 +23,7 @@
   const modalOpen = () => modals.length > 0;
   function syncModalState() {
     $('app').inert = modals.length > 0;
-    term.options.disableStdin = modals.length > 0;
+    for (const e of terms.values()) e.term.options.disableStdin = modals.length > 0;
     modals.forEach((m, i) => { m.el.inert = i !== modals.length - 1; });
   }
   function openModal(backdrop, focusEl, opts) {
@@ -44,7 +44,7 @@
     syncModalState();
     if (m.prev && document.contains(m.prev) && !m.prev.closest('[inert]')) m.prev.focus(); else focusTerm();
   }
-  function focusTerm() { if (!modalOpen()) term.focus(); }
+  function focusTerm() { const e = terms.get(activeId); if (!modalOpen() && e && e.opened) e.term.focus(); }
   // Tab 순환(모달 안에서만)
   function trapTab(e) {
     const top = modals[modals.length - 1];
@@ -56,54 +56,185 @@
     else if (!e.shiftKey && (document.activeElement === last || !top.el.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
   }
 
-  // ---- 터미널 ----
-  const term = new window.Terminal({
-    fontFamily: TERM_FONT, fontSize: 14, lineHeight: 1.25,
-    cursorBlink: true, allowProposedApi: false, scrollback: 5000,
-    theme: {
-      background: '#0E0B08', foreground: '#F3ECE4', cursor: '#FF8A2A', cursorAccent: '#0E0B08',
-      selectionBackground: '#5C3A1A',
-    },
-  });
-  const fit = new window.FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open($('terminal'));
+  // ---- 터미널: 작업 공간마다 xterm 하나를 살려 두고 활성만 보인다 ----
+  // WebGL 은 활성 터미널에만 붙이고, 숨길 때 dispose 한다(컨텍스트 수 제한 회피). 비활성 터미널은 DOM 렌더러 없이도 버퍼만 유지한다.
+  const terms = new Map(); // id -> { id, term, fit, host, gl, opened, started, starting }
+  let activeId = null;
+  let wsList = [];
+  function createTerm(id) {
+    const host = el('div', 'term-host'); host.hidden = true; $('terminal').append(host);
+    const term = new window.Terminal({
+      fontFamily: TERM_FONT, fontSize: 14, lineHeight: 1.25,
+      cursorBlink: true, allowProposedApi: false, scrollback: 5000,
+      theme: {
+        background: '#0E0B08', foreground: '#F3ECE4', cursor: '#FF8A2A', cursorAccent: '#0E0B08',
+        selectionBackground: '#5C3A1A',
+      },
+    });
+    const fit = new window.FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.options.disableStdin = modalOpen();
+    term.attachCustomKeyEventHandler((e) => {
+      if (modalOpen()) return false;
+      const seq = Lib.keyToSeq(e);
+      if (seq === null) return true;
+      if (e.type === 'keydown') window.maru.ptyWrite(id, seq);
+      return false;
+    });
+    term.onData((d) => { if (!modalOpen()) window.maru.ptyWrite(id, d); });
+    const e = { id, term, fit, host, gl: null, opened: false, started: false, starting: false, failed: false, noted: false };
+    terms.set(id, e);
+    return e;
+  }
+  function disposeTerm(e) {
+    if (e.gl) { try { e.gl.dispose(); } catch (x) { /* 무시 */ } e.gl = null; }
+    try { e.term.dispose(); } catch (x) { /* 무시 */ }
+    e.host.remove(); terms.delete(e.id);
+  }
   // 한글 글꼴이 로드된 뒤 다시 적용해 글자 아틀라스를 새로 만든다
-  if (document.fonts && document.fonts.load) document.fonts.load('14px MaruHangul', '가').then(() => { term.options.fontFamily = TERM_FONT + ' '; term.options.fontFamily = TERM_FONT; }).catch(() => {});
-  try {
-    const gl = new window.WebglAddon.WebglAddon();
-    gl.onContextLoss(() => gl.dispose());
-    term.loadAddon(gl);
-  } catch (e) { /* WebGL 불가 시 DOM 렌더러 */ }
+  if (document.fonts && document.fonts.load) document.fonts.load('14px MaruHangul', '가').then(() => { for (const e of terms.values()) { e.term.options.fontFamily = TERM_FONT + ' '; e.term.options.fontFamily = TERM_FONT; } }).catch(() => {});
 
-  let started = false;
   function doFit() {
-    try { fit.fit(); window.maru.ptyResize(term.cols, term.rows); } catch (e) { /* 레이아웃 전 */ }
-    if (!started) startPty(); // 시작 실패 시 다음 리사이즈에 재시도
+    const e = terms.get(activeId);
+    if (!e || !e.opened || e.host.hidden) return;
+    try { e.fit.fit(); window.maru.ptyResize(e.id, e.term.cols, e.term.rows); } catch (x) { /* 레이아웃 전 */ }
   }
-  term.attachCustomKeyEventHandler((e) => {
-    if (modalOpen()) return false;
-    const seq = Lib.keyToSeq(e);
-    if (seq === null) return true;
-    if (e.type === 'keydown') window.maru.ptyWrite(seq);
-    return false;
-  });
-  term.onData((d) => { if (!modalOpen()) window.maru.ptyWrite(d); });
-  window.maru.onPtyData((d) => term.write(d));
-  window.maru.onPtyExit((code) => {
-    term.write('\r\n\x1b[38;5;208m' + T('term.exit', { code }) + '\x1b[0m\r\n');
-  });
-  async function startPty() {
-    try { fit.fit(); started = !!(await window.maru.ptyStart(term.cols, term.rows)); } catch (e) { started = false; }
-    if (started) focusTerm();
+  // 활성 터미널만 보이고(나머지는 숨김, WebGL 해제), 보일 때 맞춤·재그리기. 처음 보일 때 open(숨겨진 채로 열면 글자 크기를 못 잼).
+  function showActive(focus) {
+    for (const e of terms.values()) {
+      if (e.id === activeId) continue;
+      e.host.hidden = true;
+      if (e.gl) { try { e.gl.dispose(); } catch (x) { /* 무시 */ } e.gl = null; }
+    }
+    const e = terms.get(activeId);
+    if (!e) return;
+    e.host.hidden = false;
+    if (!e.opened) { e.term.open(e.host); e.opened = true; }
+    if (!e.gl) {
+      try {
+        const gl = new window.WebglAddon.WebglAddon();
+        gl.onContextLoss(() => { try { gl.dispose(); } catch (x) { /* 무시 */ } if (e.gl === gl) e.gl = null; });
+        e.term.loadAddon(gl); e.gl = gl;
+      } catch (x) { /* WebGL 불가 시 DOM 렌더러 */ }
+    }
+    doFit();
+    try { e.term.refresh(0, e.term.rows - 1); } catch (x) { /* 무시 */ }
+    if (focus) focusTerm();
   }
-  window.maru.onPtyRestart(async () => {
-    term.reset();
-    try { started = !!(await window.maru.ptyRestart(term.cols, term.rows)); } catch (e) { started = false; }
-    if (started) focusTerm();
+  async function startTerm(e) {
+    if (e.started || e.starting) return;
+    e.starting = true;
+    let ok = false;
+    try { ok = !!(await window.maru.ptyStart(e.id, e.term.cols, e.term.rows)); } catch (x) { ok = false; }
+    e.starting = false; e.started = ok; e.failed = !ok;
+    if (!ok && terms.has(e.id)) e.term.write('\r\n\x1b[38;5;208m' + T('term.fail') + '\x1b[0m\r\n');
+    if (ok && e.id === activeId) focusTerm();
+  }
+  // 활성 작업 공간만 시작한다(복원된 나머지는 처음 열 때). 사용 불가(폴더 없음)는 시작하지 않고 한 번 알린다.
+  function ensureStarted(e) {
+    if (!e || e.started || e.starting || e.failed) return;
+    const w = wsList.find((x) => x.id === e.id);
+    if (!w) return;
+    if (w.state === 'unavailable') {
+      if (!e.noted) { e.noted = true; e.term.write('\r\n\x1b[38;5;208m' + T('term.unavailable') + '\x1b[0m\r\n'); }
+      return;
+    }
+    e.noted = false;
+    startTerm(e);
+  }
+  window.maru.onPtyData((id, d) => { const e = terms.get(id); if (e) e.term.write(d); });
+  window.maru.onPtyExit((id, code) => {
+    const e = terms.get(id);
+    if (e) e.term.write('\r\n\x1b[38;5;208m' + T('term.exit', { code }) + '\x1b[0m\r\n');
+  });
+  window.maru.onPtyRestart(async (id) => {
+    const e = terms.get(id);
+    if (!e) return;
+    e.term.reset(); e.failed = false; e.noted = false;
+    try { e.started = !!(await window.maru.ptyRestart(id, e.term.cols, e.term.rows)); } catch (x) { e.started = false; }
+    e.failed = !e.started;
+    if (e.started && id === activeId) focusTerm();
   });
   new ResizeObserver(doFit).observe($('terminal'));
   window.addEventListener('resize', doFit);
+
+  // ---- 작업 공간 목록 ----
+  let wsSeq = 0; let wsKey = null;
+  const stateKey = (s) => (['busy', 'idle', 'waiting', 'exited', 'pending', 'unavailable'].includes(s) ? s : 'none');
+  async function syncWs() {
+    const my = ++wsSeq;
+    let r = null;
+    try { r = await window.maru.getWorkspaces(); } catch (x) { r = null; }
+    if (!r || !Array.isArray(r.list) || my !== wsSeq) return; // 더 새 요청이 있으면 버린다
+    const prev = activeId;
+    const ids = new Set(r.list.map((w) => w.id));
+    const fresh = [];
+    for (const w of r.list) if (!terms.has(w.id)) { const e = createTerm(w.id); fresh.push(e); if (w.bp) e.term.write('\x1b[?2004h'); } // 화면 복구로 다시 붙을 때 붙여넣기 모드를 되살린다
+    for (const e of [...terms.values()]) if (!ids.has(e.id)) disposeTerm(e);
+    wsList = r.list; activeId = ids.has(r.active) ? r.active : null;
+    renderWs();
+    if (activeId !== prev || fresh.some((e) => e.id === activeId)) showActive(true);
+    ensureStarted(terms.get(activeId));
+  }
+  function renderWs() {
+    const key = JSON.stringify([wsList, activeId, lang]);
+    if (key === wsKey) return;
+    wsKey = key;
+    const box = $('workspaces');
+    const f = document.activeElement;
+    const fr = f && box.contains(f) ? f.closest('.ws') : null;
+    const refocus = fr ? { id: fr.dataset.id, x: f.classList.contains('ws-x') } : null;
+    box.replaceChildren();
+    for (const w of wsList) {
+      const on = w.id === activeId; const k = stateKey(w.state);
+      const row = el('div', 'ws' + (on ? ' active' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
+      const main = el('button', 'ws-main'); main.type = 'button';
+      if (on) main.setAttribute('aria-current', 'true');
+      main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }));
+      const c = el('span', 'col');
+      const l1 = el('span', 'l1'); l1.append(el('span', 'n', w.title), el('span', 'st ' + k, T('agent.' + k)));
+      c.append(l1, el('span', 's', w.path));
+      main.append(el('span', 'dot ' + k), c);
+      main.title = w.path;
+      main.addEventListener('click', async () => { try { await window.maru.activateWorkspace(w.id); } catch (x) { /* 무시 */ } syncWs(); });
+      const x = el('button', 'ws-x', '×'); x.type = 'button'; x.setAttribute('aria-label', T('ws.close.aria', { title: w.title }));
+      x.addEventListener('click', async () => { try { await window.maru.closeWorkspace(w.id); } catch (e) { /* 무시 */ } syncWs(); });
+      row.append(main, x); box.append(row);
+    }
+    if (refocus) {
+      const r = [...box.children].find((n) => n.dataset.id === refocus.id);
+      const t = r && r.querySelector(refocus.x ? '.ws-x' : '.ws-main');
+      if (t) t.focus();
+    }
+    $('ws-add').disabled = wsList.length >= Lib.WS_MAX;
+    $('term-empty').hidden = wsList.length > 0;
+    const a = wsList.find((w) => w.id === activeId);
+    $('term-name').textContent = a ? a.title : T('app.title');
+    $('term-cwd').textContent = a ? a.path : '';
+    renderBusy(a ? a.state : 'none');
+  }
+  async function newWs() { try { await window.maru.newWorkspace(); } catch (x) { /* 무시 */ } syncWs(); }
+  $('ws-add').addEventListener('click', newWs);
+  $('term-empty-new').addEventListener('click', newWs);
+  $('workspaces').addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const items = [...$('workspaces').querySelectorAll('.ws-main')]; const i = items.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault(); items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+  });
+  window.maru.onWorkspacesChanged(() => syncWs());
+  // ⌘W: 열린 모달·메뉴·팝오버가 있으면 그것을 닫고, 아니면 활성 작업 공간을 닫는다(확인은 main)
+  window.maru.onCloseRequest(async () => {
+    const act = Lib.closeRequestAction({ overlayOpen: modalOpen() || menuOpen || updOpen, hasActive: !!activeId });
+    if (act === 'overlay') {
+      if (modalOpen()) { const top = modals[modals.length - 1]; if (top.closable()) top.close(); }
+      else if (menuOpen) closeMenu(true);
+      else closeUpdate(true);
+    } else if (act === 'workspace') {
+      try { await window.maru.closeWorkspace(activeId); } catch (x) { /* 무시 */ }
+      syncWs();
+    }
+  });
 
   // ---- 문구 적용 ----
   function applyStatic() {
@@ -111,6 +242,7 @@
     document.title = T('app.title');
     for (const n of document.querySelectorAll('[data-i18n]')) n.textContent = T(n.dataset.i18n);
     for (const n of document.querySelectorAll('[data-i18n-aria]')) n.setAttribute('aria-label', T(n.dataset.i18nAria));
+    for (const n of document.querySelectorAll('[data-i18n-title]')) n.title = T(n.dataset.i18nTitle);
     updateUserChip();
   }
 
@@ -139,19 +271,9 @@
     $('bar').style.width = Math.round(p.level.ratio * 100) + '%';
     $('batt').textContent = p.battery ? T('batt', { p: p.battery.percent }) : T('batt.none');
     $('disk').textContent = p.disk ? T('disk', { gb: p.disk.freeGB }) : T('disk.none');
-    $('term-name').textContent = p.rootName;
-    $('term-cwd').textContent = '~/' + p.rootName;
     $('upd-dot').hidden = !(p.updateAvailable || updNotice);
     $('upgrade-btn').title = p.updateAvailable ? T('user.upgrade.aria') : '';
 
-    const ws = $('workspaces'); ws.replaceChildren();
-    for (const w of p.workspaces) {
-      const row = el('div', 'ws' + (w.active ? ' active' : ''));
-      row.append(el('span', 'dot'));
-      const c = el('span', 'col');
-      c.append(el('span', 'n', w.name), el('span', 's', T('ws.sub')));
-      row.append(c); ws.append(row);
-    }
     const party = $('party'); party.replaceChildren();
     for (const m of p.party) {
       const row = el('div', 'party-row' + (m.lead ? ' lead' : ''));
@@ -188,7 +310,7 @@
       if (!canFill) b.append(el('span', 'own', T('todo.own')));
       if (canFill) b.addEventListener('click', async () => {
         let res = null;
-        try { res = await window.maru.fillQuest(i, Lib.todoKey(it)); } catch (e) { /* 무시 */ }
+        try { res = await window.maru.fillQuest(activeId || '', i, Lib.todoKey(it)); } catch (e) { /* 무시 */ }
         if (!res || !res.ok) note(T(Lib.fillNoticeKey(res && res.reason)));
         focusTerm();
       });
@@ -206,27 +328,57 @@
     }
   }
 
+  // ---- 상태 링 움직임(lib.js stepRing 으로 속도가 부드럽게 바뀐다) ----
+  let ringMode = 'none'; let ringSt = Lib.ringInit(); let ringRaf = 0; let ringLast = 0;
+  const reducedMq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const reduced = () => !!(reducedMq && reducedMq.matches);
+  function paintRing() {
+    const v = Lib.ringView(ringSt);
+    $('ring1').setAttribute('transform', 'rotate(' + v.rot1.toFixed(2) + ' 110 110)');
+    $('ring2').setAttribute('transform', 'rotate(' + v.rot2.toFixed(2) + ' 110 110)');
+    $('ring1-arc').setAttribute('stroke-dasharray', v.arc.toFixed(1) + ' 40 30 40');
+    $('core-dot').setAttribute('transform', 'translate(110 110) scale(' + v.dot.toFixed(3) + ') translate(-110 -110)');
+    $('core').style.transform = 'translateY(' + v.ty.toFixed(2) + 'px) scale(' + v.scale.toFixed(4) + ')';
+  }
+  function ringFrame(now) {
+    ringRaf = 0;
+    if (document.hidden) return; // 숨겨진 동안 멈춘다. 다시 보이면 kickRing 이 이어서(점프 없이) 돈다
+    const iv = Lib.ringFrameInterval(ringSt, ringMode);
+    if (iv > 0 && ringLast && now - ringLast < iv - 2) { ringRaf = requestAnimationFrame(ringFrame); return; } // 조용할 때는 약 30fps
+    const dt = ringLast ? now - ringLast : 0; ringLast = now;
+    ringSt = Lib.stepRing(ringSt, dt, ringMode, false);
+    paintRing();
+    if (Lib.ringFrameInterval(ringSt, ringMode) < 0) return; // 완전히 가라앉았으면 멈춘다(상태가 바뀌면 kickRing 이 다시 돌림)
+    ringRaf = requestAnimationFrame(ringFrame);
+  }
+  function kickRing() {
+    if (reduced()) { cancelAnimationFrame(ringRaf); ringRaf = 0; ringSt = Lib.stepRing(ringSt, 0, ringMode, true); paintRing(); return; }
+    if (!ringRaf && !document.hidden) { ringLast = 0; ringRaf = requestAnimationFrame(ringFrame); }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { cancelAnimationFrame(ringRaf); ringRaf = 0; } else kickRing(); });
+  if (reducedMq && reducedMq.addEventListener) reducedMq.addEventListener('change', () => { if (!reduced()) ringSt = Lib.ringInit(); kickRing(); });
+
   let lastAgent = 'none';
   function renderBusy(agent) {
     lastAgent = agent;
     const core = document.querySelector('.core');
-    const k = ['busy', 'idle', 'waiting'].includes(agent) ? agent : 'none';
+    const k = stateKey(agent);
     core.classList.toggle('idle', agent !== 'busy' && agent !== 'waiting');
+    core.classList.toggle('still', k === 'exited' || k === 'pending' || k === 'unavailable');
+    ringMode = k; kickRing();
     core.classList.toggle('waiting', agent === 'waiting');
     $('status-main').textContent = T('agent.' + k);
     $('status-sub').textContent = T('agent.' + k + '.sub');
     $('core').setAttribute('aria-label', T('core.aria', { s: T('agent.' + k) }));
   }
 
-  let lastKey = null; let lastBusy = null;
+  let lastKey = null;
   async function poll() {
     try {
       const p = await window.maru.getPanels();
       if (p) {
-        const { agent, ...rest } = p;
-        const key = JSON.stringify(rest);
+        const key = JSON.stringify(p);
         if (key !== lastKey) { lastKey = key; renderStatic(p); window.maru.notifyRendered(); }
-        if (agent !== lastBusy) { lastBusy = agent; renderBusy(agent); }
       }
     } catch (e) { /* 다음 주기에 재시도 */ }
   }
@@ -235,7 +387,7 @@
   function relabel() {
     applyStatic();
     if (lastPanels) renderStatic(lastPanels);
-    renderBusy(lastAgent);
+    wsKey = null; renderWs();
     if (setRows) renderSettings();
     if (!$('pop-update').hidden) renderUpdate();
     renderLangSeg();
@@ -587,8 +739,9 @@
     else if (init && init.uiOpen === 'settings') openSettings();
     else if (init && init.uiOpen === 'update') openUpdate();
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    startPty().then(poll);
+    syncWs().then(poll);
     setInterval(poll, 1000);
+    setInterval(syncWs, 1000); // 상태 파일은 이벤트가 없으므로 주기적으로 읽는다
   }
   boot();
 })();

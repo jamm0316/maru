@@ -12,7 +12,7 @@
 <div class="app" id="app">
   <header class="top">
     <div class="brand">
-      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="15" fill="none" stroke="#FF8A2A" stroke-width="2"/><circle cx="17" cy="17" r="9" fill="none" stroke="#FF8A2A" stroke-width="1.5" stroke-dasharray="4 3"/><circle cx="17" cy="17" r="4" fill="#FF8A2A"/></svg>
+      <svg width="36" height="36" viewBox="0 0 135 135" aria-hidden="true"><rect width="135" height="135" rx="30.1" fill="#17110B"/><circle cx="67.5" cy="67.5" r="40" fill="none" stroke="#FF8A2B" stroke-width="6"/><circle cx="67.5" cy="67.5" r="24" fill="none" stroke="#FF8A2B" stroke-width="2" stroke-dasharray="4 5"/><circle cx="67.5" cy="67.5" r="10" fill="#FF8A2B"/></svg>
       <div class="col"><span class="logo">MARU</span><span class="sub" data-i18n="brand.sub">총괄 매니저 · 온라인</span></div>
     </div>
     <div class="growth">
@@ -32,9 +32,10 @@
   <div id="root-missing" class="warn" role="alert" data-i18n="root.missing" hidden>마루 저장소를 찾지 못했습니다. ~/.config/maru/root 에 경로를 적어 주세요.</div>
   <div class="cols">
     <nav class="left" aria-label="작업 공간" data-i18n-aria="nav.ws.aria">
-      <section class="card">
-        <h2 class="eyebrow" data-i18n="ws.eyebrow">작업 공간</h2>
-        <div id="workspaces" class="stack"></div>
+      <section class="card ws-card">
+        <div class="head"><h2 class="eyebrow" data-i18n="ws.eyebrow">작업 공간</h2>
+          <button type="button" class="ws-add" id="ws-add" data-i18n-aria="ws.add.aria" data-i18n-title="ws.add.aria" aria-label="새 작업 공간 열기" title="새 작업 공간 열기">+</button></div>
+        <div id="workspaces" class="stack gap4" role="list"></div>
       </section>
       <section class="card">
         <h2 class="eyebrow" data-i18n="party.eyebrow">파티</h2>
@@ -52,16 +53,20 @@
     <main class="term-wrap">
       <div class="term-bar"><span class="accent">●</span><span id="term-name">maru</span><span id="term-cwd">~</span><span class="right">claude</span></div>
       <div id="terminal"></div>
+      <div id="term-empty" class="term-empty" hidden>
+        <p data-i18n="ws.empty">열린 작업 공간이 없습니다</p>
+        <button type="button" class="btn primary" id="term-empty-new" data-i18n="ws.new">새 작업 공간</button>
+      </div>
     </main>
 
     <aside class="right-col" aria-label="마루 상태" data-i18n-aria="right.aria">
       <section class="card core">
         <svg width="132" height="132" viewBox="0 0 220 220" role="img" id="core" aria-label="마루 코어: 대기">
           <circle cx="110" cy="110" r="100" fill="none" stroke="#2B2119" stroke-width="2"/>
-          <g class="ring1"><circle cx="110" cy="110" r="92" fill="none" stroke="#FF8A2A" stroke-width="3" stroke-dasharray="120 40 30 40" stroke-linecap="round"/></g>
-          <g class="ring2"><circle cx="110" cy="110" r="72" fill="none" stroke="#FFB46B" stroke-width="2" stroke-dasharray="8 10"/></g>
-          <circle class="core-dot" cx="110" cy="110" r="44" fill="#2A1A0C" stroke="#FF8A2A" stroke-width="2"/>
-          <circle cx="110" cy="110" r="18" fill="#FF8A2A"/>
+          <g id="ring1" class="ring1"><circle id="ring1-arc" cx="110" cy="110" r="92" fill="none" stroke="#FF8A2A" stroke-width="3" stroke-dasharray="120 40 30 40" stroke-linecap="round"/></g>
+          <g id="ring2" class="ring2"><circle cx="110" cy="110" r="72" fill="none" stroke="#FFB46B" stroke-width="2" stroke-dasharray="8 10"/></g>
+          <g id="core-dot"><circle cx="110" cy="110" r="44" fill="#2A1A0C" stroke="#FF8A2A" stroke-width="2"/>
+          <circle cx="110" cy="110" r="18" fill="#FF8A2A"/></g>
         </svg>
         <div class="col gap6 min0">
           <span class="eyebrow">STATUS</span>

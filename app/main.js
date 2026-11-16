@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu, session, systemPreferences, shell, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, powerMonitor, session, systemPreferences, shell, clipboard, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -34,6 +34,8 @@ const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
 const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
+const PERSIST = !SMOKE && !TEST_FX; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 const PARTY = [
   { name: null, roleKey: 'lead', model: 'sonnet', lead: true }, // name null = 앱 이름(i18n app.title)
   { name: 'scout', roleKey: 'scout', model: 'haiku' },
@@ -42,20 +44,33 @@ const PARTY = [
 ];
 
 let win = null;
-let term = null;
+let tray = null;
+let reloads = [];
+let hangAsking = false;
+let quitting = false;
 let smokeOut = '';
 let rendered = false;
 let smokeDone = false;
 let refreshed = false;
-let lastOutputAt = 0;
-let sessionId = null; // 이 pty 의 MARU_APP_SESSION
+
+// ---- 작업 공간 표 ----  id(main 이 만든 임의 문자열) -> { id, cwd, title, term, sessionId, bracketed, seqTail, lastOutputAt, exited, unavailable, fx }
+const wss = new Map();
+let activeId = null;
+const wsOf = (id) => L.lookupWs(wss, id); // 표에 없는·닫힌·이상한 id 는 null
+const wsOrder = () => [...wss.values()];
 const STATE_DIR = () => path.join(ROOT, 'data', 'state', 'app');
-const stateFile = () => (ROOT && sessionId ? path.join(STATE_DIR(), sessionId + '.json') : null);
-function removeStateFile() { const f = stateFile(); if (f) try { fs.unlinkSync(f); } catch { /* 없음 */ } }
-function readAgentState() {
-  const f = stateFile();
+const stateFile = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.json') : null);
+function removeStateFile(w) { const f = stateFile(w); if (f) try { fs.unlinkSync(f); } catch { /* 없음 */ } }
+function readAgentState(w) {
+  const f = stateFile(w);
   const r = f ? readRegular(f, 4096, false) : null;
   return r ? L.parseAgentRecord(r.text) : null;
+}
+// busy | idle | waiting | none | pending(시작 전) | exited | unavailable(폴더 없음)
+function wsState(w) {
+  if (w.unavailable) return 'unavailable';
+  if (w.term) return L.effectiveAgent(readAgentState(w), Date.now(), w.lastOutputAt);
+  return w.exited ? 'exited' : 'pending';
 }
 // 하루 넘은 상태 파일·임시 파일 정리(일반 파일만)
 function cleanOldStateFiles() {
@@ -71,8 +86,6 @@ function cleanOldStateFiles() {
     }
   } catch { /* 디렉터리 없음 */ }
 }
-let bracketed = false; // 터미널 앱이 브래킷 붙여넣기(?2004)를 켰는가
-let seqTail = '';
 const INDEX_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 let cache = {
   status: null, todos: [], skills: [], briefing: [], battery: null, disk: null,
@@ -130,6 +143,7 @@ async function refresh() {
       disk: df ? L.parseDiskFree(df) : null,
     };
     refreshed = true;
+    refreshTray();
   } finally { refreshing = false; }
 }
 
@@ -151,67 +165,259 @@ function panels() {
     party: PARTY,
     calendar: profile && profile.calendar && cal.ok ? cal.events : [], // 메모리에만 둔다(디스크·로그 금지)
     updateAvailable: upd.view.status === 'available',
-    workspaces: ROOT ? [{ name: path.basename(ROOT), active: true }] : [],
-    agent: L.effectiveAgent(readAgentState(), Date.now(), lastOutputAt), // busy | idle | waiting | none (Claude Code 훅이 기록)
   };
 }
 
-// ---- pty ----
-function trackBracketed(d) {
-  const s = seqTail + d;
+// ---- pty (작업 공간마다 하나) ----
+const FX_DEFS = [{ name: 'blog', state: 'busy', start: true }, { name: 'maru-app', state: 'waiting', start: true }, { name: 'notes', state: 'idle', start: false }]; // 시험 전용 가짜 작업 공간
+const SMOKE_LINE = 'maru-ok 한글 명조 정렬 테스트 가나다라마바사';
+function trackBracketed(w, d) {
+  const s = w.seqTail + d;
   const h = s.lastIndexOf('\x1b[?2004h');
   const l = s.lastIndexOf('\x1b[?2004l');
-  if (h > l) bracketed = true; else if (l > h) bracketed = false;
-  seqTail = s.slice(-7); // 시퀀스 길이(8)보다 짧게 남겨 중복 처리 방지
+  if (h > l) w.bracketed = true; else if (l > h) w.bracketed = false;
+  w.seqTail = s.slice(-7); // 시퀀스 길이(8)보다 짧게 남겨 중복 처리 방지
+}
+function sendToRenderer(ch, ...args) { if (win && !win.isDestroyed()) win.webContents.send(ch, ...args); }
+function writeFxState(w) {
+  if (!TEST_FX || !ROOT || !w.sessionId || !w.fx) return;
+  try { fs.mkdirSync(STATE_DIR(), { recursive: true }); fs.writeFileSync(stateFile(w), JSON.stringify({ state: w.fx.state, at: new Date().toISOString() }) + '\n'); } catch { /* 시험용 */ }
 }
 
-function startPty(cols, rows) {
-  if (term) return true;
-  const shell = process.env.SHELL || '/bin/zsh';
+function spawnPty(w, cols, rows) {
+  if (w.term) return true;
+  if (w.unavailable) { if (dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } else return false; } // 디스크가 다시 연결됐으면 시작 가능
+  if (!dirOk(w.cwd)) { w.unavailable = true; wsChanged(false); return false; }
+  const shellBin = process.env.SHELL || '/bin/zsh';
   const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
   for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP')) delete env[k];
-  const sid = crypto.randomUUID();
-  sessionId = L.isSessionId(sid) ? sid : null; // 셸 env 에는 넣지 않고 claude 실행 명령에만 붙인다
+  const sid = L.newSessionId(() => crypto.randomUUID()); // 셸 env 에는 넣지 않고 claude 실행 명령에만 붙인다
   let self;
   try {
-    self = pty.spawn(shell, ['-l'], { name: 'xterm-256color', cols, rows, cwd: ROOT || os.homedir(), env });
-  } catch { return false; }
-  removeStateFile();
-  term = self; bracketed = false; seqTail = '';
+    self = pty.spawn(shellBin, ['-l'], { name: 'xterm-256color', cols, rows, cwd: w.cwd, env });
+  } catch { w.exited = true; wsChanged(false); return false; }
+  removeStateFile(w);
+  w.sessionId = sid; w.term = self; w.exited = false; w.bracketed = false; w.seqTail = ''; w.lastOutputAt = 0;
   self.onData((d) => {
-    if (term !== self) return;
-    lastOutputAt = Date.now();
-    trackBracketed(d);
+    if (w.term !== self) return;
+    w.lastOutputAt = Date.now();
+    trackBracketed(w, d);
     if (SMOKE) smokeOut += d;
-    if (win && !win.isDestroyed()) win.webContents.send('pty:data', d);
+    sendToRenderer('pty:data', w.id, d);
     if (SMOKE) checkSmoke();
   });
   self.onExit(({ exitCode }) => {
-    if (term !== self) return;
-    term = null; bracketed = false; removeStateFile();
-    if (win && !win.isDestroyed()) win.webContents.send('pty:exit', exitCode);
+    if (w.term !== self) return;
+    w.term = null; w.bracketed = false; w.exited = true; removeStateFile(w);
+    sendToRenderer('pty:exit', w.id, exitCode);
+    wsChanged(false);
   });
-  // 스모크에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
-  if (SMOKE) self.write('echo maru-ok 한글 명조 정렬 테스트 가나다라마바사\r');
-  else if (ROOT) self.write('command -v claude >/dev/null && ' + (sessionId ? 'MARU_APP_SESSION=' + sessionId + ' ' : '') + 'exec claude\r');
+  // 스모크·시험에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
+  if (w.fx) { self.write('echo ' + SMOKE_LINE + '; echo fixture-' + w.fx.name + '\r'); writeFxState(w); }
+  else if (SMOKE) self.write('echo ' + SMOKE_LINE + '\r');
+  else if (ROOT) self.write('command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec claude\r');
+  wsChanged(false);
   return true;
 }
 
-function killPty() {
-  const old = term; term = null; bracketed = false; removeStateFile();
-  if (old) { try { old.kill(); } catch { /* 이미 종료 */ } }
+// pty 의 프로세스 그룹에 SIGHUP(터미널을 닫을 때와 같다). 2초 안에 안 끝나면 SIGKILL.
+const dying = new Set();
+function killPty(w) {
+  const old = w.term; w.term = null; w.bracketed = false; removeStateFile(w);
+  if (!old) return;
+  let dead = false; const pid = old.pid;
+  dying.add(pid); // 닫는 중인 그룹: 이 사이에 앱이 끝나면 killAllSync 가 마저 정리한다
+  try { old.onExit(() => { dead = true; dying.delete(pid); }); } catch { /* 무시 */ }
+  try { process.kill(-pid, 'SIGHUP'); } catch { try { old.kill(); } catch { /* 이미 종료 */ } }
+  setTimeout(() => { if (!dead) { try { process.kill(-pid, 'SIGKILL'); } catch { /* 이미 종료 */ } } dying.delete(pid); }, 2000);
+}
+
+// 종료 경로: 모든 프로세스 그룹에 SIGHUP → 짧게(300ms) 기다림 → SIGKILL. 타이머에 기대지 않고 동기로 끝낸다.
+function killAllSync() {
+  const pids = [...dying]; dying.clear();
+  for (const w of wsOrder()) { if (w.term) { pids.push(w.term.pid); w.term = null; w.bracketed = false; } removeStateFile(w); }
+  if (!pids.length) return;
+  for (const pid of pids) { try { process.kill(-pid, 'SIGHUP'); } catch { /* 이미 종료 */ } }
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); } catch { /* 무시 */ }
+  for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch { /* 이미 종료 */ } }
+}
+
+// ---- 작업 공간 관리 ----
+function dirOk(p) { try { return L.workspaceDirOk(fs.statSync(fs.realpathSync(p)), process.getuid()); } catch { return false; } }
+const wsFile = () => path.join(ROOT, 'data', 'workspaces.json');
+let saveTimer = null;
+function saveWsNow() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  if (!PERSIST || !ROOT) return;
+  const order = wsOrder();
+  L.saveWorkspaces(wsFile(), order.map((w) => ({ cwd: w.cwd, title: w.title })), order.findIndex((w) => w.id === activeId)); // 사용 불가 항목도 그대로 둔다
+}
+function saveWsLater() { if (!saveTimer) saveTimer = setTimeout(saveWsNow, 1000); } // 활성 전환은 1초 모아서 저장
+const saveWs = saveWsNow;
+// structural: true = 목록이 바뀜(즉시 저장), 'active' = 활성만 바뀜(1초 뒤 저장), false = 상태만 바뀜.
+function wsChanged(structural) {
+  if (structural === true) saveWsNow(); else if (structural === 'active') saveWsLater();
+  sendToRenderer('ws:changed');
+  refreshTray();
+}
+function addWorkspace(cwd, title, fx, unavailable) {
+  const id = crypto.randomBytes(8).toString('hex');
+  const w = { id, cwd, title: L.uniqueTitle(title || L.workspaceTitle(cwd, tr('ws.untitled')), wsOrder().map((x) => x.title)), term: null, sessionId: null, bracketed: false, seqTail: '', lastOutputAt: 0, exited: false, unavailable: !!unavailable, fx: fx || null };
+  wss.set(id, w);
+  return w;
+}
+function initWorkspaces() {
+  const base = ROOT || os.homedir();
+  if (TEST_FX) {
+    for (const d of FX_DEFS) { const c = path.join(base, 'projects', d.name); addWorkspace(dirOk(c) ? c : base, d.name, d); }
+    activeId = wsOrder()[1].id;
+    for (const w of wsOrder()) if (w.fx.start) spawnPty(w, 80, 24); // 시험: 일부는 미리 시작하고 나머지는 '시작 전'으로 둔다
+    return;
+  }
+  if (PERSIST && ROOT) {
+    const r = L.readWorkspacesFile(wsFile(), dirOk, { fallbackTitle: tr('ws.untitled') });
+    if (r.status === 'corrupt') L.backupCorruptFile(wsFile()); // 망가진 파일은 .bak 으로 옮기고(예전 .bak 은 덮어씀) 새로 시작
+    else if (r.status === 'ok' && r.data.list.length) {
+      for (const e of r.data.list) addWorkspace(e.cwd, e.title, null, e.unavailable); // 폴더가 없어도 버리지 않는다
+      activeId = wsOrder()[r.data.active].id;
+      return;
+    }
+  }
+  activeId = addWorkspace(base).id; // 파일이 없거나 비면 저장소 루트 하나(예전 동작)
+  saveWsNow();
+}
+const wsView = () => wsOrder().map((w) => ({ id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state: wsState(w), bp: w.bracketed }));
+const attention = () => wsOrder().filter((w) => { const s = wsState(w); return s === 'busy' || s === 'waiting'; });
+function activate(id) { if (!wsOf(id) || id === activeId) return; activeId = id; wsChanged('active'); }
+function activateOffset(d) {
+  const order = wsOrder(); if (order.length < 2) return;
+  const i = order.findIndex((w) => w.id === activeId);
+  activate(order[(i + d + order.length) % order.length].id);
+}
+function showWindow() {
+  if (!win || win.isDestroyed()) { createWindow(); return; }
+  if (win.isMinimized()) win.restore();
+  win.show(); win.focus();
+  try { app.focus({ steal: true }); } catch { /* 무시 */ }
+}
+const box = (opts) => (win && !win.isDestroyed() ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts));
+
+let picking = false;
+async function newWorkspaceFlow() {
+  if (picking) return { ok: false, reason: 'busy' };
+  const tooMany = () => box({ type: 'info', buttons: [tr('common.confirm')], noLink: true, message: tr('dlg.max.title', { n: L.WS_MAX }), detail: tr('dlg.max.detail') });
+  if (wss.size >= L.WS_MAX) { showWindow(); await tooMany(); return { ok: false, reason: 'max' }; }
+  picking = true;
+  try {
+    showWindow();
+    const opts = { title: tr('dlg.pick.title'), buttonLabel: tr('dlg.pick.ok'), defaultPath: ROOT || os.homedir(), properties: ['openDirectory'] };
+    const r = win && !win.isDestroyed() ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    if (r.canceled || !Array.isArray(r.filePaths) || r.filePaths.length !== 1) return { ok: false, reason: 'cancel' };
+    let real = null; try { real = fs.realpathSync(r.filePaths[0]); } catch { real = null; }
+    if (!real || !dirOk(real)) { await box({ type: 'warning', buttons: [tr('common.confirm')], noLink: true, message: tr('dlg.dir.title'), detail: tr('dlg.dir.detail') }); return { ok: false, reason: 'dir' }; }
+    if (wss.size >= L.WS_MAX) { await tooMany(); return { ok: false, reason: 'max' }; }
+    activeId = addWorkspace(real).id;
+    wsChanged(true);
+    return { ok: true };
+  } finally { picking = false; }
+}
+
+let closing = false;
+async function closeWorkspace(id) {
+  const w = wsOf(id);
+  if (!w) return { ok: false, reason: 'invalid' };
+  if (closing) return { ok: false, reason: 'busy' };
+  closing = true;
+  try {
+    const st = wsState(w);
+    if (L.confirmClose(st)) {
+      const ans = await box({ type: 'warning', buttons: [tr('dlg.close.ok'), tr('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message: tr('dlg.close.title', { title: w.title }), detail: tr('dlg.close.detail') });
+      if (ans.response !== 0) return { ok: false, reason: 'cancel' };
+      if (!wss.has(id)) return { ok: true };
+    }
+    killPty(w); removeStateFile(w);
+    const idx = wsOrder().findIndex((x) => x.id === id);
+    wss.delete(id);
+    if (activeId === id) { const rest = wsOrder(); activeId = rest.length ? rest[Math.min(idx, rest.length - 1)].id : null; }
+    wsChanged(true);
+    return { ok: true };
+  } finally { closing = false; }
+}
+
+// ---- 종료 ----
+let quitAsking = false;
+async function confirmQuit() {
+  if (quitAsking) return;
+  quitAsking = true;
+  try {
+    showWindow();
+    const n = attention().length;
+    const ans = await box({ type: 'warning', buttons: [tr('dlg.quit.ok'), tr('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message: tr('dlg.quit.title'), detail: tr('dlg.quit.detail', { n }) });
+    if (ans.response === 0) { quitting = true; app.quit(); }
+  } finally { quitAsking = false; }
+}
+function cleanup() { saveWsNow(); killAllSync(); }
+let restarting = false;
+async function restartActive() {
+  const w = wsOf(activeId);
+  if (!w || restarting) return;
+  if (L.confirmRestart(wsState(w))) {
+    restarting = true;
+    try {
+      const ans = await box({ type: 'warning', buttons: [tr('dlg.restart.ok'), tr('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message: tr('dlg.restart.title', { title: w.title }), detail: tr('dlg.restart.detail') });
+      if (ans.response !== 0) return;
+    } finally { restarting = false; }
+    if (!wss.has(w.id)) return;
+  }
+  sendToRenderer('pty:restart-request', w.id);
+}
+
+// ---- 트레이(메뉴 막대) ----
+let traySig = '';
+function createTray() {
+  try {
+    const img = nativeImage.createFromPath(L.trayIconPath({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appDir: __dirname }));
+    if (img.isEmpty()) return;
+    img.setTemplateImage(true);
+    tray = new Tray(img);
+    refreshTray(true);
+  } catch { tray = null; } // 트레이 없이도 앱은 동작한다
+}
+function refreshTray(force) {
+  if (!tray) return;
+  const view = wsView();
+  const sig = JSON.stringify([view, activeId, L.trayTodoTitles(cache.todos), curLang()]);
+  if (!force && sig === traySig) return;
+  traySig = sig;
+  const model = L.trayMenuModel({ workspaces: view, activeId, todos: cache.todos, t: tr });
+  const tpl = model.map((m) => {
+    if (m.type === 'separator') return { type: 'separator' };
+    if (m.type === 'header' || m.type === 'todo') return { label: m.label, enabled: false };
+    if (m.type === 'workspace') return { label: m.label, type: 'checkbox', checked: m.checked, click: () => { activate(m.id); showWindow(); } };
+    const act = {
+      show: () => showWindow(),
+      new: () => { newWorkspaceFlow(); },
+      settings: () => { showWindow(); sendToRenderer('ui:open-settings'); },
+      quit: () => app.quit(),
+    }[m.id];
+    return { label: m.label, click: act };
+  });
+  tray.setContextMenu(Menu.buildFromTemplate(tpl));
+  tray.setTitle(L.trayTitle(view.map((w) => w.state)));
+  tray.setToolTip(tr('tray.tip'));
 }
 
 function checkSmoke() {
   if (smokeDone || !rendered || !refreshed || !/^maru-ok 한글 .*\r?$/m.test(smokeOut.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''))) return;
   smokeDone = true;
-  const p = app.isPackaged ? null : panels();
+  const p = app.isPackaged ? null : { ...panels(), workspaces: wsView(), active: activeId };
   console.log('SMOKE OK pty-output=maru-ok panels-rendered=true root-source=' + (found ? found.source : 'none') + ' packaged=' + app.isPackaged);
+  if (app.isPackaged) { app.exit(ROOT ? 0 : 1); return; } // 패키징 빌드의 스모크는 한 줄을 찍자마자 스스로 끝낸다(상주 모드로 쓸 수 없다)
   if (!ROOT) { console.error('SMOKE FAIL: 저장소를 찾지 못함'); app.exit(1); return; }
   if (!app.isPackaged) console.log(JSON.stringify(p, null, 2)); // 패널 내용은 개발 실행에서만 출력
   const shot = app.isPackaged ? null : process.env.MARU_APP_SHOT; // 선택(개발 전용): 스모크 때 화면 캡처 경로. 패키징 빌드에서는 무시
   if (shot && win) {
-    setTimeout(() => win.webContents.capturePage().then((img) => { fs.writeFileSync(shot, img.toPNG()); app.exit(0); }, () => app.exit(0)), TEST_UI ? 4000 : 800);
+    setTimeout(() => win.webContents.capturePage().then((img) => { fs.writeFileSync(shot, img.toPNG()); app.exit(0); }, () => app.exit(0)), TEST_UI ? 4000 : TEST_FX ? 2000 : 800);
     return;
   }
   app.exit(0);
@@ -223,18 +429,31 @@ const profilePath = () => path.join(ROOT, 'data', 'profile.json');
 const curLang = () => (profile ? profile.lang : L.defaultLang(app.getLocale()));
 const tr = (k, p) => I18N.t(curLang(), k, p);
 function buildMenu() {
+  const goto = [1, 2, 3, 4, 5, 6].map((n) => ({ label: tr('menu.gotoWs', { n }), accelerator: 'CmdOrCtrl+' + n, click: () => { const w = wsOrder()[n - 1]; if (w) activate(w.id); } }));
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },
+    { label: tr('menu.workspace'), submenu: [
+      { label: tr('menu.newWs'), accelerator: 'CmdOrCtrl+T', click: () => { newWorkspaceFlow(); } },
+      { label: tr('menu.closeWs'), accelerator: 'CmdOrCtrl+W', click: () => {
+        if (!win || win.isDestroyed() || !win.isVisible()) return;
+        if (wss.size === 0) win.hide(); else sendToRenderer('ui:close-request'); // 열린 창·메뉴가 있으면 렌더러가 그것부터 닫는다
+      } },
+      { type: 'separator' },
+      { label: tr('menu.nextWs'), accelerator: 'CmdOrCtrl+Shift+]', click: () => activateOffset(1) },
+      { label: tr('menu.prevWs'), accelerator: 'CmdOrCtrl+Shift+[', click: () => activateOffset(-1) },
+      { type: 'separator' },
+      ...goto,
+    ] },
     { label: tr('menu.terminal'), submenu: [{
       label: tr('menu.restart'), accelerator: 'CmdOrCtrl+Shift+R',
-      click: () => { if (win) win.webContents.send('pty:restart-request'); },
+      click: () => { restartActive(); },
     }] },
     { label: tr('set.title'), submenu: [{
       label: tr('menu.openSettings'), accelerator: 'CmdOrCtrl+,',
-      click: () => { if (win) win.webContents.send('ui:open-settings'); },
+      click: () => { sendToRenderer('ui:open-settings'); },
     }] },
-    { role: 'windowMenu' },
+    { role: 'window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
   ]));
 }
 
@@ -473,35 +692,53 @@ function fromMain(e) {
   return !!fr && fr === win.webContents.mainFrame && fr.url === INDEX_URL;
 }
 
-ipcMain.handle('pty:start', (e, cols, rows) => {
-  if (!fromMain(e) || !int(cols, 2, 1000) || !int(rows, 2, 1000)) return false;
-  return startPty(cols, rows);
+// 모든 pty 채널은 작업 공간 id 를 받고, main 의 표에 없는 id 는 조용히 버린다
+const wsFrom = (e, id) => (fromMain(e) ? wsOf(id) : null);
+ipcMain.handle('pty:start', (e, id, cols, rows) => {
+  const w = wsFrom(e, id);
+  if (!w || !int(cols, 2, 1000) || !int(rows, 2, 1000)) return false;
+  if (w.term) { // 렌더러가 다시 붙은 경우(화면 복구): 이어서 흘려보내고, 크기를 한 번 흔들어 앱이 다시 그리게 한다
+    try { w.term.resize(cols > 2 ? cols - 1 : cols + 1, rows); setTimeout(() => { try { if (w.term) w.term.resize(cols, rows); } catch { /* 종료 */ } }, 60); } catch { /* 종료 직후 */ }
+    return true;
+  }
+  if (w.exited) return true; // 끝난 세션은 자동으로 되살리지 않는다(다시 시작은 pty:restart)
+  return spawnPty(w, cols, rows);
 });
-ipcMain.handle('pty:restart', (e, cols, rows) => {
-  if (!fromMain(e) || !int(cols, 2, 1000) || !int(rows, 2, 1000)) return false;
-  killPty();
-  return startPty(cols, rows);
+ipcMain.handle('pty:restart', (e, id, cols, rows) => {
+  const w = wsFrom(e, id);
+  if (!w || !int(cols, 2, 1000) || !int(rows, 2, 1000)) return false;
+  killPty(w);
+  return spawnPty(w, cols, rows);
 });
-ipcMain.on('pty:write', (e, data) => {
-  if (!fromMain(e) || typeof data !== 'string' || data.length > 1 << 20 || !term) return;
-  term.write(data);
+ipcMain.on('pty:write', (e, id, data) => {
+  const w = wsFrom(e, id);
+  if (!w || typeof data !== 'string' || data.length > 1 << 20 || !w.term) return;
+  w.term.write(data);
 });
-ipcMain.on('pty:resize', (e, cols, rows) => {
-  if (!fromMain(e) || !int(cols, 2, 1000) || !int(rows, 2, 1000) || !term) return;
-  try { term.resize(cols, rows); } catch { /* 종료 직후 */ }
+ipcMain.on('pty:resize', (e, id, cols, rows) => {
+  const w = wsFrom(e, id);
+  if (!w || !int(cols, 2, 1000) || !int(rows, 2, 1000) || !w.term) return;
+  try { w.term.resize(cols, rows); } catch { /* 종료 직후 */ }
 });
+ipcMain.handle('ws:get', (e) => (fromMain(e) ? { list: wsView(), active: activeId } : null));
+ipcMain.handle('ws:activate', (e, id) => { if (!wsFrom(e, id)) return false; activate(id); return true; });
+ipcMain.handle('ws:new', (e) => (fromMain(e) ? newWorkspaceFlow() : { ok: false, reason: 'invalid' })); // 경로는 렌더러가 주지 않는다(main 의 폴더 선택창)
+ipcMain.handle('ws:close', (e, id) => (wsFrom(e, id) ? closeWorkspace(id) : { ok: false, reason: 'invalid' }));
 ipcMain.handle('panels:get', (e) => (fromMain(e) ? panels() : null));
 // 렌더러가 본 항목(shown = 제목+"\n"+프롬프트)이 main 의 index 번 항목과 같을 때만 처리. 쓰는 문장은 항상 main 의 프롬프트.
-ipcMain.handle('quest:fill', (e, index, shown) => {
-  if (!fromMain(e) || !int(index, 0, cache.todos.length - 1)) return { ok: false, reason: 'invalid' };
+// 대상은 활성 작업 공간뿐(id 가 활성이 아니면 거부).
+ipcMain.handle('quest:fill', (e, id, index, shown) => {
+  const w = wsFrom(e, id);
+  if (!w || !int(index, 0, cache.todos.length - 1)) return { ok: false, reason: 'invalid' };
+  if (w.id !== activeId) return { ok: false, reason: 'inactive' };
   const item = L.matchTodo(cache.todos, index, shown);
   if (!item) return { ok: false, reason: 'stale' };
   if (!item.prompt) return { ok: false, reason: 'no-prompt' }; // 사용자가 직접 할 일
-  if (!term) return { ok: false, reason: 'no-term' };
+  if (!w.term) return { ok: false, reason: 'no-term' };
   const text = L.cleanQuestText(item.prompt);
   if (!text || !L.isSafeQuestStart(text)) return { ok: false, reason: 'unsafe-start' };
-  if (!bracketed) return { ok: false, reason: 'not-ready' }; // 선택 프롬프트 등에서는 쓰지 않는다
-  term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만
+  if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 선택 프롬프트 등에서는 쓰지 않는다
+  w.term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만
   return { ok: true };
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
@@ -519,7 +756,7 @@ ipcMain.handle('profile:set', (e, patch) => {
   if (!ROOT) return { ok: false, reason: 'save' };
   const next = { name, lang, calendar: profile ? profile.calendar : false, createdAt: profile ? profile.createdAt : new Date().toISOString() };
   if (!L.saveProfile(profilePath(), next)) return { ok: false, reason: 'save' };
-  profile = next; buildMenu();
+  profile = next; buildMenu(); refreshTray(true);
   return { ok: true, profile };
 });
 ipcMain.handle('calendar:set', async (e, on) => {
@@ -554,7 +791,7 @@ ipcMain.handle('update:download', async (e) => {
 ipcMain.handle('update:install', async (e) => {
   if (!fromMain(e) || upd.busy || !upd.dmgPath || !updater || typeof updater.installAndRelaunch !== 'function') return { ok: false };
   upd.busy = true;
-  try { await updater.installAndRelaunch(upd.dmgPath); return { ok: true }; } catch (err) { return { ok: false, message: errText(err) }; } finally { upd.busy = false; }
+  try { await updater.installAndRelaunch(upd.dmgPath, { beforeQuit: () => { quitting = true; } }); return { ok: true }; } catch (err) { return { ok: false, message: errText(err) }; } finally { upd.busy = false; }
 });
 ipcMain.handle('update:pull', async (e) => {
   if (!fromMain(e) || upd.busy || !ROOT || !upd.view.repoBehind || !updater || typeof updater.pullRepo !== 'function') return { ok: false };
@@ -586,24 +823,58 @@ function createWindow() {
   win.webContents.on('will-redirect', (e) => e.preventDefault());
   win.webContents.on('will-attach-webview', (e) => e.preventDefault());
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // 화면(렌더러) 복구: pty 는 main 에 그대로 있으므로 다시 불러오기만 하면 된다. 다시 붙을 때 작업 공간 목록을 렌더러가 새로 요청하고,
+  // 붙여넣기 모드(bracketed)는 main 이 가진 값을 쓴다. 1분에 3번을 넘게 죽으면 더는 자동으로 다시 불러오지 않는다.
+  win.webContents.on('render-process-gone', (_e, d) => {
+    if (!d || d.reason === 'clean-exit' || quitting) return;
+    const now = Date.now(); reloads = reloads.filter((t) => now - t < 60000);
+    if (reloads.length >= 3) return;
+    reloads.push(now);
+    try { if (win && !win.isDestroyed()) win.webContents.reload(); } catch { /* 무시 */ }
+  });
+  win.webContents.on('unresponsive', async () => {
+    if (hangAsking || quitting) return;
+    hangAsking = true;
+    try {
+      const ans = await box({ type: 'warning', buttons: [tr('dlg.hang.reload'), tr('dlg.hang.wait')], defaultId: 0, cancelId: 1, noLink: true, message: tr('dlg.hang.title'), detail: tr('dlg.hang.detail') });
+      if (ans.response === 0 && win && !win.isDestroyed()) win.webContents.forcefullyCrashRenderer();
+    } finally { hangAsking = false; }
+  });
+  // 닫기(빨간 버튼·⌘W)는 숨기기만 한다. pty 는 계속 돈다. 실제 종료는 ⌘Q·트레이 "종료"(before-quit)에서.
+  win.on('close', (e) => { if (!quitting) { e.preventDefault(); win.hide(); } });
   win.on('closed', () => { win = null; });
 }
 
 app.whenReady().then(() => {
+  if (TEST_FX && !(found && found.source === 'env')) { console.error('MARU_APP_FX 에는 시험용 저장소(MARU_HOME)가 필요합니다'); app.exit(1); return; }
   profile = ROOT ? L.loadProfile(profilePath()) : null;
   buildMenu();
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   session.defaultSession.on('will-download', (e) => e.preventDefault());
   cleanOldStateFiles();
+  initWorkspaces();
   createWindow();
+  createTray();
   refresh();
   setInterval(refresh, REFRESH_MS).unref();
+  // 훅이 쓰는 상태 파일은 이벤트가 없으므로 1초마다 읽어 트레이를 갱신한다
+  setInterval(() => {
+    if (TEST_FX) for (const w of wsOrder()) if (w.term) writeFxState(w);
+    for (const w of wsOrder()) if (w.unavailable && dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } // 디스크가 다시 연결됨
+    refreshTray();
+  }, 1000).unref();
   if (!SMOKE) { readCalendar(); setInterval(readCalendar, 15 * 60 * 1000).unref(); } // 스모크에서는 캘린더를 읽지 않는다
   if (!SMOKE) { finishPendingInstall().then(() => checkUpdates(false)); setInterval(() => checkUpdates(false), 6 * 3600 * 1000).unref(); }
-  if (SMOKE) setTimeout(() => { console.error('SMOKE FAIL: 15초 초과 (pty-output/rendered 미충족)'); app.exit(1); }, 15000).unref();
+  if (SMOKE) setTimeout(() => { console.error('SMOKE FAIL: 15초 초과 (pty-output/rendered 미충족)'); app.exit(1); }, 15000);
 });
-function cleanup() { killPty(); removeStateFile(); }
-app.on('before-quit', cleanup);
+// 시스템 종료·재시작·로그아웃: 확인 창으로 막지 않는다. 이 신호 뒤에 오는 before-quit 은 확인된 것으로 취급한다.
+app.whenReady().then(() => { powerMonitor.on('shutdown', () => { quitting = true; cleanup(); }); });
+app.on('activate', showWindow); // Dock 아이콘 클릭
+app.on('before-quit', (e) => {
+  if (quitting) return;
+  if (!(!app.isPackaged && (SMOKE || TEST_FX)) && attention().length) { e.preventDefault(); confirmQuit(); return; }
+  quitting = true; cleanup();
+});
 app.on('will-quit', cleanup);
-app.on('window-all-closed', () => { cleanup(); app.quit(); });
+app.on('window-all-closed', () => { if (quitting) { cleanup(); app.quit(); } }); // 창만 닫힌 것은 종료가 아니다
