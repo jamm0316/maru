@@ -92,4 +92,36 @@ t('keyToSeq 단축키', () => {
   assert.strictEqual(L.keyToSeq({ type: 'keyup', key: 'Backspace', metaKey: true }), null);
   assert.strictEqual(L.keyToSeq({ type: 'keydown', key: 'a', metaKey: true }), null);
 });
+t('resolveRoot 순서와 검증', () => {
+  const good = new Set(['/e/x', '/cfg/y', '/app', '/h/maru']);
+  const mk = (o) => L.resolveRoot({ env: {}, home: '/h', isPackaged: false, appDir: '/app/app', io: { readConfig: () => null, isRepo: (d) => good.has(d) }, ...o });
+  assert.deepStrictEqual(mk({}), { root: '/app', source: 'app' });
+  assert.deepStrictEqual(mk({ env: { MARU_HOME: '/e/x' } }), { root: '/e/x', source: 'env' });
+  assert.deepStrictEqual(mk({ env: { MARU_HOME: '/bad' }, io: { readConfig: () => '/cfg/y\nsecond', isRepo: (d) => good.has(d) } }), { root: '/cfg/y', source: 'config' });
+  assert.deepStrictEqual(mk({ isPackaged: true }), { root: '/h/maru', source: 'home' });
+  assert.deepStrictEqual(mk({ io: { readConfig: () => '~/maru', isRepo: (d) => good.has(d) } }), { root: '/h/maru', source: 'config' });
+  assert.strictEqual(mk({ isPackaged: true, io: { readConfig: () => '', isRepo: () => false } }), null);
+  assert.strictEqual(mk({ env: { MARU_HOME: 'relative/path' }, isPackaged: true, io: { readConfig: () => null, isRepo: (d) => d === 'relative/path' } }), null);
+  assert.strictEqual(mk({ isPackaged: true, io: { readConfig: () => { throw new Error('x'); }, isRepo: () => { throw new Error('y'); } } }), null);
+});
+t('parseAgentState', () => {
+  assert.strictEqual(L.parseAgentState('{"state":"busy","at":"x"}'), 'busy');
+  assert.strictEqual(L.parseAgentState('{"state":"idle"}'), 'idle');
+  assert.strictEqual(L.parseAgentState('{"state":"waiting"}'), 'waiting');
+  for (const bad of ['', 'not json', '{"state":"BUSY"}', '{"state":1}', '[]', 'null', '{}', undefined, 'x'.repeat(5000)]) assert.strictEqual(L.parseAgentState(bad), null);
+  assert.ok(L.isSessionId('abcd1234') && L.isSessionId('6054e0aa-03e5-4050-b22e-c186ad026154'));
+  for (const bad of ['short', '../../etc/passwd1', 'a b c d e f g h', 'x'.repeat(65), '', null]) assert.strictEqual(L.isSessionId(bad), false);
+});
+t('effectiveAgent 되살림', () => {
+  const rec = (state, ago) => ({ state, atMs: 1e6 - ago });
+  assert.strictEqual(L.effectiveAgent(null, 1e6, 0), 'none');
+  assert.strictEqual(L.effectiveAgent(rec('busy', 1000), 1e6, 1e6 - 50000), 'busy');   // 기록이 최근
+  assert.strictEqual(L.effectiveAgent(rec('busy', 30000), 1e6, 1e6 - 1000), 'busy');   // 출력 있음
+  assert.strictEqual(L.effectiveAgent(rec('busy', 30000), 1e6, 1e6 - 30000), 'idle');  // 둘 다 오래됨
+  assert.strictEqual(L.effectiveAgent({ state: 'busy', atMs: NaN }, 1e6, 0), 'idle');
+  assert.strictEqual(L.effectiveAgent(rec('waiting', 99999), 1e6, 0), 'waiting');
+  assert.strictEqual(L.effectiveAgent(rec('idle', 99999), 1e6, 0), 'idle');
+  assert.deepStrictEqual(L.parseAgentRecord('{"state":"busy","at":"2026-01-01T00:00:00Z"}'), { state: 'busy', atMs: Date.parse('2026-01-01T00:00:00Z') });
+  assert.strictEqual(L.parseAgentRecord('zzz'), null);
+});
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

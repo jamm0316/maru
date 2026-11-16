@@ -3,15 +3,32 @@ const { app, BrowserWindow, ipcMain, Menu, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const { execFile } = require('child_process');
 const pty = require('node-pty');
 const L = require('./lib');
 
-const ROOT = path.resolve(__dirname, '..');
+// 소유자가 현재 사용자이고 group/other 쓰기 권한이 없어야 한다(저장소 스크립트를 실행하므로)
+function safeOwned(st) { return st.uid === process.getuid() && (st.mode & 0o022) === 0; }
+function isRepo(dir) {
+  try {
+    const d = fs.statSync(dir);
+    const s = fs.statSync(path.join(dir, 'scripts', 'maru-status.sh'));
+    const c = fs.statSync(path.join(dir, 'CLAUDE.md'));
+    return d.isDirectory() && s.isFile() && c.isFile() && safeOwned(d) && safeOwned(s);
+  } catch { return false; }
+}
+const found = L.resolveRoot({
+  env: process.env, home: os.homedir(), isPackaged: app.isPackaged, appDir: __dirname,
+  io: {
+    readConfig: () => { const r = readRegular(path.join(os.homedir(), '.config', 'maru', 'root'), 4096, false); return r ? r.text : null; },
+    isRepo,
+  },
+});
+const ROOT = found ? found.root : null; // null 이면 저장소를 못 찾은 것(패널 비움, 셸은 홈에서)
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
-const BUSY_WINDOW_MS = 1500;
 const PARTY = [
   { name: '마루', role: '지휘', model: 'sonnet', lead: true },
   { name: 'scout', role: '정찰', model: 'haiku' },
@@ -21,11 +38,34 @@ const PARTY = [
 
 let win = null;
 let term = null;
-let lastOutputAt = 0;
 let smokeOut = '';
 let rendered = false;
 let smokeDone = false;
 let refreshed = false;
+let lastOutputAt = 0;
+let sessionId = null; // 이 pty 의 MARU_APP_SESSION
+const STATE_DIR = () => path.join(ROOT, 'data', 'state', 'app');
+const stateFile = () => (ROOT && sessionId ? path.join(STATE_DIR(), sessionId + '.json') : null);
+function removeStateFile() { const f = stateFile(); if (f) try { fs.unlinkSync(f); } catch { /* 없음 */ } }
+function readAgentState() {
+  const f = stateFile();
+  const r = f ? readRegular(f, 4096, false) : null;
+  return r ? L.parseAgentRecord(r.text) : null;
+}
+// 하루 넘은 상태 파일·임시 파일 정리(일반 파일만)
+function cleanOldStateFiles() {
+  if (!ROOT) return;
+  const dir = STATE_DIR();
+  try {
+    if (fs.lstatSync(dir).isSymbolicLink()) return;
+    for (const name of fs.readdirSync(dir)) {
+      if (!(name.startsWith('.') || name.endsWith('.json'))) continue;
+      const f = path.join(dir, name);
+      const st = fs.lstatSync(f);
+      if (st.isFile() && Date.now() - st.mtimeMs > 24 * 3600 * 1000) fs.unlinkSync(f);
+    }
+  } catch { /* 디렉터리 없음 */ }
+}
 let bracketed = false; // 터미널 앱이 브래킷 붙여넣기(?2004)를 켰는가
 let seqTail = '';
 const INDEX_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
@@ -36,7 +76,7 @@ let cache = {
 // ---- 데이터 수집(고정 경로만) ----
 function run(file, args, opts = {}) {
   return new Promise((resolve) => {
-    execFile(file, args, { timeout: 10000, maxBuffer: 1 << 20, cwd: ROOT, ...opts }, (err, stdout) => {
+    execFile(file, args, { timeout: 10000, maxBuffer: 1 << 20, cwd: ROOT || os.homedir(), ...opts }, (err, stdout) => {
       resolve(err ? null : String(stdout));
     });
   });
@@ -68,7 +108,7 @@ function skillDirs(dir) {
 
 let refreshing = false;
 async function refresh() {
-  if (refreshing) return;
+  if (refreshing || !ROOT) { if (!ROOT) refreshed = true; return; }
   refreshing = true;
   try {
     const [st, batt, df] = await Promise.all([
@@ -103,7 +143,8 @@ function panels() {
   const st = cache.status || {};
   const lv = L.levelInfo(typeof st.memoryFiles === 'number' ? st.memoryFiles : 0);
   return {
-    rootName: path.basename(ROOT),
+    rootMissing: !ROOT,
+    rootName: ROOT ? path.basename(ROOT) : '-',
     level: lv,
     lastReflect: st.lastReflect || null,
     lastDream: st.lastDream || null,
@@ -114,8 +155,8 @@ function panels() {
     battery: cache.battery,
     disk: cache.disk,
     party: PARTY,
-    workspaces: [{ name: path.basename(ROOT), active: true }],
-    busy: Date.now() - lastOutputAt < BUSY_WINDOW_MS,
+    workspaces: ROOT ? [{ name: path.basename(ROOT), active: true }] : [],
+    agent: L.effectiveAgent(readAgentState(), Date.now(), lastOutputAt), // busy | idle | waiting | none (Claude Code 훅이 기록)
   };
 }
 
@@ -133,10 +174,13 @@ function startPty(cols, rows) {
   const shell = process.env.SHELL || '/bin/zsh';
   const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
   for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP')) delete env[k];
+  const sid = crypto.randomUUID();
+  sessionId = L.isSessionId(sid) ? sid : null; // 셸 env 에는 넣지 않고 claude 실행 명령에만 붙인다
   let self;
   try {
-    self = pty.spawn(shell, ['-l'], { name: 'xterm-256color', cols, rows, cwd: ROOT, env });
+    self = pty.spawn(shell, ['-l'], { name: 'xterm-256color', cols, rows, cwd: ROOT || os.homedir(), env });
   } catch { return false; }
+  removeStateFile();
   term = self; bracketed = false; seqTail = '';
   self.onData((d) => {
     if (term !== self) return;
@@ -148,16 +192,17 @@ function startPty(cols, rows) {
   });
   self.onExit(({ exitCode }) => {
     if (term !== self) return;
-    term = null; bracketed = false;
+    term = null; bracketed = false; removeStateFile();
     if (win && !win.isDestroyed()) win.webContents.send('pty:exit', exitCode);
   });
   // 스모크에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
-  self.write(SMOKE ? 'echo maru-ok 한글 명조 정렬 테스트 가나다라마바사\r' : 'command -v claude >/dev/null && exec claude\r');
+  if (SMOKE) self.write('echo maru-ok 한글 명조 정렬 테스트 가나다라마바사\r');
+  else if (ROOT) self.write('command -v claude >/dev/null && ' + (sessionId ? 'MARU_APP_SESSION=' + sessionId + ' ' : '') + 'exec claude\r');
   return true;
 }
 
 function killPty() {
-  const old = term; term = null; bracketed = false;
+  const old = term; term = null; bracketed = false; removeStateFile();
   if (old) { try { old.kill(); } catch { /* 이미 종료 */ } }
 }
 
@@ -165,7 +210,8 @@ function checkSmoke() {
   if (smokeDone || !rendered || !refreshed || !/^maru-ok 한글 .*\r?$/m.test(smokeOut.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''))) return;
   smokeDone = true;
   const p = panels();
-  console.log('SMOKE OK pty-output=maru-ok panels-rendered=true');
+  console.log('SMOKE OK pty-output=maru-ok panels-rendered=true root-source=' + (found ? found.source : 'none') + ' packaged=' + app.isPackaged);
+  if (!ROOT) { console.error('SMOKE FAIL: 저장소를 찾지 못함'); app.exit(1); return; }
   console.log(JSON.stringify(p, null, 2));
   const shot = process.env.MARU_APP_SHOT; // 선택: 스모크 때 화면 캡처 경로
   if (shot && win) {
@@ -250,12 +296,13 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   session.defaultSession.on('will-download', (e) => e.preventDefault());
+  cleanOldStateFiles();
   createWindow();
   refresh();
   setInterval(refresh, REFRESH_MS).unref();
   if (SMOKE) setTimeout(() => { console.error('SMOKE FAIL: 15초 초과 (pty-output/rendered 미충족)'); app.exit(1); }, 15000).unref();
 });
-app.on('window-all-closed', () => {
-  if (term) { try { term.kill(); } catch { /* 이미 종료 */ } }
-  app.quit();
-});
+function cleanup() { killPty(); removeStateFile(); }
+app.on('before-quit', cleanup);
+app.on('will-quit', cleanup);
+app.on('window-all-closed', () => { cleanup(); app.quit(); });

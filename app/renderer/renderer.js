@@ -74,6 +74,7 @@
   }
 
   function renderStatic(p) {
+    $('root-missing').hidden = !p.rootMissing;
     $('lv').textContent = 'LV ' + p.level.level;
     $('growth-left').textContent = '성장도 · 기억 ' + p.level.memories + '개';
     $('growth-right').textContent = '다음 레벨까지 기억 ' + p.level.toNext + '개';
@@ -124,12 +125,20 @@
 
   }
 
+  const AGENT_VIEW = {
+    busy: ['작업 중', '마루가 일하고 있습니다'],
+    idle: ['입력 대기', '다음 지시를 기다리고 있습니다'],
+    waiting: ['확인 필요', '터미널에서 확인이 필요합니다'],
+    none: ['대기', '아직 상태 신호가 없습니다'],
+  };
   function renderBusy(p) {
     const core = document.querySelector('.core');
-    core.classList.toggle('idle', !p.busy);
-    $('status-main').textContent = p.busy ? '작업 중' : '대기';
-    $('status-sub').textContent = p.busy ? '터미널에서 출력이 이어지고 있습니다' : '입력을 기다리고 있습니다';
-    $('core').setAttribute('aria-label', '마루 코어: ' + (p.busy ? '작업 중' : '대기'));
+    const v = AGENT_VIEW[p.agent] || AGENT_VIEW.none;
+    core.classList.toggle('idle', p.agent !== 'busy' && p.agent !== 'waiting');
+    core.classList.toggle('waiting', p.agent === 'waiting');
+    $('status-main').textContent = v[0];
+    $('status-sub').textContent = v[1];
+    $('core').setAttribute('aria-label', '마루 코어: ' + v[0]);
   }
 
   let lastKey = null; let lastBusy = null;
@@ -137,10 +146,10 @@
     try {
       const p = await window.maru.getPanels();
       if (p) {
-        const { busy, ...rest } = p;
+        const { agent, ...rest } = p;
         const key = JSON.stringify(rest);
         if (key !== lastKey) { lastKey = key; renderStatic(p); window.maru.notifyRendered(); }
-        if (busy !== lastBusy) { lastBusy = busy; renderBusy(p); }
+        if (agent !== lastBusy) { lastBusy = agent; renderBusy(p); }
       }
     } catch (e) { /* 다음 주기에 재시도 */ }
   }

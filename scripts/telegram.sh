@@ -3,6 +3,7 @@
 # 사용: telegram.sh start [--unattended] | stop | status | attach | logs [줄 수]
 # 설치·토큰 입력·페어링은 사용자가 직접 한다(README 「텔레그램으로 지시하기」). 이 스크립트는 아무것도 설치하지 않고 토큰 파일을 읽지 않는다.
 set -u
+unset MARU_APP_SESSION  # 앱 세션 상태 신호가 텔레그램 세션에 섞이지 않게
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")
 . "$(dirname "$SELF")/lib.sh"
 SESS=$MARU_TELEGRAM_SESSION

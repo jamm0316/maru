@@ -8,16 +8,63 @@
     "start": "electron .",
     "test": "node test.js",
     "rebuild": "DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-rebuild -f -w node-pty",
-    "postinstall": "DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-rebuild -f -w node-pty"
+    "postinstall": "DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-rebuild -f -w node-pty",
+    "dist": "CSC_IDENTITY_AUTO_DISCOVERY=false DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-builder --mac dmg --arm64"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.1",
-    "electron": "^45.3.2"
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0"
+  },
+  "author": "maru",
+  "build": {
+    "appId": "com.maru.app",
+    "productName": "Maru",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "lib.js",
+      "renderer/**",
+      "package.json",
+      "!**/node_modules/node-pty/{src,deps,third_party,scripts,typings,binding.gyp,README.md}/**",
+      "!**/node_modules/node-pty/{binding.gyp,README.md}",
+      "!**/node_modules/node-pty/prebuilds/{win32-*,darwin-x64}/**",
+      "!**/node_modules/node-pty/build/{obj.target,node-addon-api}/**",
+      "!**/node_modules/node-pty/lib/**/*.test.js*",
+      "!**/node_modules/node-pty/lib/**/*.map",
+      "!**/node_modules/node-addon-api/**",
+      "!**/*.pdb"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
+    ],
+    "npmRebuild": true,
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "identity": null
+    },
+    "dmg": {
+      "sign": false
+    },
+    "afterPack": "tools/after-pack.js"
   }
 }

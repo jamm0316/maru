@@ -61,6 +61,66 @@ function keyToSeq(e) {
   return null;
 }
 
+// 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru
+// io: { readConfig(): string|null, isRepo(dir): boolean }. 후보는 절대경로이고 isRepo 통과해야 채택.
+function resolveRoot({ env = {}, home, isPackaged, appDir, io }) {
+  const path = require('path');
+  const expand = (p) => {
+    if (typeof p !== 'string') return null;
+    p = p.trim();
+    if (!p) return null;
+    if (p === '~') p = home;
+    else if (p.startsWith('~/')) p = path.join(home, p.slice(2));
+    return path.isAbsolute(p) ? path.normalize(p) : null;
+  };
+  let cfg = null;
+  try { const t = io.readConfig(); if (typeof t === 'string') cfg = t.split(/\r?\n/)[0]; } catch { /* 없음 */ }
+  const cands = [
+    ['env', expand(env.MARU_HOME)],
+    ['config', expand(cfg)],
+    ['app', isPackaged ? null : (appDir ? path.resolve(appDir, '..') : null)],
+    ['home', home ? path.join(home, 'maru') : null],
+  ];
+  for (const [source, dir] of cands) {
+    if (!dir) continue;
+    let ok = false;
+    try { ok = io.isRepo(dir) === true; } catch { ok = false; }
+    if (ok) return { root: dir, source };
+  }
+  return null;
+}
+
+// 에이전트 상태 파일(JSON {"state","at"}) -> 'busy'|'idle'|'waiting'|null
+const AGENT_STATES = ['busy', 'idle', 'waiting'];
+function parseAgentState(text) {
+  if (typeof text !== 'string' || text.length > 4096) return null;
+  try {
+    const o = JSON.parse(text);
+    return o && typeof o === 'object' && AGENT_STATES.includes(o.state) ? o.state : null;
+  } catch { return null; }
+}
+
+// 상태 파일 -> {state, atMs}|null
+function parseAgentRecord(text) {
+  const state = parseAgentState(text);
+  if (!state) return null;
+  let atMs = NaN;
+  try { atMs = Date.parse(JSON.parse(text).at); } catch { /* 무시 */ }
+  return { state, atMs };
+}
+
+// busy 인데 기록이 오래되고(staleMs) pty 출력도 그동안 없으면 idle 로 낮춘다(Esc 중단 등 Stop 훅이 없는 경우)
+function effectiveAgent(rec, now, lastOutputAt, staleMs = 20000) {
+  if (!rec) return 'none';
+  if (rec.state !== 'busy') return rec.state;
+  const quiet = now - lastOutputAt > staleMs;
+  const old = !Number.isFinite(rec.atMs) || now - rec.atMs > staleMs;
+  return old && quiet ? 'idle' : 'busy';
+}
+
+// MARU_APP_SESSION 형식: [A-Za-z0-9-]{8,64}
+const isSessionId = (s) => typeof s === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(s);
+
 function validSkillName(name) {
   return typeof name === 'string' && name.length > 0 && name.length <= NAME_MAX &&
     !name.startsWith('.') && !hasBadChars(name) && !/[\/\\]/.test(name);
@@ -138,7 +198,7 @@ function mergeBriefing(eventLists, max = BRIEFING_MAX) {
 
 const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
-  hasBadChars, isSafeQuestStart, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, levelInfo, parseSuggestions, cleanQuestText, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
