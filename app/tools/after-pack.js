@@ -1,5 +1,8 @@
 'use strict';
-// 패키징 후: node-pty 네이티브 바이너리에서 디버그 심볼을 제거(strip -S)해 빌드 경로 문자열을 없애고 ad-hoc 재서명한다.
+// 패키징 후: (1) node-pty 네이티브 바이너리에서 디버그 심볼을 제거(strip -S)해 빌드 경로 문자열을 없애고 개별 재서명한다.
+// (2) 마지막에 번들 전체를 ad-hoc 서명한다(--deep, 하드닝 런타임 없음). mac.identity=null 이면 electron-builder 가 서명을 건너뛰고
+//     afterSign 훅도 실행하지 않으므로(macPackager: "skipping afterSign hook as no signing occurred") 서명은 afterPack 의 맨 끝에서 한다.
+// (3) 게이트: codesign --verify --deep --strict 가 통과하지 않으면 빌드를 실패시킨다.
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -15,11 +18,15 @@ function walk(dir, out) {
 }
 
 exports.default = async function afterPack(ctx) {
-  const unpacked = path.join(ctx.appOutDir, 'Maru.app', 'Contents', 'Resources', 'app.asar.unpacked');
-  if (!fs.existsSync(unpacked)) return;
-  for (const f of walk(unpacked, [])) {
-    execFileSync(path.join(CLT, 'strip'), ['-S', f], { stdio: 'inherit' });
-    execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', f], { stdio: 'inherit' });
-    console.log('  • stripped+resigned', path.relative(unpacked, f));
+  const bundle = path.join(ctx.appOutDir, 'Maru.app');
+  const unpacked = path.join(bundle, 'Contents', 'Resources', 'app.asar.unpacked');
+  if (fs.existsSync(unpacked)) {
+    for (const f of walk(unpacked, [])) {
+      execFileSync(path.join(CLT, 'strip'), ['-S', f], { stdio: 'inherit' });
+      console.log('  • stripped', path.relative(unpacked, f));
+    }
   }
+  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--timestamp=none', bundle], { stdio: 'inherit' });
+  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'inherit' }); // 실패하면 예외 -> 빌드 실패
+  console.log('  • ad-hoc signed and verified', bundle);
 };

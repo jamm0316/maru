@@ -9,6 +9,52 @@
     if (text !== undefined) e.textContent = text;
     return e;
   };
+  const Lib = window.MaruLib;
+  const I18N = window.MaruI18n;
+
+  // ---- 언어·프로필 상태 ----
+  let lang = 'ko';
+  let profile = null;
+  let version = '';
+  const T = (key, params) => I18N.t(lang, key, params);
+
+  // ---- 모달 관리: 열려 있는 동안 .app 은 inert(키 입력·포커스 불가), 터미널 stdin 도 막는다 ----
+  const modals = []; // [{ el, prev, closable(), close() }]
+  const modalOpen = () => modals.length > 0;
+  function syncModalState() {
+    $('app').inert = modals.length > 0;
+    term.options.disableStdin = modals.length > 0;
+    modals.forEach((m, i) => { m.el.inert = i !== modals.length - 1; });
+  }
+  function openModal(backdrop, focusEl, opts) {
+    closeMenu(false); closeUpdate(false);
+    const m = { el: backdrop, prev: document.activeElement, closable: () => true, close: () => closeModal(backdrop), ...opts };
+    modals.push(m);
+    backdrop.hidden = false;
+    syncModalState();
+    if (focusEl) focusEl.focus();
+    return m;
+  }
+  function closeModal(backdrop) {
+    const i = modals.findIndex((m) => m.el === backdrop);
+    if (i < 0) return;
+    const [m] = modals.splice(i, 1);
+    backdrop.hidden = true;
+    backdrop.inert = false;
+    syncModalState();
+    if (m.prev && document.contains(m.prev) && !m.prev.closest('[inert]')) m.prev.focus(); else focusTerm();
+  }
+  function focusTerm() { if (!modalOpen()) term.focus(); }
+  // Tab 순환(모달 안에서만)
+  function trapTab(e) {
+    const top = modals[modals.length - 1];
+    if (!top) return;
+    const f = [...top.el.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"]), pre[tabindex]')].filter((n) => !n.disabled && !n.hidden && n.offsetParent !== null);
+    if (!f.length) { e.preventDefault(); return; }
+    const first = f[0]; const last = f[f.length - 1];
+    if (e.shiftKey && (document.activeElement === first || !top.el.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (document.activeElement === last || !top.el.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+  }
 
   // ---- 터미널 ----
   const term = new window.Terminal({
@@ -36,27 +82,37 @@
     if (!started) startPty(); // 시작 실패 시 다음 리사이즈에 재시도
   }
   term.attachCustomKeyEventHandler((e) => {
-    const seq = window.MaruLib.keyToSeq(e);
+    if (modalOpen()) return false;
+    const seq = Lib.keyToSeq(e);
     if (seq === null) return true;
     if (e.type === 'keydown') window.maru.ptyWrite(seq);
     return false;
   });
-  term.onData((d) => window.maru.ptyWrite(d));
+  term.onData((d) => { if (!modalOpen()) window.maru.ptyWrite(d); });
   window.maru.onPtyData((d) => term.write(d));
   window.maru.onPtyExit((code) => {
-    term.write(`\r\n\x1b[38;5;208m[프로세스 종료 code=${code} · Cmd+Shift+R 로 터미널 다시 시작]\x1b[0m\r\n`);
+    term.write('\r\n\x1b[38;5;208m' + T('term.exit', { code }) + '\x1b[0m\r\n');
   });
   async function startPty() {
     try { fit.fit(); started = !!(await window.maru.ptyStart(term.cols, term.rows)); } catch (e) { started = false; }
-    if (started) term.focus();
+    if (started) focusTerm();
   }
   window.maru.onPtyRestart(async () => {
     term.reset();
     try { started = !!(await window.maru.ptyRestart(term.cols, term.rows)); } catch (e) { started = false; }
-    if (started) term.focus();
+    if (started) focusTerm();
   });
   new ResizeObserver(doFit).observe($('terminal'));
   window.addEventListener('resize', doFit);
+
+  // ---- 문구 적용 ----
+  function applyStatic() {
+    document.documentElement.lang = lang;
+    document.title = T('app.title');
+    for (const n of document.querySelectorAll('[data-i18n]')) n.textContent = T(n.dataset.i18n);
+    for (const n of document.querySelectorAll('[data-i18n-aria]')) n.setAttribute('aria-label', T(n.dataset.i18nAria));
+    updateUserChip();
+  }
 
   // ---- 패널 ----
   const pad = (n) => String(n).padStart(2, '0');
@@ -73,79 +129,93 @@
     clearTimeout(noteTimer); noteTimer = setTimeout(() => { n.textContent = ''; }, 4000);
   }
 
+  let lastPanels = null;
   function renderStatic(p) {
+    lastPanels = p;
     $('root-missing').hidden = !p.rootMissing;
     $('lv').textContent = 'LV ' + p.level.level;
-    $('growth-left').textContent = '성장도 · 기억 ' + p.level.memories + '개';
-    $('growth-right').textContent = '다음 레벨까지 기억 ' + p.level.toNext + '개';
+    $('growth-left').textContent = T('growth.left', { n: p.level.memories });
+    $('growth-right').textContent = T('growth.right', { n: p.level.toNext });
     $('bar').style.width = Math.round(p.level.ratio * 100) + '%';
-    $('batt').textContent = p.battery ? '배터리 ' + p.battery.percent + '%' : '배터리 -';
-    $('disk').textContent = p.disk ? '여유 ' + p.disk.freeGB + 'GB' : '여유 -';
+    $('batt').textContent = p.battery ? T('batt', { p: p.battery.percent }) : T('batt.none');
+    $('disk').textContent = p.disk ? T('disk', { gb: p.disk.freeGB }) : T('disk.none');
     $('term-name').textContent = p.rootName;
     $('term-cwd').textContent = '~/' + p.rootName;
+    $('upd-dot').hidden = !(p.updateAvailable || updNotice);
+    $('upgrade-btn').title = p.updateAvailable ? T('user.upgrade.aria') : '';
 
     const ws = $('workspaces'); ws.replaceChildren();
     for (const w of p.workspaces) {
       const row = el('div', 'ws' + (w.active ? ' active' : ''));
       row.append(el('span', 'dot'));
       const c = el('span', 'col');
-      c.append(el('span', 'n', w.name), el('span', 's', '대화 중'));
+      c.append(el('span', 'n', w.name), el('span', 's', T('ws.sub')));
       row.append(c); ws.append(row);
     }
     const party = $('party'); party.replaceChildren();
     for (const m of p.party) {
       const row = el('div', 'party-row' + (m.lead ? ' lead' : ''));
-      const l = el('span'); l.append(el('b', '', m.name), document.createTextNode(' ' + m.role));
+      const l = el('span'); l.append(el('b', '', m.name || T('app.title')), document.createTextNode(' ' + T('role.' + m.roleKey)));
       row.append(l, el('span', 'm', m.model)); party.append(row);
     }
 
+    // 일정(opt-in, 읽기 전용): 오늘 → 내일
+    const cg = $('cal-group'); cg.replaceChildren();
+    const evs = Array.isArray(p.calendar) ? p.calendar : [];
+    cg.hidden = !evs.length;
+    if (evs.length) {
+      cg.append(el('div', 'tag-head', T('cal.title')));
+      let divided = false;
+      for (const ev of evs) {
+        if (ev.day === 'tomorrow' && !divided) { divided = true; cg.append(el('div', 'cal-div', T('cal.tomorrow'))); }
+        const r = el('div', 'cal-ev');
+        r.append(el('span', 'cal-t', ev.allDay ? T('cal.allday') : ev.time), el('span', 'cal-n', ev.title));
+        cg.append(r);
+      }
+    }
+
     const q = $('quests'); q.replaceChildren();
-    if (!p.todos.length) q.append(el('div', 'empty', '아직 추천할 일이 없습니다'));
+    if (!p.todos.length) q.append(el('div', 'empty', T('todo.empty')));
     let prevTag = null;
     p.todos.forEach((it, i) => {
-      if (it.tag !== prevTag) { prevTag = it.tag; q.append(el('div', 'tag-head', it.tag)); }
+      if (it.tag !== prevTag) { prevTag = it.tag; q.append(el('div', 'tag-head', it.tag === '추천' ? T('todo.tag.suggest') : it.tag)); }
       const canFill = !!it.prompt;
       const b = el(canFill ? 'button' : 'div', 'todo' + (canFill ? '' : ' manual'));
       if (canFill) b.type = 'button';
       const body = el('span', 'body'); body.append(el('span', 't', it.title));
       if (canFill) { const pe = el('span', 'p', it.prompt); pe.title = it.prompt; body.append(pe); }
       b.append(el('span', 'imp' + (it.importance >= 8 ? ' hi' : ''), String(it.importance)), body);
-      if (!canFill) b.append(el('span', 'own', '직접'));
+      if (!canFill) b.append(el('span', 'own', T('todo.own')));
       if (canFill) b.addEventListener('click', async () => {
         let res = null;
-        try { res = await window.maru.fillQuest(i, window.MaruLib.todoKey(it)); } catch (e) { /* 무시 */ }
-        if (!res || !res.ok) note(window.MaruLib.fillNotice(res && res.reason));
-        term.focus();
+        try { res = await window.maru.fillQuest(i, Lib.todoKey(it)); } catch (e) { /* 무시 */ }
+        if (!res || !res.ok) note(T(Lib.fillNoticeKey(res && res.reason)));
+        focusTerm();
       });
       q.append(b);
     });
 
     const sk = $('skills'); sk.replaceChildren();
     for (const n of p.skills) sk.append(el('span', 'chip', n));
-    $('skills-count').textContent = p.skills.length + '개 · 대기 제안 ' + p.pendingSkillProposals;
+    $('skills-count').textContent = T('skills.count', { n: p.skills.length, p: p.pendingSkillProposals });
 
     const br = $('briefing'); br.replaceChildren();
-    if (!p.briefing.length) br.append(el('div', 'empty', '밤사이 기록이 없습니다.'));
+    if (!p.briefing.length) br.append(el('div', 'empty', T('brief.empty')));
     for (const e of p.briefing) {
-      const row = el('div', 'brief'); row.append(el('span', 'at', fmtAt(e.at)), el('span', '', e.text)); br.append(row);
+      const row = el('div', 'brief'); row.append(el('span', 'at', fmtAt(e.at)), el('span', '', T('ev.' + e.code, { n: e.n }))); br.append(row);
     }
-
   }
 
-  const AGENT_VIEW = {
-    busy: ['작업 중', '마루가 일하고 있습니다'],
-    idle: ['입력 대기', '다음 지시를 기다리고 있습니다'],
-    waiting: ['확인 필요', '터미널에서 확인이 필요합니다'],
-    none: ['대기', '아직 상태 신호가 없습니다'],
-  };
-  function renderBusy(p) {
+  let lastAgent = 'none';
+  function renderBusy(agent) {
+    lastAgent = agent;
     const core = document.querySelector('.core');
-    const v = AGENT_VIEW[p.agent] || AGENT_VIEW.none;
-    core.classList.toggle('idle', p.agent !== 'busy' && p.agent !== 'waiting');
-    core.classList.toggle('waiting', p.agent === 'waiting');
-    $('status-main').textContent = v[0];
-    $('status-sub').textContent = v[1];
-    $('core').setAttribute('aria-label', '마루 코어: ' + v[0]);
+    const k = ['busy', 'idle', 'waiting'].includes(agent) ? agent : 'none';
+    core.classList.toggle('idle', agent !== 'busy' && agent !== 'waiting');
+    core.classList.toggle('waiting', agent === 'waiting');
+    $('status-main').textContent = T('agent.' + k);
+    $('status-sub').textContent = T('agent.' + k + '.sub');
+    $('core').setAttribute('aria-label', T('core.aria', { s: T('agent.' + k) }));
   }
 
   let lastKey = null; let lastBusy = null;
@@ -156,12 +226,369 @@
         const { agent, ...rest } = p;
         const key = JSON.stringify(rest);
         if (key !== lastKey) { lastKey = key; renderStatic(p); window.maru.notifyRendered(); }
-        if (agent !== lastBusy) { lastBusy = agent; renderBusy(p); }
+        if (agent !== lastBusy) { lastBusy = agent; renderBusy(agent); }
       }
     } catch (e) { /* 다음 주기에 재시도 */ }
   }
 
-  tickClock(); setInterval(tickClock, 15000);
-  startPty().then(poll);
-  setInterval(poll, 1000);
+  // ---- 언어 전환(즉시, 저장은 프로필이 있을 때만) ----
+  function relabel() {
+    applyStatic();
+    if (lastPanels) renderStatic(lastPanels);
+    renderBusy(lastAgent);
+    if (setRows) renderSettings();
+    if (!$('pop-update').hidden) renderUpdate();
+    renderLangSeg();
+    if (!$('dlg-name').hidden) fillNameDialog();
+  }
+  async function setLang(l) {
+    if (!I18N.isLang(l) || l === lang) return;
+    lang = l;
+    relabel();
+    if (profile) {
+      try { const r = await window.maru.setProfile({ lang: l }); if (r && r.ok) profile = r.profile; } catch (e) { /* UI 언어는 이미 바뀜 */ }
+    }
+  }
+
+  // ---- 사용자 칩 ----
+  function updateUserChip() {
+    const name = profile ? profile.name : '';
+    $('user-name').textContent = name;
+    $('avatar-ch').textContent = name ? [...name][0].toUpperCase() : '·';
+  }
+
+  // ---- 사용자 메뉴(칩 위로 열림) ----
+  let menuOpen = false;
+  function placeAbove(pop, anchor, alignEl) {
+    const r = anchor.getBoundingClientRect();
+    const ar = (alignEl || anchor).getBoundingClientRect();
+    pop.style.top = 'auto';
+    const w = pop.offsetWidth;
+    pop.style.left = Math.max(8, Math.min(ar.left, window.innerWidth - w - 8)) + 'px';
+    pop.style.bottom = Math.max(8, window.innerHeight - r.top + 6) + 'px';
+  }
+  function menuItems() { return [...$('user-menu').querySelectorAll('[role^="menuitem"]:not([aria-disabled="true"])')]; }
+  function buildMenu() {
+    const m = $('user-menu'); m.replaceChildren();
+    const item = (label, role, fn, checked) => {
+      const b = el('button', 'mi', label); b.type = 'button'; b.setAttribute('role', role); b.tabIndex = -1;
+      if (role === 'menuitemradio') { b.setAttribute('aria-checked', String(!!checked)); b.classList.toggle('on', !!checked); }
+      b.addEventListener('click', () => { closeMenu(false); fn(); });
+      return b;
+    };
+    m.append(item(T('menu.settings'), 'menuitem', openSettings));
+    m.append(el('div', 'sep')); m.lastChild.setAttribute('role', 'separator');
+    const g = el('div', 'grp'); g.setAttribute('role', 'group'); g.setAttribute('aria-label', T('menu.language'));
+    g.append(el('div', 'mlabel', T('menu.language')));
+    g.append(item(T('lang.ko'), 'menuitemradio', () => setLang('ko'), lang === 'ko'), item(T('lang.en'), 'menuitemradio', () => setLang('en'), lang === 'en'));
+    m.append(g);
+    m.append(el('div', 'sep')); m.lastChild.setAttribute('role', 'separator');
+    m.append(item(T('menu.rename'), 'menuitem', () => openNameDialog('rename')));
+    m.append(el('div', 'sep')); m.lastChild.setAttribute('role', 'separator');
+    const v = el('div', 'mi ver', T('menu.version', { v: version || '-' })); v.setAttribute('role', 'menuitem'); v.setAttribute('aria-disabled', 'true'); v.tabIndex = -1;
+    m.append(v);
+  }
+  function openMenu() {
+    if (modalOpen()) return;
+    closeUpdate(false);
+    buildMenu();
+    const m = $('user-menu'); m.hidden = false;
+    placeAbove(m, $('user-chip'));
+    menuOpen = true; $('user-chip').setAttribute('aria-expanded', 'true');
+    const items = menuItems(); const cur = items[0];
+    if (cur) cur.focus();
+  }
+  function closeMenu(refocus) {
+    if (!menuOpen) return;
+    menuOpen = false; $('user-menu').hidden = true; $('user-chip').setAttribute('aria-expanded', 'false');
+    if (refocus) $('user-chip').focus();
+  }
+  $('user-chip').addEventListener('click', () => { if (menuOpen) closeMenu(true); else openMenu(); });
+  $('user-chip').addEventListener('keydown', (e) => { if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); if (!menuOpen) openMenu(); } });
+  $('user-menu').addEventListener('keydown', (e) => {
+    const items = menuItems(); const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); items[0].focus(); }
+    else if (e.key === 'End') { e.preventDefault(); items[items.length - 1].focus(); }
+    else if (e.key === 'Tab') { closeMenu(false); }
+  });
+
+  // ---- 이름 입력(첫 실행 / 이름 바꾸기) ----
+  let nameMode = 'onboard';
+  let nameBusy = false;
+  let pickLang = 'ko';
+  function renderLangSeg() {
+    const seg = $('name-lang'); seg.replaceChildren();
+    for (const l of I18N.LANGS) {
+      const b = el('button', 'seg-b' + (pickLang === l ? ' on' : ''), T('lang.' + l));
+      b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(pickLang === l)); b.tabIndex = pickLang === l ? 0 : -1;
+      b.addEventListener('click', () => { pickLang = l; setLang(l); renderLangSeg(); });
+      b.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        pickLang = pickLang === 'ko' ? 'en' : 'ko'; setLang(pickLang); renderLangSeg();
+        [...seg.children].find((n) => n.getAttribute('aria-checked') === 'true').focus();
+      });
+      seg.append(b);
+    }
+  }
+  function fillNameDialog() {
+    const onboard = nameMode === 'onboard';
+    $('name-title').textContent = T(onboard ? 'ob.title' : 'rename.title');
+    $('name-ok').textContent = T(onboard ? 'ob.confirm' : 'common.save');
+  }
+  function openNameDialog(mode) {
+    nameMode = mode; nameBusy = false; pickLang = lang;
+    const onboard = mode === 'onboard';
+    $('name-cancel').hidden = onboard;
+    $('name-lang-wrap').hidden = !onboard;
+    $('name-input').value = onboard ? '' : (profile ? profile.name : '');
+    $('name-err').textContent = '';
+    fillNameDialog(); renderLangSeg();
+    openModal($('dlg-name'), $('name-input'), { closable: () => !onboard && !nameBusy });
+    $('name-input').select();
+  }
+  async function submitName() {
+    if (nameBusy) return;
+    const name = Lib.cleanName($('name-input').value);
+    if (!name) { $('name-err').textContent = T('ob.err.name'); $('name-input').focus(); return; }
+    nameBusy = true; $('name-ok').disabled = true;
+    let res = null;
+    try { res = await window.maru.setProfile(nameMode === 'onboard' ? { name, lang } : { name }); } catch (e) { res = null; }
+    nameBusy = false; $('name-ok').disabled = false;
+    if (!res || !res.ok) { $('name-err').textContent = T(res && res.reason === 'name' ? 'ob.err.name' : 'ob.err.save'); return; }
+    profile = res.profile; lang = profile.lang;
+    relabel();
+    closeModal($('dlg-name'));
+  }
+  $('name-ok').addEventListener('click', submitName);
+  $('name-cancel').addEventListener('click', () => { if (!nameBusy) closeModal($('dlg-name')); });
+  $('name-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitName(); } // 한글 조합 중 Enter 는 확정용
+  });
+
+  // ---- 확인 대화상자(미리보기 → 확인 → 결과) ----
+  // opts: { title, note, out, okLabel, cancelLabel, onConfirm: async () => ({ title, note, out }) }
+  function askConfirm(opts) {
+    return new Promise((resolve) => {
+      const dlg = $('dlg-confirm'); let busy = false; let done = false;
+      const show = (o) => {
+        $('cf-title').textContent = o.title || ''; $('cf-note').textContent = o.note || '';
+        $('cf-out').textContent = o.out || ''; $('cf-out').hidden = !o.out;
+      };
+      show(opts);
+      $('cf-ok').hidden = !opts.onConfirm; $('cf-ok').disabled = false; $('cf-ok').textContent = opts.okLabel || T('common.confirm');
+      $('cf-cancel').disabled = false; $('cf-cancel').textContent = opts.cancelLabel || T('common.cancel');
+      const finish = () => { $('cf-ok').onclick = null; $('cf-cancel').onclick = null; closeModal(dlg); resolve(); };
+      $('cf-cancel').onclick = () => { if (!busy) finish(); };
+      $('cf-ok').onclick = async () => {
+        if (busy || done) return;
+        busy = true; $('cf-ok').disabled = true; $('cf-cancel').disabled = true;
+        if (opts.runningLabel) $('cf-ok').textContent = opts.runningLabel;
+        let r;
+        try { r = await opts.onConfirm(); } catch (e) { r = { title: T('set.fail') }; }
+        busy = false; done = true;
+        if (r) show(r);
+        $('cf-ok').hidden = true; $('cf-cancel').disabled = false; $('cf-cancel').textContent = T('common.close'); $('cf-cancel').focus();
+      };
+      openModal(dlg, opts.onConfirm ? $('cf-ok') : $('cf-cancel'), { closable: () => !busy, close: finish });
+    });
+  }
+
+  // ---- 설정 시트 ----
+  const ROW_IDS = ['auth', 'hooks', 'dream', 'acc', 'screen', 'auto', 'cal', 'tg', 'mem'];
+  const PANES = { openAccessibility: 'accessibility', openScreen: 'screen', openAutomation: 'automation', openCalendars: 'calendars' };
+  let setRows = null; let setLoading = false; const rowNotes = {};
+  function openSettings() {
+    if (modalOpen()) return;
+    openModal($('dlg-settings'), $('set-close'), { close: () => { closeModal($('dlg-settings')); setRows = null; } });
+    setRows = ROW_IDS.map((id) => ({ id, status: null }));
+    renderSettings();
+    loadSettings(false);
+  }
+  async function loadSettings(recheck) {
+    if (setLoading) return;
+    setLoading = true; $('set-recheck').disabled = true; renderSettings();
+    let res = null;
+    try { res = await window.maru.getSettings(recheck); } catch (e) { res = null; }
+    setLoading = false; $('set-recheck').disabled = false;
+    if ($('dlg-settings').hidden) return;
+    if (res && Array.isArray(res.rows)) setRows = res.rows;
+    renderSettings();
+  }
+  function renderSettings() {
+    const box = $('set-rows');
+    const hadFocus = box.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+    box.replaceChildren();
+    for (const r of setRows || []) {
+      const row = el('div', 'srow'); row.setAttribute('role', 'listitem');
+      const left = el('div', 'sl');
+      left.append(el('div', 'sn', T('set.' + r.id + '.name')), el('div', 'sd', T('set.' + r.id + '.desc')));
+      if (r.detail) {
+        const p = { ...r.detail.params };
+        if (r.detail.key === 'mem.ok') p.j = T('mem.journal.' + p.j);
+        left.append(el('div', 'sx' + (r.status === 'need' ? ' sx-warn' : ''), T(r.detail.key, p)));
+      } else left.append(el('div', 'sx', T('set.checking')));
+      if (rowNotes[r.id]) { const n = el('div', 'sx note', rowNotes[r.id]); n.setAttribute('role', 'status'); left.append(n); }
+      const right = el('div', 'sr');
+      right.append(el('span', 'pill ' + (r.status || 'wait'), r.status ? T('pill.' + r.status) : '…'));
+      if (r.toggle) {
+        const lab = el('label', 'tog'); const cb = el('input'); cb.type = 'checkbox'; cb.setAttribute('role', 'switch'); cb.checked = r.toggle.on; cb.disabled = !r.toggle.available || setLoading; cb.dataset.k = 'tog';
+        cb.addEventListener('change', async () => {
+          cb.disabled = true;
+          try { await window.maru.setCalendar(cb.checked); } catch (e) { /* 다시 읽기에서 반영 */ }
+          setLoading = false; loadSettings(false);
+        });
+        lab.append(cb, el('span', '', T('cal.toggle'))); right.append(lab);
+      }
+      if (r.action) {
+        const b = el('button', 'btn', T('act.' + r.action)); b.type = 'button'; b.dataset.k = r.id; b.disabled = setLoading;
+        b.addEventListener('click', () => rowAction(r));
+        right.append(b);
+      }
+      row.append(left, right); box.append(row);
+    }
+    if (hadFocus) { const n = box.querySelector('[data-k="' + hadFocus + '"]'); if (n && !n.disabled) n.focus(); }
+  }
+  async function rowAction(r) {
+    if (r.action === 'copyLogin') {
+      let ok = false; try { ok = await window.maru.copyLogin(); } catch (e) { ok = false; }
+      rowNotes.auth = ok ? T('act.loginCopied') : T('set.fail'); renderSettings();
+    } else if (PANES[r.action]) {
+      try { await window.maru.openPane(PANES[r.action]); } catch (e) { /* 무시 */ }
+    } else if (r.action === 'install') installFlow();
+  }
+  async function installFlow() {
+    rowNotes.hooks = T('hooks.previewing'); renderSettings();
+    let pv = null; try { pv = await window.maru.hooksPreview(); } catch (e) { pv = null; }
+    rowNotes.hooks = ''; renderSettings();
+    if (!pv || !pv.ok) {
+      await askConfirm({ title: T('hooks.previewFail'), note: pv && pv.reason === 'noInstall' ? T('hooks.noInstall') : '', out: pv && pv.output, cancelLabel: T('common.close') });
+      return;
+    }
+    const secs = pv.sections || [];
+    await askConfirm({
+      title: T('hooks.confirmTitle', { n: secs.length }), note: (secs.length ? secs.join(' · ') + '\n' : '') + T('hooks.confirmNote'), out: pv.output,
+      okLabel: T('hooks.apply'), runningLabel: T('hooks.running'),
+      onConfirm: async () => {
+        const r = await window.maru.hooksInstall();
+        if (r && ['expired', 'changed', 'cancelled'].includes(r.reason)) return { title: T('hooks.resultFail'), note: T('hooks.' + r.reason), out: '' };
+        return { title: T(r && r.ok ? 'hooks.resultOk' : 'hooks.resultFail'), note: '', out: r && r.output };
+      },
+    });
+    loadSettings(false);
+  }
+  $('set-close').addEventListener('click', () => { const m = modals.find((x) => x.el === $('dlg-settings')); if (m) m.close(); });
+  $('set-recheck').addEventListener('click', () => loadSettings(true));
+
+  // ---- 업그레이드 패널 ----
+  let updNotice = null; let updOpen = false; let updView = null; let updPhase = 'idle'; let updMsg = ''; let updPct = 0;
+  function renderUpdate() {
+    $('upd-cur').textContent = T('upd.current', { v: (updView && updView.current) || version || '-' });
+    const v = updView; let msg = T('upd.checking');
+    if (updPhase === 'downloading') msg = updPct >= 100 ? T('upd.verifying') : T('upd.downloading', { p: updPct });
+    else if (updMsg) msg = updMsg;
+    else if (v) {
+      if (v.status === 'unconfigured') msg = T('upd.unconfigured');
+      else if (v.status === 'none') msg = T('upd.none');
+      else if (v.status === 'available') msg = T('upd.available', { v: v.latest || '' });
+      else msg = T('upd.error') + (v.message ? ' · ' + v.message : '');
+    }
+    const nb = $('upd-notice'); nb.hidden = !updNotice;
+    if (updNotice) nb.textContent = T('upd.finish.' + updNotice.status, { v: updNotice.version || '' }) + (updNotice.message ? ' · ' + updNotice.message : '');
+    $('upd-msg').textContent = msg;
+    const showNotes = v && v.status === 'available' && v.notes && updPhase === 'idle';
+    $('upd-notes').hidden = !showNotes; $('upd-notes').textContent = showNotes ? v.notes : '';
+    $('upd-bar').hidden = updPhase !== 'downloading'; $('upd-bar-fill').style.width = updPct + '%';
+    const acts = $('upd-actions'); acts.replaceChildren();
+    const btn = (label, fn, cls) => { const b = el('button', 'btn' + (cls ? ' ' + cls : ''), label); b.type = 'button'; b.addEventListener('click', fn); acts.append(b); return b; };
+    if (updPhase === 'downloading') return;
+    if (v && v.status === 'available') btn(T('upd.download'), startDownload, 'primary');
+    if (v && v.repoBehind) btn(T('upd.pull'), doPull);
+    btn(T('upd.recheck'), () => doCheck());
+  }
+  async function doCheck() {
+    updView = null; updMsg = ''; renderUpdate();
+    try { updView = await window.maru.updateCheck(); } catch (e) { updView = { status: 'error', current: version }; }
+    renderUpdate();
+  }
+  async function startDownload() {
+    updPhase = 'downloading'; updPct = 0; updMsg = ''; renderUpdate();
+    let r = null; try { r = await window.maru.updateDownload(); } catch (e) { r = null; }
+    updPhase = 'idle';
+    if (!r || !r.ok) { updMsg = T('upd.downloadFail') + (r && r.message ? ' · ' + r.message : ''); renderUpdate(); return; }
+    closeUpdate(false);
+    await askConfirm({
+      title: T('upd.installTitle'), note: T('upd.installWarn') + '\n' + T('upd.permWarn'), okLabel: T('upd.install'),
+      onConfirm: async () => {
+        const x = await window.maru.updateInstall();
+        return x && x.ok ? { title: T('upd.install'), note: '', out: '' } : { title: T('upd.installFail'), note: x && x.message ? x.message : '', out: '' };
+      },
+    });
+  }
+  async function doPull() {
+    let r = null; try { r = await window.maru.updatePull(); } catch (e) { r = null; }
+    updMsg = T('upd.pullDone', { m: (r && r.message) || (r && r.ok ? 'OK' : T('set.fail')) });
+    renderUpdate();
+    try { updView = await window.maru.updateCheck(); } catch (e) { /* 유지 */ }
+    renderUpdate();
+  }
+  function openUpdate() {
+    if (modalOpen()) return;
+    closeMenu(false);
+    updOpen = true; updMsg = ''; $('pop-update').hidden = false;
+    $('upgrade-btn').setAttribute('aria-expanded', 'true');
+    renderUpdate(); placeAbove($('pop-update'), $('upgrade-btn'), $('user-chip'));
+    $('pop-update').tabIndex = -1; $('pop-update').focus();
+    doCheck().then(() => placeAbove($('pop-update'), $('upgrade-btn'), $('user-chip')));
+  }
+  function closeUpdate(refocus) {
+    if (!updOpen) return;
+    updOpen = false; updNotice = null; $('pop-update').hidden = true; $('upgrade-btn').setAttribute('aria-expanded', 'false');
+    if (refocus) $('upgrade-btn').focus();
+  }
+  $('upgrade-btn').addEventListener('click', () => { if (updOpen) closeUpdate(true); else openUpdate(); });
+  window.maru.onUpdateProgress((p) => { updPct = p; if (updOpen && updPhase === 'downloading') renderUpdate(); });
+
+  // ---- 전역 키·바깥 클릭 ----
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' && modalOpen()) { trapTab(e); return; }
+    if (e.key !== 'Escape') return;
+    if (modalOpen()) {
+      const top = modals[modals.length - 1];
+      e.preventDefault(); e.stopPropagation();
+      if (top.closable()) top.close();
+    } else if (menuOpen) { e.preventDefault(); closeMenu(true); }
+    else if (updOpen) { e.preventDefault(); closeUpdate(true); }
+  }, true);
+  document.addEventListener('mousedown', (e) => {
+    const t = e.target;
+    if (menuOpen && !$('user-menu').contains(t) && !$('user-chip').contains(t)) closeMenu(false);
+    if (updOpen && !$('pop-update').contains(t) && !$('upgrade-btn').contains(t)) closeUpdate(false);
+  });
+  window.addEventListener('blur', () => { closeMenu(false); });
+  window.maru.onOpenSettings(() => openSettings());
+
+  // ---- 시작 ----
+  async function boot() {
+    let init = null;
+    try { init = await window.maru.getProfile(); } catch (e) { init = null; }
+    if (init) {
+      version = init.version || '';
+      profile = init.profile || null;
+      lang = I18N.isLang(profile && profile.lang) ? profile.lang : (I18N.isLang(init.defaultLang) ? init.defaultLang : 'ko');
+    }
+    applyStatic();
+    renderBusy('none');
+    tickClock(); setInterval(tickClock, 15000);
+    if (!profile) openNameDialog('onboard');
+    else if (init && init.uiOpen === 'menu') openMenu();
+    else if (init && init.uiOpen === 'settings') openSettings();
+    else if (init && init.uiOpen === 'update') openUpdate();
+    window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
+    startPty().then(poll);
+    setInterval(poll, 1000);
+  }
+  boot();
 })();

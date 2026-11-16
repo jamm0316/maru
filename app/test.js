@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('assert');
 const L = require('./lib');
+const I = require('./i18n');
 let n = 0;
 function t(name, fn) { try { fn(); n++; console.log('ok   ' + name); } catch (e) { console.log('FAIL ' + name + '\n  ' + e.message); process.exitCode = 1; } }
 
@@ -55,11 +56,12 @@ const refl = [
 ].join('\n');
 t('로그 파서 dream', () => {
   const e = L.parseLogEvents(dream, 'dream');
-  assert.deepStrictEqual(e.map(x => x.text), ['새벽 정리 건너뜀 · 스냅샷 실패', '놓친 대화 3개 회고', '새벽 정리 완료 · 기억 갱신']);
+  assert.deepStrictEqual(e, [{ at: '2026-11-16 03:37:10', code: 'dream.snapshotFail' }, { at: '2026-11-16 06:11:54', code: 'dream.sweep', n: 3 }, { at: '2026-11-16 06:12:19', code: 'dream.commit' }]);
 });
 t('로그 파서 reflect + 잘린 첫 줄', () => {
   const e = L.parseLogEvents(refl, 'reflect', true);
-  assert.deepStrictEqual(e.map(x => x.text), ['새 퀘스트 4개 도착', '회고 완료 · 기억 갱신', '회고 · 변경 없음', '회고 되돌림(변경 폐기)']);
+  assert.deepStrictEqual(e.map(x => x.code), ['reflect.quests', 'reflect.commit', 'reflect.noChange', 'reflect.rollback']);
+  assert.strictEqual(e[0].n, 4);
 });
 t('mergeBriefing 최신순·개수 제한', () => {
   const m = L.mergeBriefing([L.parseLogEvents(dream, 'dream'), L.parseLogEvents(refl, 'reflect')], 3);
@@ -191,12 +193,217 @@ t('parseTodos 안전하지 않은 프롬프트 시작은 비움', () => {
   assert.strictEqual(L.parseTodos('a|5|t|점검해 줘')[0].prompt, '점검해 줘');
   assert.strictEqual(L.parseTodos('a|5|/title|')[0].title, '/title'); // 제목은 영향 없음
 });
-t('fillNotice 사유별 문구', () => {
+t('fillNoticeKey 사유별 키·문구', () => {
   const rs = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'invalid'];
-  const msgs = rs.map((r) => L.fillNotice(r));
+  const msgs = rs.map((r) => I.t('ko', L.fillNoticeKey(r)));
   assert.strictEqual(new Set(msgs).size, rs.length);
-  assert.strictEqual(L.fillNotice('???'), L.fillNotice('invalid'));
-  assert.strictEqual(L.fillNotice(undefined), L.fillNotice('invalid'));
-  assert.strictEqual(L.fillNotice('__proto__'), L.fillNotice('invalid'));
+  assert.strictEqual(L.fillNoticeKey('???'), 'fill.invalid');
+  assert.strictEqual(L.fillNoticeKey(undefined), 'fill.invalid');
+  assert.strictEqual(L.fillNoticeKey('__proto__'), 'fill.invalid');
+  for (const r of rs) assert.notStrictEqual(I.t('en', L.fillNoticeKey(r)), L.fillNoticeKey(r));
 });
+
+// ---- 프로필 ----
+const fs = require('fs'); const os = require('os'); const path = require('path');
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'maru-test-'));
+const good = { name: '마루야', lang: 'ko', calendar: false, createdAt: '2026-11-16T01:02:03.000Z' };
+t('cleanName 규칙', () => {
+  assert.strictEqual(L.cleanName('  마루친구 '), '마루친구');
+  assert.strictEqual(L.cleanName('a\nb\r\tc‮​d'), 'abcd');
+  assert.strictEqual(L.cleanName('가'.repeat(24)), '가'.repeat(24));
+  assert.strictEqual(L.cleanName('가'.repeat(25)), '');
+  assert.strictEqual(L.cleanName('😀'.repeat(24)).length, 48); // 코드포인트 기준
+  for (const bad of ['', '   ', '\n', '​ㅤ', 42, null, undefined, {}]) assert.strictEqual(L.cleanName(bad), '');
+});
+t('validateProfile 엄격 검증', () => {
+  assert.deepStrictEqual(L.validateProfile(good), good);
+  assert.deepStrictEqual(L.validateProfile({ ...good, extra: 'x' }), good); // 알려진 필드만 남김
+  const bads = [null, 'x', [], 1, { ...good, name: '' }, { ...good, name: 5 }, { ...good, name: 'a\nb' }, { ...good, name: ' 앞공백' },
+    { ...good, name: '가'.repeat(25) }, { ...good, name: 'x‮y' }, { ...good, lang: 'fr' }, { ...good, lang: 1 }, { ...good, calendar: 'true' },
+    { ...good, calendar: 1 }, { ...good, createdAt: 'yesterday' }, { ...good, createdAt: 123 }, { ...good, createdAt: '2026-13-45T00:00:00Z' }, { ...good, createdAt: 'x'.repeat(100) }];
+  for (const b of bads) assert.strictEqual(L.validateProfile(b), null, JSON.stringify(b));
+  const noKey = { ...good }; delete noKey.calendar; assert.strictEqual(L.validateProfile(noKey), null);
+});
+t('parseProfile 나쁜 JSON·잘림', () => {
+  assert.deepStrictEqual(L.parseProfile({ text: JSON.stringify(good), truncated: false }), good);
+  assert.strictEqual(L.parseProfile({ text: JSON.stringify(good), truncated: true }), null);
+  for (const text of ['', 'not json', '{', '[]', 'null', '{"name":1}']) assert.strictEqual(L.parseProfile({ text, truncated: false }), null, text);
+  assert.strictEqual(L.parseProfile(null), null);
+});
+t('프로필 저장(0600·원자적)과 읽기, 심볼릭 링크 거부', () => {
+  const dir = path.join(tmp, 'data'); const f = path.join(dir, 'profile.json');
+  assert.strictEqual(L.loadProfile(f), null);                       // 없음 = 없는 것
+  assert.strictEqual(L.saveProfile(f, good), true);                 // data 폴더도 만든다
+  assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  assert.deepStrictEqual(L.loadProfile(f), good);
+  assert.deepStrictEqual(fs.readdirSync(dir), ['profile.json']);     // 임시 파일이 남지 않음
+  assert.strictEqual(L.saveProfile(f, { ...good, name: '' }), false); // 잘못된 프로필은 쓰지 않음
+  assert.deepStrictEqual(L.loadProfile(f), good);
+  const link = path.join(dir, 'link.json'); fs.symlinkSync(f, link);
+  assert.strictEqual(L.loadProfile(link), null);                    // 링크는 읽지 않는다
+  fs.writeFileSync(f, 'x'.repeat(5000)); assert.strictEqual(L.loadProfile(f), null); // 크기 상한
+  fs.writeFileSync(f, '{bad'); assert.strictEqual(L.loadProfile(f), null);
+  const real = path.join(tmp, 'real'); fs.mkdirSync(real); const ld = path.join(tmp, 'ldata'); fs.symlinkSync(real, ld);
+  assert.strictEqual(L.saveProfile(path.join(ld, 'profile.json'), good), false); // 링크된 data 폴더 거부
+  assert.deepStrictEqual(fs.readdirSync(real), []);
+});
+t('defaultLang', () => {
+  assert.strictEqual(L.defaultLang('ko'), 'ko'); assert.strictEqual(L.defaultLang('ko-KR'), 'ko');
+  for (const x of ['en-US', 'ja', '', undefined, 'kok']) assert.strictEqual(L.defaultLang(x), 'en');
+});
+
+// ---- 훅 상태 ----
+t('hookStatus: 무관한 훅이 섞인 설정', () => {
+  const R = '/Users/u/maru';
+  const settings = { theme: 'dark', hooks: {
+    SessionEnd: [{ hooks: [{ type: 'command', command: 'echo bye' }] }, { hooks: [{ type: 'command', command: 'bash "/Users/u/maru/scripts/reflect.sh"' }] }],
+    SessionStart: [{ matcher: 'startup', hooks: [{ type: 'command', command: 'bash "/Users/u/other/scripts/session-context.sh"' }] }],  // 다른 저장소
+    Stop: [{ hooks: [{ type: 'command', command: 'afplay /x.mp3' }, { type: 'command', command: 'bash "/Users/u/maru/scripts/journal-tick.sh"' }] }],
+    PreCompact: [{ hooks: [{ type: 'command', command: 'bash /Users/u/maru/scripts/journal-tick.sh.bak' }] }],                         // 이름이 비슷한 다른 파일
+    PostToolUse: [{ hooks: [{ type: 'command', command: 'bash "/Users/u/maru/scripts/journal-tick.sh"' }] }],                         // 다른 이벤트
+  } };
+  assert.deepStrictEqual(L.hookStatus(settings, [R]), { SessionEnd: true, SessionStart: false, Stop: true, PreCompact: false });
+  assert.deepStrictEqual(L.hookStatus(settings, R), { SessionEnd: true, SessionStart: false, Stop: true, PreCompact: false });
+  assert.deepStrictEqual(L.hookStatus(settings, ['/Users/u/other']).SessionStart, true);
+  assert.deepStrictEqual(L.hookStatus(settings, ['/x/Users/u/maru']), { SessionEnd: false, SessionStart: false, Stop: false, PreCompact: false });
+  for (const bad of [null, {}, { hooks: null }, { hooks: { SessionEnd: 'x' } }, { hooks: { SessionEnd: [null, { hooks: 'x' }, { hooks: [null, 5, { command: 7 }] }] } }, []]) {
+    assert.deepStrictEqual(L.hookStatus(bad, [R]), { SessionEnd: false, SessionStart: false, Stop: false, PreCompact: false });
+  }
+  assert.deepStrictEqual(L.hookStatus(settings, ['relative/maru']), { SessionEnd: false, SessionStart: false, Stop: false, PreCompact: false });
+});
+t('hookStatus: 모두 연결', () => {
+  const mk = (n) => [{ hooks: [{ type: 'command', command: `bash "/r/maru/scripts/${n}"` }] }];
+  const s = { hooks: { SessionEnd: mk('reflect.sh'), SessionStart: mk('session-context.sh'), Stop: mk('journal-tick.sh'), PreCompact: mk('journal-tick.sh') } };
+  assert.ok(Object.values(L.hookStatus(s, ['/r/maru'])).every(Boolean));
+});
+
+// ---- claude auth status ----
+t('parseAuthStatus: 이메일·조직 필드를 버린다', () => {
+  const raw = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'secret.person@example.com', orgId: 'org-1234-secret', orgName: 'Secret Org', subscriptionType: 'max', loginExpiresAt: '2026-12-15T20:10:40.922Z', planTier: 'max_5x' });
+  const now = Date.parse('2026-11-16T00:00:00Z');
+  const r = L.parseAuthStatus(raw, now);
+  assert.deepStrictEqual(r, { loggedIn: true, plan: 'max', expiresAt: '2026-12-15', daysLeft: 29, state: 'ok' });
+  const dump = JSON.stringify(r);
+  for (const leak of ['secret', 'example.com', 'org-1234', 'Secret Org', 'email', 'orgId', 'orgName']) assert.ok(!dump.includes(leak), leak);
+  assert.deepStrictEqual(Object.keys(r).sort(), ['daysLeft', 'expiresAt', 'loggedIn', 'plan', 'state']);
+  const soon = L.parseAuthStatus(JSON.stringify({ loggedIn: true, subscriptionType: 'pro', loginExpiresAt: '2026-11-18T00:00:00Z' }), now);
+  assert.strictEqual(soon.state, 'soon'); assert.strictEqual(soon.daysLeft, 2);
+  assert.strictEqual(L.parseAuthStatus(JSON.stringify({ loggedIn: true, loginExpiresAt: '2026-11-10T00:00:00Z' }), now).state, 'expired');
+  assert.strictEqual(L.parseAuthStatus(JSON.stringify({ loggedIn: true }), now).expiresAt, null);
+  const out = L.parseAuthStatus(JSON.stringify({ loggedIn: false, email: 'a@b.c', orgName: 'O' }), now);
+  assert.deepStrictEqual(out, { loggedIn: false, plan: null, expiresAt: null, daysLeft: null, state: 'out' });
+  assert.strictEqual(L.parseAuthStatus(JSON.stringify({ loggedIn: true, subscriptionType: 'a@b.c injected<script>' }), now).plan, '?'); // 플랜 문자열 화이트리스트
+  for (const bad of ['', 'nope', '{}', '[]', '{"loggedIn":"yes"}', undefined, 'x'.repeat(70000)]) assert.strictEqual(L.parseAuthStatus(bad, now), null);
+});
+
+// ---- 출력 정리 ----
+t('cleanBlock·parseInstallSections', () => {
+  const dirty = '\x1b[31m빨강\x1b[0m\n제어\u0007문자‮끝\n' + 'x'.repeat(500) + '\n\n\n\n다음';
+  const c = L.cleanBlock(dirty);
+  assert.ok(!/[\x1b\u0007‮]/.test(c)); assert.ok(c.startsWith('빨강\n제어문자끝\n'));
+  assert.ok(c.split('\n').every((l) => [...l].length <= 200)); assert.ok(!/\n{3}/.test(c));
+  assert.ok(L.cleanBlock('줄\n'.repeat(5000), 100).length <= 102);
+  assert.strictEqual(L.cleanBlock(5), '');
+  assert.deepStrictEqual(L.parseInstallSections('\n== 요구사항 확인\n  ok x\n\n== SessionEnd 훅 등록 (~/.claude/settings.json)\n== 끝\n'), ['요구사항 확인', 'SessionEnd 훅 등록 (~/.claude/settings.json)']);
+});
+t('sanitizeUpdate', () => {
+  const r = L.sanitizeUpdate({ status: 'available', current: '0.1.0', latest: '0.2.0', notes: '노트‮\n' + '가'.repeat(900), repoBehind: 1, message: 'm\x1b[31m', evil: 'x' }, '0.1.0');
+  assert.deepStrictEqual(Object.keys(r).sort(), ['current', 'latest', 'message', 'notes', 'repoBehind', 'status']);
+  assert.ok([...r.notes].length <= 600 && !r.notes.includes('‮')); assert.strictEqual(r.message, 'm');
+  assert.strictEqual(L.sanitizeUpdate({ status: 'bogus' }, '0.1.0').status, 'error');
+  assert.strictEqual(L.sanitizeUpdate(null, '0.1.0').current, '0.1.0');
+  assert.strictEqual(L.sanitizeUpdate({ status: 'none', latest: '<script>' }, '1').latest, undefined);
+});
+
+// ---- 시스템 설정 허용 목록 ----
+t('설정 창 딥링크 허용 목록', () => {
+  assert.deepStrictEqual(Object.keys(L.SETTINGS_PANES).sort(), ['accessibility', 'automation', 'calendars', 'screen']);
+  for (const k of Object.keys(L.SETTINGS_PANES)) assert.ok(L.settingsPaneUrl(k).startsWith('x-apple.systempreferences:'));
+  for (const bad of ['', 'unknown', 'https://evil.example', 'file:///etc/passwd', 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera', '__proto__', 'constructor', 'toString', 'hasOwnProperty', null, undefined, 3, {}, ['accessibility']]) assert.strictEqual(L.settingsPaneUrl(bad), null, String(bad));
+});
+
+// ---- 캘린더 ----
+t('parseCalendarOutput', () => {
+  const US = '\x1f'; const RS = '\x1e';
+  const now = new Date(2026, 10, 30, 9, 0); // 11/30 → 내일은 12/1(월 경계)
+  const rec = (d, tm, fl, ti) => [d, tm, fl, ti].join(US) + RS;
+  const out = [
+    rec('2026-12-01', '09:00', '0', '내일 회의'),
+    rec('2026-11-30', '14:30', '0', '점심 후 ‮미팅​'),
+    rec('2026-11-30', '', '1', '종일 일정'),
+    rec('2026-11-30', '08:00', '0', '아침'),
+    rec('2026-11-29', '08:00', '0', '어제(제외)'),
+    rec('2026-12-02', '08:00', '0', '모레(제외)'),
+    rec('2026-11-30', '14:30', '0', '점심 후 미팅'),         // 정리 후 중복
+    rec('2026-11-30', '25:00', '0', '나쁜 시각'),
+    rec('2026-11-30', '10:00', '2', '나쁜 플래그'),
+    rec('2026-11-30', '', '1', '   '),                       // 빈 제목
+    rec('2026-11-30', '10:00', '0', 'a' + US + 'b'),          // 필드 수 초과
+    rec('2026-11-30', '11:00', '0', 'ESC\u001b[2J\r\n제목'),
+    '\n',
+  ].join('');
+  const r = L.parseCalendarOutput(out, now);
+  assert.deepStrictEqual(r.map((e) => [e.day, e.allDay, e.time, e.title]), [
+    ['today', true, '', '종일 일정'], ['today', false, '08:00', '아침'], ['today', false, '11:00', 'ESC[2J제목'],
+    ['today', false, '14:30', '점심 후 미팅'], ['tomorrow', false, '09:00', '내일 회의'],
+  ]);
+  const many = Array.from({ length: 20 }, (_, i) => rec('2026-11-30', String(10 + (i % 10)) + ':' + String(i).padStart(2, '0'), '0', 'e' + i)).join('');
+  assert.strictEqual(L.parseCalendarOutput(many, now).length, 8);
+  assert.strictEqual([...L.parseCalendarOutput(rec('2026-11-30', '', '1', '가'.repeat(100)), now)[0].title].length, 60);
+  for (const bad of ['', 'garbage', undefined, 5, 'x'.repeat(300000)]) assert.deepStrictEqual(L.parseCalendarOutput(bad, now), []);
+  const t2 = L.parseCalendarOutput(rec('2026-02-28', '', '1', 'x'), new Date(2026, 1, 27));
+  assert.strictEqual(t2[0].day, 'tomorrow');
+});
+t('캘린더: 제목의 RS/US 로 만든 위조 레코드는 버려진다', () => {
+  const US = '\x1f'; const RS = '\x1e'; const now = new Date(2026, 10, 30, 9, 0);
+  const rec = (d, tm, fl, ti) => [d, tm, fl, ti].join(US) + RS;
+  // 제목에 US 를 넣으면 필드 수가 늘어 버려지고, 앞뒤 정상 레코드는 남는다
+  const out = rec('2026-11-30', '08:00', '0', '앞') + rec('2026-11-30', '09:00', '0', '악성' + US + '2026-11-30' + US + '' + US + '1' + US + '위조') + rec('2026-11-30', '10:00', '0', '뒤');
+  assert.deepStrictEqual(L.parseCalendarOutput(out, now).map((e) => e.title), ['앞', '뒤']);
+  // 스크립트는 제목에서 RS/US 를 제거하는 clean 핸들러를 거친다
+  const sc = L.CAL_SCRIPT.join('\n');
+  assert.ok(sc.includes('ASCII character 30') && sc.includes('text item delimiters') && sc.includes('my clean((summary of e) as text)'));
+});
+t('캘린더 스크립트는 고정 문자열 배열', () => {
+  assert.ok(Array.isArray(L.CAL_SCRIPT) && L.CAL_SCRIPT.every((l) => typeof l === 'string' && !/[\r\n]/.test(l)));
+  assert.ok(L.CAL_SCRIPT.includes('tell application "Calendar"'));
+  for (const l of ['ko', 'en']) assert.ok(/(반복 일정|Recurring events)/.test(I.t(l, 'set.cal.desc')));
+});
+
+// ---- i18n ----
+t('i18n 표 완전성(ko·en 키 일치, 자리표시자 일치)', () => {
+  const kk = Object.keys(I.STR.ko).sort(); const ek = Object.keys(I.STR.en).sort();
+  assert.deepStrictEqual(ek.filter((k) => !kk.includes(k)), [], 'en 에만 있음');
+  assert.deepStrictEqual(kk.filter((k) => !ek.includes(k)), [], 'ko 에만 있음');
+  const ph = (v) => [...new Set((Array.isArray(v) ? v.join(' ') : v).match(/\{\w+\}/g) || [])].sort().join();
+  for (const k of kk) {
+    for (const lg of I.LANGS) {
+      const v = I.STR[lg][k];
+      assert.ok(typeof v === 'string' ? v.length > 0 : Array.isArray(v) && v.length === 2 && v.every((x) => x.length > 0), lg + ':' + k);
+    }
+    assert.strictEqual(ph(I.STR.ko[k]), ph(I.STR.en[k]), '자리표시자 ' + k);
+  }
+  assert.ok(!/[가-힣]/.test(Object.entries(I.STR.en).filter(([k]) => !k.startsWith('lang.')).map(([, v]) => [].concat(v).join(' ')).join(' ')), '영어 표에 한글이 남음');
+});
+t('i18n t(): 치환·복수·대체', () => {
+  assert.strictEqual(I.t('en', 'growth.left', { n: 1 }), 'Growth · 1 memory');
+  assert.strictEqual(I.t('en', 'growth.left', { n: 2 }), 'Growth · 2 memories');
+  assert.strictEqual(I.t('ko', 'growth.left', { n: 1 }), '성장도 · 기억 1개');
+  assert.strictEqual(I.t('xx', 'app.title'), '마루');
+  assert.strictEqual(I.t('en', 'no.such.key'), 'no.such.key');
+  assert.strictEqual(I.t('en', 'batt', {}), 'Battery {p}%');
+  assert.strictEqual(I.t('en', '__proto__'), '__proto__');
+});
+t('화면이 쓰는 키가 표에 모두 있다', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8') + fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8') + fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+  const used = new Set();
+  for (const m of src.matchAll(/\bT\('([a-z][\w.-]*)'/g)) used.add(m[1]);
+  for (const m of src.matchAll(/\btr\('([a-z][\w.-]*)'/g)) used.add(m[1]);
+  for (const m of src.matchAll(/data-i18n(?:-aria)?="([^"]+)"/g)) used.add(m[1]);
+  for (const m of src.matchAll(/\brow\('\w+',\s*'\w+',\s*'([\w.-]+)'/g)) used.add(m[1]);
+  for (const m of src.matchAll(/'(copyLogin|install|open[A-Z]\w+)'/g)) used.add('act.' + m[1]); // 행 동작 버튼 문구
+  assert.ok(used.size > 40);
+  for (const k of used) if (!k.endsWith('.')) assert.ok(Object.prototype.hasOwnProperty.call(I.STR.ko, k), '표에 없음: ' + k);
+});
+fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));

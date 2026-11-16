@@ -9,7 +9,7 @@
     "test": "node test.js",
     "rebuild": "DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-rebuild -f -w node-pty",
     "postinstall": "DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-rebuild -f -w node-pty",
-    "dist": "CSC_IDENTITY_AUTO_DISCOVERY=false DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-builder --mac dmg --arm64"
+    "dist": "CSC_IDENTITY_AUTO_DISCOVERY=false DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-builder --mac dmg --arm64 && node tools/verify-bundle.js"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.1",
@@ -34,6 +34,8 @@
       "main.js",
       "preload.js",
       "lib.js",
+      "i18n.js",
+      "updater.js",
       "renderer/**",
       "package.json",
       "!**/node_modules/node-pty/{src,deps,third_party,scripts,typings,binding.gyp,README.md}/**",

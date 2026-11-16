@@ -9,11 +9,11 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="app">
+<div class="app" id="app">
   <header class="top">
     <div class="brand">
       <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="15" fill="none" stroke="#FF8A2A" stroke-width="2"/><circle cx="17" cy="17" r="9" fill="none" stroke="#FF8A2A" stroke-width="1.5" stroke-dasharray="4 3"/><circle cx="17" cy="17" r="4" fill="#FF8A2A"/></svg>
-      <div class="col"><span class="logo">MARU</span><span class="sub">총괄 매니저 · 온라인</span></div>
+      <div class="col"><span class="logo">MARU</span><span class="sub" data-i18n="brand.sub">총괄 매니저 · 온라인</span></div>
     </div>
     <div class="growth">
       <span class="lv" id="lv">LV 1</span>
@@ -29,17 +29,24 @@
     </div>
   </header>
 
-  <div id="root-missing" class="warn" role="alert" hidden>마루 저장소를 찾지 못했습니다. ~/.config/maru/root 에 경로를 적어 주세요.</div>
+  <div id="root-missing" class="warn" role="alert" data-i18n="root.missing" hidden>마루 저장소를 찾지 못했습니다. ~/.config/maru/root 에 경로를 적어 주세요.</div>
   <div class="cols">
-    <nav class="left" aria-label="작업 공간">
+    <nav class="left" aria-label="작업 공간" data-i18n-aria="nav.ws.aria">
       <section class="card">
-        <h2 class="eyebrow">작업 공간</h2>
+        <h2 class="eyebrow" data-i18n="ws.eyebrow">작업 공간</h2>
         <div id="workspaces" class="stack"></div>
       </section>
       <section class="card">
-        <h2 class="eyebrow">파티</h2>
+        <h2 class="eyebrow" data-i18n="party.eyebrow">파티</h2>
         <div id="party" class="stack gap10"></div>
       </section>
+      <div class="userbar" id="userbar">
+        <button type="button" class="chip-user" id="user-chip" aria-haspopup="menu" aria-expanded="false" aria-controls="user-menu" data-i18n-aria="user.chip.aria" aria-label="사용자 메뉴">
+          <svg class="avatar" width="30" height="30" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="15" fill="#2A1A0C" stroke="#FF8A2A" stroke-width="2"/><circle cx="17" cy="17" r="10" fill="none" stroke="#FF8A2A" stroke-width="1" stroke-dasharray="3 3" opacity=".6"/><text id="avatar-ch" x="17" y="22.5" text-anchor="middle" font-size="15" font-weight="700" fill="#FF8A2A">?</text></svg>
+          <span class="uname" id="user-name"></span>
+        </button>
+        <button type="button" class="upgrade" id="upgrade-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-update"><span data-i18n="user.upgrade">업그레이드</span><span class="upd-dot" id="upd-dot" hidden></span></button>
+      </div>
     </nav>
 
     <main class="term-wrap">
@@ -47,7 +54,7 @@
       <div id="terminal"></div>
     </main>
 
-    <aside class="right-col" aria-label="마루 상태">
+    <aside class="right-col" aria-label="마루 상태" data-i18n-aria="right.aria">
       <section class="card core">
         <svg width="132" height="132" viewBox="0 0 220 220" role="img" id="core" aria-label="마루 코어: 대기">
           <circle cx="110" cy="110" r="100" fill="none" stroke="#2B2119" stroke-width="2"/>
@@ -64,27 +71,78 @@
       </section>
 
       <section class="card">
-        <div class="head"><h2 class="title">오늘 할 일</h2><span class="hint">회고가 고른 추천</span></div>
+        <div class="head"><h2 class="title" data-i18n="todo.title">오늘 할 일</h2><span class="hint" data-i18n="todo.hint">회고가 고른 추천</span></div>
+        <div id="cal-group" class="stack gap6" hidden></div>
         <div id="quests" class="stack gap6"></div>
         <div id="quest-note" class="empty" role="status"></div>
       </section>
 
       <section class="card">
-        <div class="head"><h2 class="title">획득한 스킬</h2><span class="hint" id="skills-count"></span></div>
+        <div class="head"><h2 class="title" data-i18n="skills.title">획득한 스킬</h2><span class="hint" id="skills-count"></span></div>
         <div id="skills" class="chips"></div>
       </section>
 
       <section class="card">
-        <h2 class="title">밤사이 브리핑</h2>
+        <h2 class="title" data-i18n="brief.title">밤사이 브리핑</h2>
         <div id="briefing" class="stack gap8"></div>
       </section>
     </aside>
   </div>
 </div>
+
+<!-- 사용자 메뉴: 칩 위로 열린다 -->
+<div id="user-menu" class="pop menu" role="menu" aria-labelledby="user-chip" hidden></div>
+
+<!-- 업그레이드 패널 -->
+<div id="pop-update" class="pop upd" role="dialog" aria-labelledby="upd-title" hidden>
+  <h2 class="pop-title" id="upd-title" data-i18n="upd.title">업그레이드</h2>
+  <div class="upd-cur" id="upd-cur"></div>
+  <div class="upd-msg" id="upd-notice" role="status" hidden></div>
+  <div class="upd-msg" id="upd-msg" role="status"></div>
+  <pre class="upd-notes" id="upd-notes" hidden></pre>
+  <div class="bar upd-bar" id="upd-bar" hidden><div class="bar-fill" id="upd-bar-fill"></div></div>
+  <div class="btn-row" id="upd-actions"></div>
+</div>
+
+<!-- 모달: 첫 실행 / 이름 바꾸기 -->
+<div class="backdrop" id="dlg-name" hidden>
+  <div class="dialog narrow" role="dialog" aria-modal="true" aria-labelledby="name-title">
+    <h2 class="dlg-title serif" id="name-title"></h2>
+    <label class="field"><span class="lbl" data-i18n="ob.name.label">이름</span>
+      <input id="name-input" type="text" autocomplete="off" spellcheck="false" maxlength="40" aria-describedby="name-hint name-err"></label>
+    <div class="hint" id="name-hint" data-i18n="ob.name.hint">1~24자</div>
+    <div class="field" id="name-lang-wrap"><span class="lbl" id="name-lang-lbl" data-i18n="ob.lang">언어</span>
+      <div class="seg" id="name-lang" role="radiogroup" aria-labelledby="name-lang-lbl"></div></div>
+    <div class="err" id="name-err" role="alert"></div>
+    <div class="btn-row"><button type="button" class="btn ghost" id="name-cancel" data-i18n="common.cancel">취소</button><button type="button" class="btn primary" id="name-ok"></button></div>
+  </div>
+</div>
+
+<!-- 모달: 설정 -->
+<div class="backdrop" id="dlg-settings" hidden>
+  <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="set-title">
+    <div class="dlg-head"><h2 class="dlg-title serif" id="set-title" data-i18n="set.title">설정</h2>
+      <div class="btn-row"><button type="button" class="btn" id="set-recheck" data-i18n="set.recheck">다시 확인</button><button type="button" class="btn ghost" id="set-close" data-i18n="common.close">닫기</button></div></div>
+    <div class="rows" id="set-rows" role="list"></div>
+    <div class="foot" id="set-foot" data-i18n="set.footer"></div>
+  </div>
+</div>
+
+<!-- 모달: 확인 -->
+<div class="backdrop" id="dlg-confirm" hidden>
+  <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="cf-title" aria-describedby="cf-note">
+    <h2 class="dlg-title serif" id="cf-title"></h2>
+    <div class="hint" id="cf-note"></div>
+    <pre class="out" id="cf-out" tabindex="0"></pre>
+    <div class="btn-row"><button type="button" class="btn ghost" id="cf-cancel"></button><button type="button" class="btn primary" id="cf-ok"></button></div>
+  </div>
+</div>
+
 <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
 <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
 <script src="../node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
 <script src="../lib.js"></script>
+<script src="../i18n.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>
