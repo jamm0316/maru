@@ -30,6 +30,24 @@ for (const f of ['install.sh', 'bin/maru', 'scripts/reflect.sh']) {
     if (st.isDirectory()) walk(p, r);
   }
 })(payload, '');
+// 5) 빌더의 홈 경로/사용자명이 번들 어디에도 남아 있으면 안 된다(공개 배포물 프라이버시)
+{
+  const home = require('os').homedir();
+  const needles = [home, path.dirname(home) + '/' + path.basename(home)].map((s) => Buffer.from(s));
+  const hits = [];
+  (function scan(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) scan(p);
+      else if (e.isFile()) {
+        const b = fs.readFileSync(p);
+        if (needles.some((n) => b.includes(n))) hits.push(path.relative(bundle, p));
+      }
+    }
+  })(bundle);
+  if (hits.length) fail('builder home path found in:\n  ' + hits.join('\n  '));
+  console.log('home-path guard OK');
+}
 try {
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', bundle], { stdio: 'inherit' });
   console.log('codesign verify OK:', bundle);
