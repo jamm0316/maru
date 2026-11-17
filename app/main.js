@@ -388,7 +388,7 @@ function panels() {
     lastReflect: st.lastReflect || null,
     lastDream: st.lastDream || null,
     pendingSkillProposals: typeof st.pendingSkillProposals === 'number' ? st.pendingSkillProposals : 0,
-    todos: cache.todos,
+    todos: cache.todos.map((t) => { const h = L.todoSrcHint(L.findTodoSrc(srcCache.get(), t)); return h ? { ...t, src: h } : t; }), // src: 폴더 이름·시각만(경로 전체는 보내지 않는다)
     projects: proj.view, // 목록은 가볍게(요약만). 상세는 projects:detail 로 요청 시
     skills: cache.skills,
     inbox: inboxView(),
@@ -405,12 +405,9 @@ function panels() {
 // ---- pty (작업 공간마다 하나) ----
 const FX_DEFS = [{ name: 'blog', state: 'busy', start: true }, { name: 'maru-app', state: 'waiting', start: true }, { name: 'notes', state: 'idle', start: false }]; // 시험 전용 가짜 작업 공간
 const SMOKE_LINE = 'maru-ok 한글 명조 정렬 테스트 가나다라마바사';
-function trackBracketed(w, d) {
-  const s = w.seqTail + d;
-  const h = s.lastIndexOf('\x1b[?2004h');
-  const l = s.lastIndexOf('\x1b[?2004l');
-  if (h > l) w.bracketed = true; else if (l > h) w.bracketed = false;
-  w.seqTail = s.slice(-7); // 시퀀스 길이(8)보다 짧게 남겨 중복 처리 방지
+function trackBracketed(w, d) { // 순서·청크 경계 처리는 lib.js 의 bpStep(순수 함수, 시험 대상)
+  const n = L.bpStep({ tail: w.seqTail, bracketed: w.bracketed, awaitClaude: w.awaitClaude, sawOff: w.sawOff, claudeUp: w.claudeUp }, d);
+  w.seqTail = n.tail; w.bracketed = n.bracketed; w.sawOff = n.sawOff; w.claudeUp = n.claudeUp;
 }
 function sendToRenderer(ch, ...args) { if (win && !win.isDestroyed()) win.webContents.send(ch, ...args); }
 function writeFxState(w) {
@@ -432,6 +429,9 @@ function spawnPty(w, cols, rows) {
   } catch { w.exited = true; wsChanged(false); return false; }
   removeStateFile(w);
   w.sessionId = sid; w.term = self; w.exited = false; w.bracketed = false; w.seqTail = ''; w.lastOutputAt = 0; w.escAt = 0; w.subsCutoff = 0;
+  const resume = L.validSessionUuid(w.pendingResume) ? w.pendingResume : null; // 할 일 클릭이 정한 이어 열기 대상(검증된 uuid 만). 한 번만 쓴다(다시 시작은 새 세션)
+  w.resumeSid = resume; w.pendingResume = null;
+  w.awaitClaude = !!w.expectClaude; w.expectClaude = false; w.sawOff = false; w.claudeUp = false; w.typedN = 0;
   self.onData((d) => {
     if (w.term !== self) return;
     w.lastOutputAt = Date.now();
@@ -442,14 +442,14 @@ function spawnPty(w, cols, rows) {
   });
   self.onExit(({ exitCode }) => {
     if (w.term !== self) return;
-    w.term = null; w.bracketed = false; w.exited = true; removeStateFile(w);
+    w.term = null; w.bracketed = false; w.exited = true; w.resumeSid = null; w.claudeUp = false; removeStateFile(w); // 실행에 실패한 이어 열기 표시를 남기지 않는다
     sendToRenderer('pty:exit', w.id, exitCode);
     wsChanged(false);
   });
   // 스모크·시험에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
   if (w.fx) { self.write('echo ' + SMOKE_LINE + '; echo fixture-' + w.fx.name + '\r'); writeFxState(w); }
   else if (SMOKE) self.write('echo ' + SMOKE_LINE + '\r');
-  else if (ROOT) self.write(L.claudeLaunchCommand(sid, claudeWrapper())); // 래퍼가 있으면 스쿼드를 실은 claude, 없으면 그냥 claude
+  else if (ROOT) { const cmd = L.claudeLaunchCommand(sid, claudeWrapper(), resume); if (cmd) self.write(cmd); } // 래퍼가 있으면 스쿼드를 실은 claude, 없으면 그냥 claude. 이어 열기면 --resume <uuid>
   wsChanged(false);
   return true;
 }
@@ -484,7 +484,8 @@ function saveWsNow() {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (!PERSIST || !ROOT) return;
   const order = wsOrder();
-  L.saveWorkspaces(wsFile(), order.map((w) => ({ cwd: w.cwd, title: w.title })), order.findIndex((w) => w.id === activeId)); // 사용 불가 항목도 그대로 둔다
+  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, transient: !!w.resumed })), activeId); // 이어 열기로 띄운 임시 작업 공간은 저장하지 않는다(다시 켜면 새 claude 로 쌓인다)
+  if (keep) L.saveWorkspaces(wsFile(), keep.list, keep.active); // 사용 불가 항목도 그대로 둔다
 }
 function saveWsLater() { if (!saveTimer) saveTimer = setTimeout(saveWsNow, 1000); } // 활성 전환은 1초 모아서 저장
 const saveWs = saveWsNow;
@@ -989,6 +990,7 @@ ipcMain.handle('pty:restart', (e, id, cols, rows) => {
 ipcMain.on('pty:write', (e, id, data) => {
   const w = wsFrom(e, id);
   if (!w || typeof data !== 'string' || data.length > 1 << 20 || !w.term) return;
+  if (L.isUserInput(data)) w.typedN = (w.typedN || 0) + 1; // 터미널이 스스로 보내는 응답은 입력으로 세지 않는다
   w.term.write(data);
 });
 // 사용자가 이 작업 공간 터미널에서 Esc 를 눌렀다(렌더러가 신뢰된 keydown 만 보낸다). busy/waiting 일 때만 시각을 적는다. 상태 파일은 쓰지 않는다
@@ -1020,6 +1022,130 @@ ipcMain.handle('quest:fill', (e, id, index, shown) => {
   if (!item.prompt) return { ok: false, reason: 'no-prompt' }; // 사용자가 직접 할 일
   return writePrompt(w, item.prompt);
 });
+// ---- 할 일 클릭 -> 원래 세션으로 이동 + 입력줄에 채우기(Enter 는 보내지 않는다) ----
+// 렌더러는 항목의 정체(index + shown)만 보낸다. 출처(data/todo-src.txt)·세션·폴더·기록 파일은 모두 main 이 파일에서 다시 확인한다.
+const todoSrcFile = () => path.join(ROOT, 'data', 'todo-src.txt');
+const readSrcEntries = () => (ROOT ? L.readTodoSrcFile(todoSrcFile(), nowSec(), process.getuid()) : []);
+const srcCache = L.ttlCache(3000, readSrcEntries); // 화면 힌트용(클릭 때는 항상 새로 읽는다)
+const projectsDirs = () => {
+  const base = path.join(claudeDir(), 'projects'); const out = [base];
+  try { const r = fs.realpathSync(base); if (r !== base) out.push(r); } catch { /* 없음 */ }
+  return out;
+};
+// 열려 있는 작업 공간 -> Claude 세션 uuid(훅의 transcript_path 가 우선; --resume 으로 띄운 uuid 는 lib.js sessionUuidOf 의 조건 안에서만)
+function wsSessionUuid(w) {
+  if (!w || !w.term) return null;
+  const dirs = projectsDirs();
+  const rec = readAgentState(w);
+  return L.sessionUuidOf({
+    hookSid: rec && rec.transcript ? L.transcriptSessionId(rec.transcript, dirs) : null,
+    lastSid: w.lastTranscript ? L.transcriptSessionId(w.lastTranscript, dirs) : null,
+    resumeSid: w.resumeSid, hasState: !!rec, typed: (w.typedN || 0) > 0,
+  });
+}
+function openWorkspacesForDecision() {
+  return wsOrder().filter((w) => w.term).map((w) => {
+    const rec = readAgentState(w);
+    return { id: w.id, sid: wsSessionUuid(w), atMs: Math.max(rec && Number.isFinite(rec.atMs) ? rec.atMs : 0, w.lastOutputAt || 0), live: true };
+  }).filter((x) => x.sid);
+}
+const decisionFs = { lstat: (p) => fs.lstatSync(p), stat: (p) => fs.statSync(p), realpath: (p) => fs.realpathSync(p) };
+const pendingFills = new Map(); // token -> { wsId, gen, text, at }: 시간 안에 못 채웠을 때 "채우기" 로 다시 시도할 문장(main 이 만든 값만). gen = 그 pty 의 앱 세션 id
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const READY_TIMEOUT_MS = 20000; const READY_EXISTING_MS = 3000; const READY_POLL_MS = 250; // 새로 연 작업 공간은 20초, 이미 떠 있던 작업 공간은 3초(입력줄이 아니면 오래 기다릴 이유가 없다)
+// 채우기 전 마지막 확인: 에이전트가 일하는 중이면 채우지 않는다
+const agentBusy = (w) => { const st = wsState(w); return st === 'busy' || st === 'waiting'; };
+function stashFill(w, text, reason) {
+  const token = crypto.randomBytes(8).toString('hex');
+  if (pendingFills.size >= 5) pendingFills.delete(pendingFills.keys().next().value);
+  pendingFills.set(token, { wsId: w.id, gen: w.sessionId || '', text, at: Date.now() });
+  return { ok: true, filled: false, reason, token, text };
+}
+// w 의 입력줄이 준비될 때까지 기다렸다가 채운다. 판단은 lib.js fillStep(순수). claudeOnly: 우리가 연 작업 공간 — Claude Code 가 입력을 받기 시작한 뒤에만.
+async function fillWhenReady(w, text, claudeOnly, timeoutMs = READY_TIMEOUT_MS) {
+  const t0 = Date.now(); const typed0 = w.typedN || 0;
+  for (;;) {
+    const exists = wss.get(w.id) === w;
+    const d = L.fillStep({
+      elapsedMs: Date.now() - t0, timeoutMs, exists, active: activeId === w.id, hasTerm: !!w.term, state: exists ? wsState(w) : 'exited', claudeOnly,
+      claudeUp: w.claudeUp === true, bracketed: w.bracketed === true, quietMs: Date.now() - (w.lastOutputAt || 0), procName: termProc(w), typed: (w.typedN || 0) > typed0,
+    });
+    if (d.do === 'abort') return { ok: false, reason: d.reason };
+    if (d.do === 'busy') return { ok: true, filled: false, reason: 'agent-busy' };
+    if (d.do === 'cancel') return { ok: true, filled: false, reason: 'typed' }; // 기다리는 사이 사용자가 입력했다: 덧붙이지 않는다
+    if (d.do === 'stash') return stashFill(w, text, d.reason);
+    if (d.do === 'fill') { const r = writePrompt(w, text); return r.ok ? { ok: true, filled: true } : stashFill(w, text, r.reason || 'not-ready'); }
+    await delay(READY_POLL_MS);
+  }
+}
+// 원래 세션을 쓸 수 없을 때: 활성 마루 작업 공간(없으면 다른 마루 작업 공간, 그것도 없으면 새로 열어)에 채운다
+async function fillNewSession(text, why, canForce) {
+  let w = wsOf(activeId);
+  if (!(w && w.term && isMaruWs(w))) {
+    w = wsOrder().find((x) => x.term && isMaruWs(x)) || null;
+    if (w) activate(w.id);
+  }
+  let claudeOnly = false;
+  if (!w) {
+    if (!ROOT || !dirOk(ROOT)) return { ok: false, reason: 'no-maru' };
+    if (wss.size >= L.WS_MAX) return { ok: false, reason: 'max' };
+    if (!claudeFound()) return { ok: false, reason: 'not-ready' };
+    w = addWorkspace(fs.realpathSync(ROOT)); w.expectClaude = true; claudeOnly = true;
+    activeId = w.id; wsChanged(true);
+  }
+  const r = await fillWhenReady(w, text, claudeOnly, claudeOnly ? READY_TIMEOUT_MS : READY_EXISTING_MS);
+  return { ...r, mode: 'new', fallback: why, ...(canForce ? { canForce: true } : {}) };
+}
+async function openTodoFlow(item, text, choice) {
+  if (choice === 'new') return fillNewSession(text, null, false); // 오래된 세션 안내에서 사용자가 새 세션을 골랐다
+  const entries = readSrcEntries();
+  const dec = L.decideTodoOpen(L.findTodoSrc(entries, item), { projectsDir: projectsDirs()[0], nowMs: Date.now(), uid: process.getuid(), force: choice === 'original', workspaces: openWorkspacesForDecision(), fs: decisionFs });
+  if (dec.action === 'switch') {
+    const w = wsOf(dec.wsId);
+    if (!w) return { ok: false, reason: 'stale' };
+    activate(w.id);
+    return { mode: 'switched', ...(await fillWhenReady(w, text, false, READY_EXISTING_MS)) };
+  }
+  if (dec.action === 'resume') {
+    if (wss.size >= L.WS_MAX) return { ok: false, reason: 'max' };
+    if (!claudeFound()) return { ok: false, reason: 'not-ready' };
+    if (dec.recent && !(await confirmBox(tr('dlg.resumeLive.title'), tr('dlg.resumeLive.detail'), tr('dlg.resumeLive.ok')))) return { ok: false, reason: 'cancel' }; // 방금까지 쓴 세션: 다른 곳에서 열려 있을 수 있다
+    if (wss.size >= L.WS_MAX) return { ok: false, reason: 'max' };
+    let real = null; try { real = fs.realpathSync(dec.cwd); } catch { real = null; }
+    if (!real || !dirOk(real)) return fillNewSession(text, 'no-folder', false);
+    const w = addWorkspace(real); w.pendingResume = dec.sid; w.expectClaude = true; w.resumed = true; // pty 는 렌더러가 화면에 올릴 때 시작된다(spawnPty 가 --resume 을 붙인다). resumed: 저장하지 않는 임시 작업 공간
+    activeId = w.id; wsChanged(true);
+    return { mode: 'resumed', ...(await fillWhenReady(w, text, true)) };
+  }
+  if (dec.reason === 'too-old') return { ok: true, filled: false, mode: 'choose', reason: 'too-old' }; // 어디에도 채우지 않고 사용자가 고르게 한다
+  return fillNewSession(text, dec.reason, false);
+}
+let openingTodo = false;
+ipcMain.handle('todos:open', async (e, index, shown, choice) => {
+  if (!fromMain(e) || !int(index, 0, Math.max(0, cache.todos.length - 1)) || typeof shown !== 'string' || !(choice === undefined || choice === null || choice === 'new' || choice === 'original')) return { ok: false, reason: 'invalid' };
+  if (openingTodo || picking || closing || quitAsking || restarting) return { ok: false, reason: 'busy-ui' };
+  const item = L.matchTodo(cache.todos, index, shown);
+  if (!item) return { ok: false, reason: 'stale' };
+  if (!item.prompt) return { ok: false, reason: 'no-prompt' }; // 사용자가 직접 할 일
+  const text = L.cleanQuestText(item.prompt);
+  if (!text || !L.isSafeQuestStart(text)) return { ok: false, reason: 'unsafe-start' };
+  openingTodo = true;
+  try { return await openTodoFlow(item, text, choice || null); } catch { return { ok: false, reason: 'invalid' }; } finally { openingTodo = false; }
+});
+// 시간 안에 못 채운 문장을 사용자가 "채우기" 로 다시 시도: main 이 낸 토큰만 받고, 문장·대상은 main 이 기억한 값. 같은 안전장치(writePrompt)를 탄다
+ipcMain.handle('todos:retry-fill', (e, token) => {
+  if (!fromMain(e) || typeof token !== 'string' || token.length > 32) return { ok: false, reason: 'invalid' };
+  if (openingTodo || picking || closing || quitAsking || restarting) return { ok: false, reason: 'busy-ui' };
+  const p = pendingFills.get(token);
+  const w = p ? wsOf(p.wsId) : null;
+  const chk = L.retryCheck(p, { exists: !!w && wss.get(w.id) === w && !!w.term, gen: w ? (w.sessionId || '') : '' }, Date.now()); // 같은 pty 이고 5분 안일 때만
+  if (!chk.ok) { pendingFills.delete(token); return { ok: false, reason: 'stale' }; }
+  if (w.id !== activeId) activate(w.id); // 사용자가 직접 누른 것이므로 그 작업 공간으로 옮긴다
+  if (agentBusy(w)) return { ok: true, filled: false, reason: 'agent-busy' };
+  const r = writePrompt(w, p.text); // 셸 앞면·붙여넣기 모드 확인은 writePrompt 가 한다
+  if (r.ok) pendingFills.delete(token);
+  return r.ok ? { ok: true, filled: true } : { ok: false, reason: r.reason };
+});
 // 할 일 완료/안 함: 렌더러가 본 항목(shown)이 main 의 index 번 항목과 같을 때만. 기록하는 태그·제목은 항상 main 이 가진 항목의 값이다.
 ipcMain.handle('todos:mark', (e, index, shown, kind) => {
   if (!fromMain(e) || !int(index, 0, Math.max(0, cache.todos.length - 1)) || (kind !== 'done' && kind !== 'skip') || typeof shown !== 'string') return { ok: false, reason: 'invalid' };
@@ -1041,12 +1167,17 @@ ipcMain.handle('todos:undo', (e, id) => {
   return { ok: true };
 });
 // 입력줄에 한 줄을 채운다(자동 Enter 없음). 할 일 클릭과 프로젝트 "이어서 하기"가 같은 경로·같은 안전장치를 쓴다.
+const termProc = (w) => { try { return w.term && typeof w.term.process === 'string' ? w.term.process : ''; } catch { return ''; } };
+// 포그라운드가 셸·login 이면(claude 가 안 떠 있다) 어떤 경로로도 문장을 쓰지 않는다. 명시한 이름만 거부한다
+const shellFront = (w) => L.isShellProcessName(termProc(w));
 function writePrompt(w, raw) {
   if (!w.term) return { ok: false, reason: 'no-term' };
+  if (shellFront(w)) return { ok: false, reason: 'shell' };
   const text = L.cleanQuestText(raw);
   if (!text || !L.isSafeQuestStart(text)) return { ok: false, reason: 'unsafe-start' };
   if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 붙여넣기 모드가 꺼진 상태(선택 메뉴 등)에서는 쓰지 않는다. 셸 프롬프트도 켜져 있어 claude 입력줄인지까지는 가리지 못한다
   w.term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만
+  w.typedN = (w.typedN || 0) + 1;
   return { ok: true };
 }
 // 파일 끌어다 놓기: 렌더러(preload 의 webUtils)가 준 경로 문자열만 받는다. 활성 작업 공간에만, 파일 내용은 읽지 않는다.
@@ -1063,6 +1194,7 @@ ipcMain.handle('files:drop', (e, id, paths) => {
   }
   if (!w.term) return { ok: false, reason: 'no-term' };
   if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 붙여넣기 모드가 아니면 쓰지 않는다(writePrompt 와 같다)
+  if (shellFront(w)) return { ok: false, reason: 'shell' };
   const text = L.buildDropPaste(paths);
   if (!text) return { ok: false, reason: 'invalid' };
   w.term.write(text); // Enter 는 보내지 않는다
@@ -1307,7 +1439,12 @@ ipcMain.handle('projects:detail', (e, key) => {
   if (!fromMain(e)) return null;
   const s = findProject(key);
   if (!s) return null;
-  return L.buildProjectDetail({ summary: s, registry: proj.raw.registry, entries: proj.raw.entries, state: projState, todos: cache.todos, memories: projectMetas(), list: proj.list, today: todayStr() });
+  const d = L.buildProjectDetail({ summary: s, registry: proj.raw.registry, entries: proj.raw.entries, state: projState, todos: cache.todos, memories: projectMetas(), list: proj.list, today: todayStr() });
+  if (d && Array.isArray(d.todos)) { // 눌러서 원래 세션으로 갈 수 있는 항목 표시(프롬프트가 있을 때)와 출처 힌트
+    const src = srcCache.get();
+    d.todos = d.todos.map((t) => { const it = cache.todos[t.idx]; const h = it ? L.todoSrcHint(L.findTodoSrc(src, it)) : null; return { ...t, canOpen: !!(it && it.prompt), ...(h ? { src: h } : {}) }; });
+  }
+  return d;
 });
 function commitProjState(next) {
   if (!next || !L.projectStateFits(next)) return { ok: false, reason: 'size' }; // 읽기 상한을 넘는 상태는 쓰지 않는다(다음 읽기에서 손상으로 치워지므로)
@@ -1503,12 +1640,14 @@ ipcMain.handle('meet:start', async (e, id) => {
   if (!isMaruWs(w)) return { ok: false, reason: 'not-maru' };
   if (!w.term) return { ok: false, reason: 'no-term' };
   if (!w.bracketed) return { ok: false, reason: 'not-ready' };
+  if (shellFront(w)) return { ok: false, reason: 'shell' };
   const text = L.FIRST_MEETING_TEXT;
   const paste = L.firstMeetingPaste(text); // 고정 문장일 때만(일반 퀘스트 필터는 '/' 로 시작하는 문장을 거부한다)
   if (!paste) return { ok: false, reason: 'invalid' };
   if (!(await confirmBox(tr('meet.confirm.title'), tr('meet.confirm.detail', { text }), tr('meet.start')))) return { ok: false, reason: 'cancel' };
   if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' };
   if (!w.term || !w.bracketed) return { ok: false, reason: 'not-ready' };
+  if (shellFront(w)) return { ok: false, reason: 'shell' };
   w.term.write(paste); // Enter 는 보내지 않는다
   const r = { ok: true };
   if (r.ok && setupState && !setupState.metAt) saveSetup({ metAt: nowIso() });

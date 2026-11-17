@@ -647,10 +647,42 @@ SID=$(mk_session 32); out=$(reflect_run); b=$(grep -c 'reflect 에서 반영' "$
 check "다음 reflect 에서 중복 반영 없음" [ "$b" = 1 ]
 rm -f "$DONEF" "$SEEN" "$DAYFILE" "$DATA/projects.txt"
 
+echo "== reflect.sh: 할 일 출처 세션(data/todo-src.txt)"
+SRCF=$DATA/todo-src.txt; rm -f "$SRCF" "$DATA/todos.txt"
+SCWD=/Users/someone/proj-src
+SSLUG=$(printf '%s' "$SCWD" | sed 's/[^A-Za-z0-9]/-/g')
+SSID=dddddddd-bbbb-4ccc-8ddd-000000000001
+mkdir -p "$PROJ/$SSLUG"
+"$REAL_PY" - "$PROJ/$SSLUG/$SSID.jsonl" "$SCWD" <<'PY'
+import json, sys
+with open(sys.argv[1], "w") as o:
+    for i in range(3):
+        o.write(json.dumps({"type": "user", "cwd": sys.argv[2], "message": {"role": "user", "content": "요청 %d" % i}}) + "\n")
+        o.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "답 %d" % i}]}}) + "\n")
+PY
+printf '%s\n' 'src|6|출처를 남길 일|이어서 해줘' > "$T/src-todos.txt"
+# 잠금 관찰: todo-src.txt 를 다루는 python3 호출(인자에 경로가 있다)이 일어날 때 회고 잠금(state/lock.d)이 있어야 한다
+mkdir -p "$T/spy"; printf '%s\n' '#!/bin/sh' "case \"\$*\" in *todo-src.txt*) [ -d \"$DATA/state/lock.d\" ] && echo held >> \"$T/spy/held\" || echo free >> \"$T/spy/held\";; esac" "exec \"$REAL_PY\" \"\$@\"" > "$T/spy/python3"; chmod +x "$T/spy/python3"
+rm -f "$T/spy/held"
+out=$(run_env "${FAKEENV[@]}" FAKE_TODOS="$T/src-todos.txt" PATH="$T/spy:$BASEPATH" -- bash "$REPO/scripts/reflect.sh" --run "$PROJ/$SSLUG/$SSID.jsonl" "$SSID"); rc=$?
+SRCLINE=$(cat "$SRCF" 2>/dev/null)
+checkall "회고가 세션 uuid·cwd·태그·제목 키를 출처로 남김" [ "$rc" -eq 0 ] '&&' [ "$(printf '%s' "$SRCLINE" | cut -d'|' -f2-5)" = "$SSID|$SCWD|src|출처를 남길 일" ]
+check "출처 파일 모드 600" [ "$(stat -f %Lp "$SRCF")" = 600 ]
+checkall "출처는 회고 잠금을 쥔 채로 씀(관찰한 모든 호출에서 잠금 있음)" [ -s "$T/spy/held" ] '&&' [ "$(sort -u "$T/spy/held")" = held ]
+check "끝나면 잠금 해제" [ ! -d "$DATA/state/lock.d" ]
+SRCBEFORE=$(cat "$SRCF")
+# 다른 폴더에서 시작한 transcript(디렉터리 이름이 cwd 의 slug 와 다름)는 출처를 만들지 않는다
+SSID2=dddddddd-bbbb-4ccc-8ddd-000000000002
+mkdir -p "$PROJ/-elsewhere"; cp "$PROJ/$SSLUG/$SSID.jsonl" "$PROJ/-elsewhere/$SSID2.jsonl"
+printf '%s\n' 'other|5|다른 폴더 일|p' > "$T/src-todos2.txt"
+out=$(run_env "${FAKEENV[@]}" FAKE_TODOS="$T/src-todos2.txt" -- bash "$REPO/scripts/reflect.sh" --run "$PROJ/-elsewhere/$SSID2.jsonl" "$SSID2"); rc=$?
+checkall "slug 가 다른 transcript 는 할 일만 반영하고 출처는 만들지 않음(기존 출처 유지)" [ "$rc" -eq 0 ] '&&' grep -q '^other|5|다른 폴더 일|p$' "$DATA/todos.txt" '&&' [ "$(cat "$SRCF")" = "$SRCBEFORE" ]
+rm -f "$SRCF" "$DATA/todos.txt"
+
 echo "== 가드"
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
 # 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
-check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
+check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name todo-src.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
 check "시험이 쓰는 데이터 폴더는 모두 임시 폴더 안" sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$DATA" "$T"
 echo
 if [ "$FAIL" = 0 ]; then echo "test-journal: OK ($N 항목)"; exit 0; else echo "test-journal: $FAIL/$N 실패"; exit 1; fi

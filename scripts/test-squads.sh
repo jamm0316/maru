@@ -272,9 +272,14 @@ args=$(cat "$T/claude.args" 2>/dev/null)
 a1=$(sed -n 1p "$T/claude.args"); a2=$(sed -n 2p "$T/claude.args")
 checkall "스쿼드가 있으면 claude --agents <JSON> 으로 exec" [ "$a1" = "--agents" ] '&&' [ "$(printf '%s' "$a2" | names_of | grep -c 'sq-q-lead')" = 1 ]
 check "뒤 인자를 그대로 전달" [ "$(tail -n 3 "$T/claude.args" | tr '\n' ' ')" = "-p hello --x " ]
+RID=aaaaaaaa-1111-4222-8333-444444444441
+rm -f "$T/claude.args"; run_env -- bash "$REPO/scripts/maru-claude.sh" --resume "$RID" >/dev/null
+checkall "이어 열기: 스쿼드가 있으면 claude --agents <JSON> --resume <uuid>" [ "$(sed -n 1p "$T/claude.args")" = "--agents" ] '&&' [ "$(tail -n 2 "$T/claude.args" | tr '\n' ' ')" = "--resume $RID " ] '&&' [ "$(grep -c -- '--fork-session' "$T/claude.args")" = 0 ]
 rm -rf "$B"/*; rm -f "$T/claude.args"
 run_env -- bash "$REPO/scripts/maru-claude.sh" -p hello >/dev/null
 check "스쿼드가 없으면 --agents 없이 claude 실행" [ "$(cat "$T/claude.args" | tr '\n' ' ')" = "-p hello " ]
+rm -f "$T/claude.args"; run_env -- bash "$REPO/scripts/maru-claude.sh" --resume "$RID" >/dev/null
+check "이어 열기: 스쿼드가 없어도 --resume <uuid> 만으로 실행" [ "$(cat "$T/claude.args" | tr '\n' ' ')" = "--resume $RID " ]
 mksquad "$B/q"; rm "$B/q/lead.md"; rm -f "$T/claude.args"
 run_env -- bash "$REPO/scripts/maru-claude.sh" >/dev/null
 checkall "스쿼드가 모두 거부돼도 마루는 뜸" [ -f "$T/claude.args" ] '&&' [ ! -s "$T/claude.args" ]

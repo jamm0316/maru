@@ -1350,19 +1350,19 @@ t('squadView·matchSubs·squadOpen: 모델 상속, 활동 매칭, 임시 줄, �
 });
 t('claudeLaunchCommand: 래퍼가 있으면 인용해 exec, 없거나 이상하면 claude', () => {
   const sid = 'abcd1234-aaaa';
-  assert.strictEqual(L.claudeLaunchCommand(sid, null), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude\r');
-  assert.strictEqual(L.claudeLaunchCommand(null, undefined), 'command -v claude >/dev/null && exec claude\r');
-  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh'), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh\r');
-  assert.strictEqual(L.claudeLaunchCommand(sid, '/my repo/a b$(x)`y`;&\'"/scripts/maru-claude.sh').split('exec ')[1], String.raw`/my\ repo/a\ b\$\(x\)\`y\`\;\&\'\"/scripts/maru-claude.sh` + '\r');
-  for (const bad of ['/r/a\nb', '/r/a\rb', '/r/a\u001bb', '/r/a\u202Eb', 'relative/x.sh', '', 5, '/' + 'a'.repeat(1030)]) assert.ok(L.claudeLaunchCommand(sid, bad).endsWith('exec claude\r'), String(bad).slice(0, 8)); // 개행·제어·bidi 가 든 경로는 쓰지 않는다
-  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/한글 폴더/scripts/maru-claude.sh').split('exec ')[1], '/r/한글\\ 폴더/scripts/maru-claude.sh\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, null), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(null, undefined), 'command -v claude >/dev/null && exec claude ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh'), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/my repo/a b$(x)`y`;&\'"/scripts/maru-claude.sh').split('exec ')[1], String.raw`/my\ repo/a\ b\$\(x\)\`y\`\;\&\'\"/scripts/maru-claude.sh` + ' ; exit 127\r');
+  for (const bad of ['/r/a\nb', '/r/a\rb', '/r/a\u001bb', '/r/a\u202Eb', 'relative/x.sh', '', 5, '/' + 'a'.repeat(1030)]) assert.ok(L.claudeLaunchCommand(sid, bad).endsWith('exec claude ; exit 127\r'), String(bad).slice(0, 8)); // 개행·제어·bidi 가 든 경로는 쓰지 않는다
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/한글 폴더/scripts/maru-claude.sh').split('exec ')[1], '/r/한글\\ 폴더/scripts/maru-claude.sh ; exit 127\r');
 });
 t('스쿼드 정적 검사: 래퍼 검사·python 도구 폴더·시간·크기 상한·60초 갱신', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
   assert.ok(/'\/Library\/Developer\/CommandLineTools\/usr\/bin\/python3'/.test(main) && !/'\/usr\/bin\/python3'/.test(main));
   assert.ok(/'-I', script, 'meta'\], \{ timeout: 3000, maxBuffer: L\.SQUAD_META_MAX_BYTES/.test(main) && L.SQUAD_META_MAX_BYTES === 256 * 1024);
   assert.ok(/setInterval\(refreshSquads, 60000\)/.test(main) && !/refreshSquads\(\)/.test(main.split('setInterval(() => {\n    if (TEST_FX)')[1] || ''), '1초 폴링에 넣지 않는다');
-  assert.ok(/lstatSync\(f\)[\s\S]{0,120}st\.isFile\(\) \|\| !safeOwned\(st\)[\s\S]{0,80}X_OK/.test(main) && /L\.claudeLaunchCommand\(sid, claudeWrapper\(\)\)/.test(main));
+  assert.ok(/lstatSync\(f\)[\s\S]{0,120}st\.isFile\(\) \|\| !safeOwned\(st\)[\s\S]{0,80}X_OK/.test(main) && /L\.claudeLaunchCommand\(sid, claudeWrapper\(\), resume\)/.test(main));
   assert.ok(!/exec claude/.test(main.replace(/\/\/.*$/gm, '')), 'exec claude 문자열은 lib 의 한 곳에만');
   assert.ok(/squadUser/.test(rd) && /aria-expanded/.test(rd) && !/innerHTML/.test(rd));
   for (const k of ['squad.eyebrow', 'squad.base', 'squad.personal', 'squad.head.aria', 'role.squadLead', 'squad.working', 'squad.working.n']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
@@ -2285,6 +2285,280 @@ t('앱 연결(소스 구조): fromMain·고정 문장·dev 전용 환경변수·
   const pk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).build.extraResources.map((e) => e.to);
   for (const x of ['payload/scripts', 'payload/prompts', 'payload/squads', 'payload/squads-en', 'payload/launchd', 'payload/bin', 'payload/install.sh', 'payload/uninstall.sh', 'payload/CLAUDE.md', 'payload/CLAUDE.en.md', 'payload/README.md', 'payload/.claude/agents', 'payload/.claude/skills', 'payload/.claude/settings.json']) assert.ok(pk.includes(x), x);
   assert.ok(!pk.some((p) => /data|\.git|settings\.local|cmux|payload\/app/.test(p)));
+});
+
+// ---- 할 일 -> 원래 세션 열기: 출처 파일 파싱·결정 함수·실행 명령·세션 매핑 ----
+const U1 = 'aaaaaaaa-1111-4222-8333-444444444441'; const U2 = 'bbbbbbbb-1111-4222-8333-444444444442'; const U3 = 'cccccccc-1111-4222-8333-444444444443';
+const NOWS = 1800000000;
+const srcLine = (o = {}) => [o.at ?? NOWS - 100, o.sid ?? U1, o.cwd ?? '/Users/me/proj-a', o.tag ?? 'maru', o.key ?? '첫 일'].join('|');
+t('parseTodoSrc: 정상 줄·키 규칙·슬러그', () => {
+  const r = L.parseTodoSrc(srcLine() + '\n' + srcLine({ tag: 'blog/post-1', key: 'hello world' }) + '\n', NOWS);
+  assert.deepStrictEqual(r.map((e) => [e.tag, e.project || null, e.key, e.sid, e.cwd]), [['maru', null, '첫 일', U1, '/Users/me/proj-a'], ['blog', 'blog/post-1', 'hello world', U1, '/Users/me/proj-a']]);
+  assert.strictEqual(L.findTodoSrc(r, { tag: 'blog', title: 'Hello   World' }).project, 'blog/post-1'); // 제목 키(공백 접기·소문자)로 맺는다
+  assert.strictEqual(L.findTodoSrc(r, { tag: 'maru', title: 'Hello World' }), null); // 다른 태그
+  assert.strictEqual(L.findTodoSrc(r, null), null);
+});
+t('parseTodoSrc: 깨진 줄·잘못된 uuid·상대 cwd·| · 제어 문자·시각 범위를 버림', () => {
+  const bad = [
+    'garbage', '', srcLine({ sid: 'not-a-uuid' }), srcLine({ sid: U1.toUpperCase() }), srcLine({ cwd: 'relative/dir' }), srcLine({ cwd: '/a/../b' }), srcLine({ cwd: '/a//b' }), srcLine({ cwd: '/a/b/' }), srcLine({ cwd: '/a/\u0007b' }), srcLine({ cwd: '/a/‮b' }),
+    srcLine({ tag: 'bad tag' }), srcLine({ tag: 'maru/BAD' }), srcLine({ tag: '' }), srcLine({ key: '' }), srcLine({ key: 'x\u0000y' }), srcLine({ key: 'k'.repeat(241) }),
+    srcLine({ at: NOWS - 31 * 86400 }), srcLine({ at: NOWS + 2 * 86400 }), srcLine({ at: 'abc' }), srcLine({ at: 12345 }), srcLine() + '|extra', 'a|b|c|d',
+  ];
+  assert.deepStrictEqual(L.parseTodoSrc(bad.join('\n'), NOWS), []);
+  assert.deepStrictEqual(L.parseTodoSrc(null, NOWS), []); assert.deepStrictEqual(L.parseTodoSrc('x', NaN), []);
+  assert.strictEqual(L.parseTodoSrc(srcLine({ at: NOWS + 3600 }), NOWS).length, 1); // 하루 안의 미래는 허용
+  assert.strictEqual(L.parseTodoSrc(srcLine({ at: NOWS - 29 * 86400 }), NOWS).length, 1);
+});
+t('parseTodoSrc: 같은 키가 여럿이면 가장 새 것(같으면 뒤의 것), 잘린 마지막 줄은 버림', () => {
+  const r = L.parseTodoSrc([srcLine({ at: NOWS - 10, sid: U2 }), srcLine({ at: NOWS - 500, sid: U3 }), srcLine({ at: NOWS - 10, sid: U1 })].join('\n'), NOWS);
+  assert.strictEqual(r.length, 1); assert.strictEqual(r[0].sid, U1); assert.strictEqual(r[0].at, NOWS - 10);
+  assert.strictEqual(L.parseTodoSrc(srcLine() + '\n' + srcLine({ tag: 'b', key: 'x' }).slice(0, 30), NOWS, true).length, 1);
+});
+t('readTodoSrcFile: 일반 파일·소유자·모드·크기를 검사하고 링크·FIFO·큰 파일은 []', () => {
+  const dir = fs.mkdtempSync(path.join(tmp, 'src-')); const f = path.join(dir, 'todo-src.txt'); const uid = process.getuid();
+  assert.deepStrictEqual(L.readTodoSrcFile(f, NOWS, uid), []); // 없음
+  fs.writeFileSync(f, srcLine() + '\n', { mode: 0o600 });
+  assert.strictEqual(L.readTodoSrcFile(f, NOWS, uid).length, 1);
+  assert.deepStrictEqual(L.readTodoSrcFile(f, NOWS, uid + 1), []); // 소유자가 다름
+  fs.chmodSync(f, 0o666); assert.deepStrictEqual(L.readTodoSrcFile(f, NOWS, uid), []); // 누구나 쓸 수 있음
+  fs.chmodSync(f, 0o600);
+  const link = path.join(dir, 'link.txt'); fs.symlinkSync(f, link); assert.deepStrictEqual(L.readTodoSrcFile(link, NOWS, uid), []);
+  const big = path.join(dir, 'big.txt'); fs.writeFileSync(big, 'x'.repeat(L.TODO_SRC_MAX_BYTES + 1), { mode: 0o600 }); assert.deepStrictEqual(L.readTodoSrcFile(big, NOWS, uid), []);
+  assert.deepStrictEqual(L.readTodoSrcFile(dir, NOWS, uid), []); // 폴더
+  fs.writeFileSync(f, srcLine() + '\n' + 'ÿþ\u0000garbage\n', { mode: 0o600 }); assert.strictEqual(L.readTodoSrcFile(f, NOWS, uid).length, 1); // 깨진 줄은 그 줄만
+});
+t('셸 textclean.py 의 TODO_SRC_* 상수와 같다', () => {
+  const py = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'textclean.py'), 'utf8');
+  const g = (k) => { const m = new RegExp('^' + k + '\\s*=\\s*([0-9_ *]+)', 'm').exec(py); assert.ok(m, k); return m[1].split('#')[0].split('*').map((x) => Number(x.replace(/[_ ]/g, ''))).reduce((a, b) => a * b, 1); };
+  assert.strictEqual(g('TODO_SRC_MAX_BYTES'), L.TODO_SRC_MAX_BYTES); assert.strictEqual(g('TODO_SRC_MAX_LINES'), L.TODO_SRC_MAX_LINES);
+  assert.strictEqual(g('TODO_SRC_TTL'), L.TODO_SRC_TTL_SEC); assert.strictEqual(g('TODO_SRC_CWD_MAX'), L.TODO_SRC_CWD_MAX);
+});
+t('todoSrcHint: 폴더 이름만(경로 전체·제어 문자 없음)', () => {
+  assert.deepStrictEqual(L.todoSrcHint({ cwd: '/Users/me/my proj', at: 5 }), { folder: 'my proj', at: 5 });
+  assert.strictEqual(L.todoSrcHint({ cwd: '/Users/me/' + '가'.repeat(40), at: 5 }).folder.length, 24);
+  assert.strictEqual(L.todoSrcHint(null), null);
+});
+// 결정 함수: 주입한 가짜 파일 시스템(읽기 전용)
+function fakeFs(spec) { // spec: { '<경로>': { kind: 'dir'|'file'|'link', mtimeMs, uid } }  (realpath 는 link 의 to 를 따름)
+  const mk = (e) => ({ isDirectory: () => e.kind === 'dir', isFile: () => e.kind === 'file', isSymbolicLink: () => e.kind === 'link', mtimeMs: e.mtimeMs, uid: e.uid ?? 501 });
+  return {
+    lstat: (p) => { if (!spec[p]) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return mk(spec[p]); },
+    stat: (p) => { if (!spec[p]) throw new Error('ENOENT'); return mk(spec[p].kind === 'link' ? spec[spec[p].to] : spec[p]); },
+    realpath: (p) => { if (!spec[p]) throw new Error('ENOENT'); return spec[p].kind === 'link' ? spec[p].to : p; },
+  };
+}
+const PD = '/h/.claude/projects'; const CWD = '/Users/me/proj-a';
+const TR = PD + '/-Users-me-proj-a/' + U1 + '.jsonl';
+const DNOW = 1800000000000;
+const dctx = (over = {}, spec = {}) => ({ projectsDir: PD, nowMs: DNOW, uid: 501, force: false, workspaces: [], fs: fakeFs({ [CWD]: { kind: 'dir' }, [TR]: { kind: 'file', mtimeMs: DNOW - 3600 * 1000 }, ...spec }), ...over });
+const dsrc = { sid: U1, cwd: CWD, tag: 'maru', key: '첫 일', at: NOWS };
+t('decideTodoOpen: 출처 없음·형식 오류는 새 세션', () => {
+  assert.deepStrictEqual(L.decideTodoOpen(null, dctx()), { action: 'new', reason: 'no-source' });
+  assert.deepStrictEqual(L.decideTodoOpen({ ...dsrc, sid: 'x' }, dctx()), { action: 'new', reason: 'bad-source' });
+  assert.deepStrictEqual(L.decideTodoOpen({ ...dsrc, cwd: 'rel' }, dctx()), { action: 'new', reason: 'bad-source' });
+  assert.deepStrictEqual(L.decideTodoOpen({ ...dsrc, cwd: '/a|b' }, dctx()), { action: 'new', reason: 'bad-source' });
+});
+t('decideTodoOpen: 열린 작업 공간이 있으면 그리로(여럿이면 가장 최근 활동), 닫힌 것은 제외', () => {
+  const ws = [{ id: 'w1', sid: U1, atMs: 100, live: true }, { id: 'w2', sid: U1, atMs: 900, live: true }, { id: 'w3', sid: U2, atMs: 5000, live: true }, { id: 'w4', sid: U1, atMs: 9999, live: false }];
+  assert.deepStrictEqual(L.decideTodoOpen(dsrc, dctx({ workspaces: ws })), { action: 'switch', wsId: 'w2' });
+  assert.deepStrictEqual(L.decideTodoOpen(dsrc, dctx({ workspaces: [{ id: 'a', sid: U1, atMs: NaN, live: true }, { id: 'b', sid: U1, atMs: 1, live: true }] })), { action: 'switch', wsId: 'b' });
+  // 폴더·기록이 사라졌어도 열려 있으면 그리로(파일 시스템을 보지 않는다)
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ workspaces: ws, fs: fakeFs({}) })).action, 'switch');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ workspaces: [{ id: 'w3', sid: U2, atMs: 1, live: true }] })).action, 'resume');
+});
+t('decideTodoOpen: 이어 열 수 있으면 resume(마지막 활동 시각 포함)', () => {
+  assert.deepStrictEqual(L.decideTodoOpen(dsrc, dctx()), { action: 'resume', sid: U1, cwd: CWD, lastMs: DNOW - 3600 * 1000, recent: false });
+});
+t('decideTodoOpen: 폴더 없음·링크·파일·소유자 다름 → no-folder', () => {
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ fs: fakeFs({ [TR]: { kind: 'file', mtimeMs: DNOW } }) })).reason, 'no-folder');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [CWD]: { kind: 'link', to: '/elsewhere' }, '/elsewhere': { kind: 'dir' } })).reason, 'no-folder');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [CWD]: { kind: 'file' } })).reason, 'no-folder');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [CWD]: { kind: 'dir', uid: 0 } })).reason, 'no-folder');
+});
+t('decideTodoOpen: 기록 파일 없음·링크·폴더 → no-transcript', () => {
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ fs: fakeFs({ [CWD]: { kind: 'dir' } }) })).reason, 'no-transcript');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [TR]: { kind: 'link', to: '/x' } })).reason, 'no-transcript');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [TR]: { kind: 'dir' } })).reason, 'no-transcript');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [TR]: { kind: 'file', mtimeMs: NaN } })).reason, 'no-transcript');
+  const other = { ...dsrc, sid: U2 }; // 다른 세션의 기록은 이 세션 것이 아님
+  assert.strictEqual(L.decideTodoOpen(other, dctx()).reason, 'no-transcript');
+});
+t('decideTodoOpen: 2일 넘은 세션은 기본으로 새 세션(+명시적 두 번째 동작), force 면 이어 열기', () => {
+  const old = { [TR]: { kind: 'file', mtimeMs: DNOW - (2 * 86400 + 60) * 1000 } };
+  assert.deepStrictEqual(L.decideTodoOpen(dsrc, dctx({}, old)), { action: 'new', reason: 'too-old', canForce: true });
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ force: true }, old)).action, 'resume');
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [TR]: { kind: 'file', mtimeMs: DNOW - (2 * 86400 - 60) * 1000 } })).action, 'resume'); // 경계 안
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ force: 'yes' }, old)).action, 'new'); // force 는 true 일 때만
+  // 폴더·기록 문제는 force 로도 못 넘는다
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ force: true, fs: fakeFs({ [CWD]: { kind: 'dir' } }) })).reason, 'no-transcript');
+});
+t('decideTodoOpen: 파일 시스템 예외·ctx 누락은 새 세션(던지지 않는다)', () => {
+  const thrower = { lstat: () => { throw new Error('boom'); }, stat: () => { throw new Error('boom'); }, realpath: () => { throw new Error('boom'); } };
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ fs: thrower })).reason, 'no-folder');
+  assert.strictEqual(L.decideTodoOpen(dsrc, null).reason, 'bad-source');
+  assert.strictEqual(L.decideTodoOpen(dsrc, { projectsDir: PD }).reason, 'bad-source');
+});
+t('decideTodoOpen: 실제 파일 시스템(임시 폴더)에서도 같은 판정', () => {
+  const root = fs.mkdtempSync(path.join(tmp, 'dec-')); const proj = path.join(root, 'work dir'); fs.mkdirSync(proj);
+  const pd = path.join(root, 'projects'); const slug = L.projectSlug(proj); fs.mkdirSync(path.join(pd, slug), { recursive: true });
+  const tf = path.join(pd, slug, U1 + '.jsonl'); fs.writeFileSync(tf, '{}\n');
+  const real = { lstat: fs.lstatSync, stat: fs.statSync, realpath: fs.realpathSync };
+  const c = { projectsDir: pd, nowMs: Date.now(), uid: process.getuid(), force: false, workspaces: [], fs: real };
+  assert.strictEqual(L.decideTodoOpen({ ...dsrc, cwd: proj }, c).action, 'resume');
+  fs.utimesSync(tf, new Date(Date.now() - 3 * 86400 * 1000), new Date(Date.now() - 3 * 86400 * 1000));
+  assert.strictEqual(L.decideTodoOpen({ ...dsrc, cwd: proj }, c).reason, 'too-old');
+  const ln = path.join(root, 'linked'); fs.symlinkSync(proj, ln);
+  assert.strictEqual(L.decideTodoOpen({ ...dsrc, cwd: ln }, c).reason, 'no-folder'); // 링크로 가리킨 폴더는 거부
+  fs.unlinkSync(tf); assert.strictEqual(L.decideTodoOpen({ ...dsrc, cwd: proj }, { ...c, force: true }).reason, 'no-transcript');
+  fs.rmSync(proj, { recursive: true }); assert.strictEqual(L.decideTodoOpen({ ...dsrc, cwd: proj }, c).reason, 'no-folder');
+});
+t('claudeLaunchCommand: 이어 열기(--resume <uuid>)는 검증된 uuid 만, 잘못된 값은 null', () => {
+  const sid = 'abcd1234-aaaa';
+  assert.strictEqual(L.claudeLaunchCommand(sid, null, U1), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude --resume ' + U1 + ' ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', U1), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh --resume ' + U1 + ' ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, null), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude ; exit 127\r'); // 인자 없으면 예전과 같다
+  assert.strictEqual(L.claudeLaunchCommand(sid, null, null), L.claudeLaunchCommand(sid, null));
+  for (const bad of ['', 'x', U1.toUpperCase(), U1 + ' ; rm -rf ~', U1 + '\n', '$(id)', '--fork-session', U1.slice(1), U1 + 'a', 5, {}, ['a'], '../' + U1]) assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', bad), null, JSON.stringify(bad));
+  assert.ok(!/fork-session|bypass|skip-permissions/.test(L.claudeLaunchCommand(sid, null, U1)));
+});
+t('transcriptSessionId: <projects>/<slug>/<uuid>.jsonl 만 세션 uuid 로 받는다', () => {
+  assert.strictEqual(L.transcriptSessionId(PD + '/-Users-me-a/' + U1 + '.jsonl', PD), U1);
+  assert.strictEqual(L.transcriptSessionId(PD + '/-Users-me-a/' + U1 + '.jsonl', [PD + '/', '/real/projects']), U1); // 끝 / 무시·여러 후보
+  assert.strictEqual(L.transcriptSessionId('/real/projects/-s/' + U2 + '.jsonl', [PD, '/real/projects']), U2);
+  const hostile = [
+    PD + '/-s/' + U1 + '.jsonl.evil', PD + '/-s/' + U1 + '.txt', PD + '/-s/' + U1.toUpperCase() + '.jsonl', PD + '/-s/agent-123.jsonl', PD + '/-s/' + U1 + '/subagents/agent-1.jsonl',
+    PD + '/../x/-s/' + U1 + '.jsonl', PD + '/-s/../' + U1 + '.jsonl', PD + '/./-s/' + U1 + '.jsonl', PD + '//-s/' + U1 + '.jsonl', '/other/projects/-s/' + U1 + '.jsonl', '/h/.claude/-s/' + U1 + '.jsonl',
+    PD + '/' + U1 + '.jsonl', PD + '/-s\n/' + U1 + '.jsonl', PD + '/-s/‮' + U1 + '.jsonl', 'projects/-s/' + U1 + '.jsonl', '', null, undefined, 5, PD + '/-s/' + 'a'.repeat(2000) + '.jsonl',
+    PD + '/-s/' + U1 + '.jsonl\u0000', PD + '/-s/.' + U1 + '.jsonl', PD + '/-s/xx' + U1 + '.jsonl',
+  ];
+  for (const h of hostile) assert.strictEqual(L.transcriptSessionId(h, PD), null, String(JSON.stringify(h)).slice(0, 60));
+  assert.strictEqual(L.transcriptSessionId(PD + '/-s/' + U1 + '.jsonl', ''), null); assert.strictEqual(L.transcriptSessionId(PD + '/-s/' + U1 + '.jsonl', ['/', 'rel']), null); assert.strictEqual(L.transcriptSessionId(PD + '/-s/' + U1 + '.jsonl', null), null);
+});
+t('parseAgentRecord → transcriptSessionId: 상태 파일에서 세션 uuid 를 꺼낸다', () => {
+  const rec = L.parseAgentRecord(JSON.stringify({ state: 'idle', at: '2026-01-01T00:00:00Z', transcript_path: PD + '/-s/' + U3 + '.jsonl' }));
+  assert.strictEqual(L.transcriptSessionId(rec.transcript, PD), U3);
+  assert.strictEqual(L.parseAgentRecord(JSON.stringify({ state: 'idle', transcript_path: 'rel/x.jsonl' })).transcript, undefined);
+});
+t('transcriptFileFor·projectSlug: 영숫자가 아닌 문자는 모두 -', () => {
+  assert.strictEqual(L.transcriptFileFor('/h/.claude/projects/', '/Users/me/my proj.v2', U1), '/h/.claude/projects/-Users-me-my-proj-v2/' + U1 + '.jsonl');
+});
+t('openNoticeKey: 알려진 사유만, 나머지는 invalid. ko/en 문구가 모두 있다', () => {
+  assert.strictEqual(L.openNoticeKey('too-old'), 'todo.open.too-old'); assert.strictEqual(L.openNoticeKey('zzz'), 'todo.open.invalid'); assert.strictEqual(L.openNoticeKey(undefined), 'todo.open.invalid');
+  for (const r of ['no-source', 'bad-source', 'no-folder', 'no-transcript', 'too-old', 'agent-busy', 'timeout', 'inactive', 'busy-ui', 'max', 'stale', 'no-prompt', 'invalid', 'no-term', 'not-ready', 'unsafe-start', 'no-maru', 'shell', 'typed']) {
+    for (const lang of I.LANGS) assert.ok(I.t(lang, L.openNoticeKey(r), { text: 'x' }) !== L.openNoticeKey(r), lang + ' ' + r);
+  }
+  assert.ok(/다시 눌러/.test(I.t('ko', 'todo.open.agent-busy')));
+  for (const k of ['todo.open.choose.new', 'todo.open.choose.orig', 'todo.open.retry', 'todo.src.today', 'todo.src.days', 'todo.src.aria', 'todo.open.working']) for (const lang of I.LANGS) assert.ok(I.t(lang, k, { folder: 'f', n: 2 }) !== k, lang + ' ' + k);
+});
+t('할 일 열기 흐름은 pty 에 직접 쓰지 않고(writePrompt 만), 위험한 플래그를 쓰지 않는다', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const lib = fs.readFileSync(path.join(__dirname, 'lib.js'), 'utf8');
+  const flow = main.split('// ---- 할 일 클릭 -> 원래 세션으로')[1].split("ipcMain.handle('todos:retry-fill'")[0];
+  assert.ok(!/term\.write/.test(flow), 'pty 에 직접 쓰지 않는다');
+  assert.ok(!/fork-session|--dangerously|skip-permissions|--bare/.test(main + lib));
+});
+// ---- 입력줄 안전장치(순수 함수) ----
+t('isShellProcessName: 셸·login 만 거부하고 모르는·빈 이름은 통과', () => {
+  for (const n of ['zsh', '-zsh', 'bash', '-bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login', '/bin/zsh', '/usr/bin/login', '/opt/homebrew/bin/fish', '-/bin/zsh', 'ZSH', ' zsh ', '/bin/zsh/']) assert.strictEqual(L.isShellProcessName(n), true, n);
+  for (const n of ['claude', 'node', '', null, undefined, 5, {}, 'zsh-helper', 'bashful', '/usr/local/bin/claude', 'ssh', 'tmux', 'python3', 'x'.repeat(2000)]) assert.strictEqual(L.isShellProcessName(n), false, String(n).slice(0, 20));
+});
+t('isUserInput: 터미널의 자동 응답(CSI·OSC·DCS)은 입력이 아니다', () => {
+  for (const d of ['\x1b[I', '\x1b[O', '\x1b[12;40R', '\x1b[?1;2c', '\x1b]10;rgb:ffff/ffff/ffff\x07', '\x1b]11;rgb:0000/0000/0000\x1b\\', '\x1bP1$r0m\x1b\\', '\x1b[A', '']) assert.strictEqual(L.isUserInput(d), false, JSON.stringify(d));
+  for (const d of ['a', '\r', '한', '\x03', '\x7f', '\x1b[200~paste\x1b[201~', '\x1b', '\x1b[I\r']) assert.strictEqual(L.isUserInput(d), true, JSON.stringify(d));
+  assert.strictEqual(L.isUserInput(null), false);
+});
+const feed = (st, chunks) => chunks.reduce((s, c) => L.bpStep(s, c), st);
+const st0 = (o = {}) => ({ tail: '', bracketed: false, awaitClaude: true, sawOff: false, claudeUp: false, ...o });
+const ready = (st, o = {}) => L.fillStep({ elapsedMs: 100, timeoutMs: 20000, exists: true, active: true, hasTerm: true, state: 'none', claudeOnly: true, claudeUp: st.claudeUp, bracketed: st.bracketed, quietMs: 1000, procName: 'claude', typed: false, ...o });
+t('bpStep: Claude 시작 순서(셸 h → l → claude h)에서 claudeUp, 청크가 어디서 잘려도 같다', () => {
+  const seq = '% \x1b[?2004h' + '\x1b[?2004l\r\n' + 'claude banner \x1b[?2004h';
+  const whole = feed(st0(), [seq]);
+  assert.deepStrictEqual([whole.claudeUp, whole.bracketed], [true, true]);
+  for (let i = 1; i < seq.length; i++) { const r = feed(st0(), [seq.slice(0, i), seq.slice(i)]); assert.deepStrictEqual([r.claudeUp, r.bracketed], [true, true], 'split at ' + i); }
+  const bytes = feed(st0(), [...seq]); assert.deepStrictEqual([bytes.claudeUp, bytes.bracketed], [true, true]); // 한 글자씩 와도 같다
+  assert.strictEqual(feed(st0(), ['% \x1b[?2004h']).claudeUp, false); // 셸 프롬프트만: 아직 아님
+  assert.strictEqual(feed(st0(), ['\x1b[?2004h\x1b[?2004l']).bracketed, false);
+  assert.strictEqual(feed(st0({ awaitClaude: false }), [seq]).claudeUp, false); // 우리가 연 작업 공간이 아니면 세지 않는다
+});
+t('셸만 남은 순서(claude 가 안 떴다)는 claudeUp 이 돼도 준비로 보지 않는다(포그라운드가 셸)', () => {
+  const shellOnly = feed(st0(), ['% \x1b[?2004h', '\x1b[?2004l\r\n', '% \x1b[?2004h']); // command -v 실패 후 새 프롬프트
+  assert.strictEqual(shellOnly.claudeUp, true); // 바이트만으로는 구분되지 않는다
+  assert.deepStrictEqual(ready(shellOnly, { procName: 'zsh' }), { do: 'wait' });
+  assert.deepStrictEqual(ready(shellOnly, { procName: '-zsh' }), { do: 'wait' });
+  assert.deepStrictEqual(ready(shellOnly, { procName: 'login' }), { do: 'wait' });
+  assert.deepStrictEqual(ready(shellOnly, { procName: 'zsh', elapsedMs: 20000 }), { do: 'stash', reason: 'timeout' });
+  assert.deepStrictEqual(ready(shellOnly, { procName: 'claude' }), { do: 'fill' });
+  assert.deepStrictEqual(ready(shellOnly, { procName: '' }), { do: 'fill' }); // 이름을 모르면 막지 않는다
+});
+t('fillStep: 준비·대기·시간 초과·바쁨·닫힘·전환·입력 취소', () => {
+  const up = feed(st0(), ['\x1b[?2004h', '\x1b[?2004l', '\x1b[?2004h']);
+  assert.deepStrictEqual(ready(up), { do: 'fill' });
+  assert.deepStrictEqual(ready(st0()), { do: 'wait' }); // claude 가 아직
+  assert.deepStrictEqual(ready(st0(), { elapsedMs: 20000 }), { do: 'stash', reason: 'timeout' });
+  assert.deepStrictEqual(ready(up, { quietMs: 100 }), { do: 'wait' }); // 출력이 아직 계속된다
+  assert.deepStrictEqual(ready(up, { bracketed: false }), { do: 'wait' });
+  assert.deepStrictEqual(ready(up, { state: 'busy' }), { do: 'busy' }); assert.deepStrictEqual(ready(up, { state: 'waiting' }), { do: 'busy' });
+  assert.deepStrictEqual(ready(up, { exists: false }), { do: 'abort', reason: 'invalid' }); // 기다리는 사이 닫혔다
+  assert.deepStrictEqual(ready(up, { active: false }), { do: 'stash', reason: 'inactive' }); // 다른 작업 공간으로 옮겼다
+  assert.deepStrictEqual(ready(up, { typed: true }), { do: 'cancel' }); // 사용자가 입력했다
+  assert.deepStrictEqual(ready(up, { state: 'exited', hasTerm: false }), { do: 'abort', reason: 'no-term' });
+  assert.deepStrictEqual(ready(up, { state: 'unavailable', hasTerm: false }), { do: 'abort', reason: 'no-folder' });
+  assert.deepStrictEqual(ready(up, { state: 'pending', hasTerm: false }), { do: 'wait' }); // pty 가 아직 시작 전
+  assert.deepStrictEqual(ready(st0(), { claudeOnly: false, claudeUp: false, bracketed: true }), { do: 'fill' }); // 이미 떠 있던 작업 공간은 bracketed 면 충분
+  assert.strictEqual(L.fillStep(null).do, 'abort');
+});
+t('다시 시작한 pty: 새 상태에서는 이전 claudeUp 이 이어지지 않는다', () => {
+  const up = feed(st0(), ['\x1b[?2004h', '\x1b[?2004l', '\x1b[?2004h']); assert.strictEqual(up.claudeUp, true);
+  const restarted = st0(); // spawnPty 가 만드는 초기 상태
+  assert.deepStrictEqual(ready(restarted), { do: 'wait' });
+  assert.strictEqual(feed(restarted, ['% \x1b[?2004h']).claudeUp, false);
+});
+t('retryCheck: 같은 pty(gen)·5분 안·문장이 있을 때만', () => {
+  const now = 1e12; const e = { wsId: 'w', gen: 'g1', text: '이어서 해줘', at: now - 1000 };
+  assert.deepStrictEqual(L.retryCheck(e, { exists: true, gen: 'g1' }, now), { ok: true });
+  assert.strictEqual(L.retryCheck(e, { exists: true, gen: 'g2' }, now).ok, false); // 다시 시작한 pty
+  assert.strictEqual(L.retryCheck(e, { exists: false, gen: 'g1' }, now).ok, false); // 닫힘
+  assert.strictEqual(L.retryCheck(e, { exists: true, gen: 'g1' }, now - 1000 + L.RETRY_TTL_MS).ok, true);
+  assert.strictEqual(L.retryCheck(e, { exists: true, gen: 'g1' }, now + L.RETRY_TTL_MS + 5000).ok, false); // 만료
+  assert.strictEqual(L.retryCheck({ ...e, at: now + 5000 }, { exists: true, gen: 'g1' }, now).ok, false); // 미래 시각
+  assert.strictEqual(L.retryCheck(undefined, { exists: true, gen: 'g1' }, now).ok, false); // 없는(이미 쓴) 토큰
+  assert.strictEqual(L.retryCheck({ ...e, text: '' }, { exists: true, gen: 'g1' }, now).ok, false);
+  assert.strictEqual(L.retryCheck({ ...e, gen: '' }, { exists: true, gen: '' }, now).ok, false);
+});
+t('sessionUuidOf: 훅 값이 우선, --resume uuid 는 훅 상태가 없고 입력 전일 때만', () => {
+  assert.strictEqual(L.sessionUuidOf({ hookSid: U2, resumeSid: U1, hasState: true, typed: false }), U2);
+  assert.strictEqual(L.sessionUuidOf({ lastSid: U3, resumeSid: U1, hasState: false, typed: false }), U3);
+  assert.strictEqual(L.sessionUuidOf({ resumeSid: U1, hasState: false, typed: false }), U1);
+  assert.strictEqual(L.sessionUuidOf({ resumeSid: U1, hasState: true, typed: false }), null); // 훅 상태는 있는데 transcript 가 없다
+  assert.strictEqual(L.sessionUuidOf({ resumeSid: U1, hasState: false, typed: true }), null); // 입력이 들어간 뒤(/clear 등)
+  assert.strictEqual(L.sessionUuidOf({ hookSid: 'bad', resumeSid: 'bad' }), null); assert.strictEqual(L.sessionUuidOf(), null);
+});
+t('sid ≠ 기록 파일 이름이면 그 경로는 세션으로 인정하지 않는다(파일 이름이 곧 uuid)', () => {
+  assert.strictEqual(L.transcriptSessionId(PD + '/-s/' + U2 + '.jsonl', PD), U2); // 이 경로의 세션은 U2 이지 다른 id 가 아니다
+  assert.notStrictEqual(L.transcriptSessionId(PD + '/-s/' + U2 + '.jsonl', PD), U1);
+  assert.strictEqual(L.transcriptSessionId(PD + '/-s/not-the-uuid.jsonl', PD), null);
+});
+t('workspacesToSave: 이어 열기로 띄운 임시 작업 공간은 저장하지 않고 활성 위치를 맞춘다', () => {
+  const items = [{ id: 'a', cwd: '/a', title: 'A' }, { id: 'r', cwd: '/r', title: 'R', transient: true }, { id: 'b', cwd: '/b', title: 'B' }];
+  assert.deepStrictEqual(L.workspacesToSave(items, 'b'), { list: [{ cwd: '/a', title: 'A' }, { cwd: '/b', title: 'B' }], active: 1 });
+  assert.deepStrictEqual(L.workspacesToSave(items, 'r'), { list: [{ cwd: '/a', title: 'A' }, { cwd: '/b', title: 'B' }], active: 0 }); // 활성이 임시였다
+  assert.strictEqual(L.workspacesToSave([{ id: 'r', cwd: '/r', title: 'R', transient: true }], 'r'), null); // 남는 게 없으면 파일을 건드리지 않는다
+  assert.strictEqual(L.workspacesToSave(null, 'x'), null);
+  const f = path.join(fs.mkdtempSync(path.join(tmp, 'ws-')), 'workspaces.json'); fs.mkdirSync(path.join(tmp, 'a'), { recursive: true });
+  const k = L.workspacesToSave([{ id: 'a', cwd: tmp, title: 'A' }, { id: 'r', cwd: tmp + '/a', title: 'R', transient: true }], 'r');
+  assert.ok(L.saveWorkspaces(f, k.list, k.active)); assert.deepStrictEqual(JSON.parse(fs.readFileSync(f, 'utf8')).workspaces.map((x) => x.title), ['A']);
+});
+t('decideTodoOpen: 방금까지 쓴 세션(10분 안)은 recent 표시, 열린 작업 공간이 없을 때만 의미가 있다', () => {
+  const r = L.decideTodoOpen(dsrc, dctx({}, { [TR]: { kind: 'file', mtimeMs: DNOW - 5 * 60 * 1000 } }));
+  assert.strictEqual(r.action, 'resume'); assert.strictEqual(r.recent, true);
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({}, { [TR]: { kind: 'file', mtimeMs: DNOW - 11 * 60 * 1000 } })).recent, false);
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ workspaces: [{ id: 'w', sid: U1, atMs: 1, live: true }] }, { [TR]: { kind: 'file', mtimeMs: DNOW - 60 * 1000 } })).action, 'switch'); // 열려 있으면 묻지 않고 전환
+  assert.strictEqual(L.decideTodoOpen(dsrc, dctx({ force: true }, { [TR]: { kind: 'file', mtimeMs: DNOW - 3 * 86400 * 1000 } })).recent, false);
+});
+t('parseTodoSrc: 깨진 바이트(U+FFFD)가 든 줄만 버리고 나머지는 유지', () => {
+  const text = srcLine({ tag: 'a', key: 'one' }) + '\n' + srcLine({ cwd: '/Users/x/�bad', tag: 'b', key: 'two' }) + '\n' + srcLine({ tag: 'c', key: 'three' }) + '\n';
+  assert.deepStrictEqual(L.parseTodoSrc(text, NOWS).map((e) => e.tag), ['a', 'c']);
+  const f = path.join(fs.mkdtempSync(path.join(tmp, 'sb-')), 'todo-src.txt'); fs.writeFileSync(f, Buffer.concat([Buffer.from(srcLine({ tag: 'a', key: 'one' }) + '\n'), Buffer.from([0x61, 0xff, 0xfe, 0x0a]), Buffer.from(srcLine({ tag: 'c', key: 'three' }) + '\n')]), { mode: 0o600 });
+  assert.deepStrictEqual(L.readTodoSrcFile(f, NOWS, process.getuid()).map((e) => e.tag), ['a', 'c']);
 });
 
 (async () => {

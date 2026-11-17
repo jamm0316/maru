@@ -244,7 +244,7 @@ PY
   return 0
 }
 
-# ---- 오늘 할 일: apply_todos <stage의 todos.txt> [merge|replace]
+# ---- 오늘 할 일: apply_todos <stage의 todos.txt> [merge|replace] [세션 uuid] [cwd] [transcript 경로]
 # 모델이 쓴 `<태그>|<중요도>|<제목>|<프롬프트>` 줄을 검증해 $MARU_DATA/todos.txt 로 원자적으로 반영한다. 항상 0을 반환한다(실패는 로그만, 기존 목록 유지).
 # 파일이 없으면 기존 목록을 그대로 둔다. 검증: 일반 파일(심볼릭 링크 거부)·32KB 이하·UTF-8 / 줄은 정확히 4칸(`|` 3개) /
 # 태그 1~12자 [0-9A-Za-z가-힣-](뒤에 `/슬러그` 를 붙여 프로젝트를 가리킬 수 있다: 슬러그 [0-9a-z가-힣-]{1,24}, 형식이 틀리거나
@@ -260,18 +260,26 @@ PY
 # 제목만 같고 태그가 다르면 가리지 않는다(앱도 같은 규칙).
 # 정렬: 태그 묶음을 묶음 안 최고 중요도 내림차순으로, 묶음 안은 중요도 내림차순(안정). 성공하면 비어 있지 않은 프롬프트로 data/suggestions.txt 도 병합 결과로 다시 만든다
 # (apply_suggestions 의 검증 규칙을 그대로 거친다; 프롬프트가 하나도 없으면 빈 파일).
+# 출처 세션(data/todo-src.txt, 셸 소유·모드 600, textclean.py 의 read_todo_src/merge_todo_src): 4칸 형식은 그대로 두고, 모델이 아니라 셸이 정한 세션 uuid·cwd 를
+# merge 에서 이 실행이 추가·갱신한 항목(새 목록의 항목)에만 `<epoch>|<uuid>|<cwd>|<태그[/슬러그]>|<제목 키>` 로 기록한다(옛 줄은 보존, 같은 (최상위 태그, 제목 키)는 새 것이 이긴다).
+# cwd 는 절대 경로·정규화·`|`/제어 문자 없음이어야 하고, transcript 경로는 필수이고 파일 이름이 `<세션 uuid>.jsonl`, 폴더 이름이 claude 의 slug(cwd)와 모두 같을 때만 기록한다(resume 이 같은 폴더에서 찾을 수 있어야 하므로).
+# 기존 출처 파일을 읽을 수 없으면(링크·크기 초과·읽기 실패) 새로 쓰지 않고 그대로 둔다(로그에 한 줄). 깨진 줄은 그 줄만 버린다.
+# 쓰기 전에 목록에 없는 항목(제목 키가 바뀐 것 포함)·30일 지난 줄을 지우고 100줄·64KB 안으로 줄인다. replace(dream)는 새 줄을 더하지 않고 살아남은 항목의 출처만 남긴다.
+# todos.txt 를 옮기는 데 성공한 뒤에만 출처 파일을 옮긴다. 잠금은 호출 쪽(reflect.sh·dream.sh 가 lock.d 를 쥐고 부른다)이 쥔다.
 apply_todos() {
-  local src=$1 mode=${2:-replace} dst=$MARU_DATA/todos.txt tmp stg res
+  local src=$1 mode=${2:-replace} ssid=${3:-} scwd=${4:-} stp=${5:-} dst=$MARU_DATA/todos.txt tmp stg stmp res
   [ "$mode" = merge ] || mode=replace
   [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
   mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "할 일 목록: data 폴더 없음 — 건너뜀"; return 0; }
   tmp=$(mktemp "$MARU_DATA/.todos.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
   stg=$(mktemp "$MARU_DATA/.todos-sug.XXXXXX" 2>/dev/null) || { rm -f "$tmp"; type log >/dev/null 2>&1 && log "할 일 목록: 임시 파일 실패 — 건너뜀"; return 0; }
-  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" "$MARU_DATA/projects.txt" "$mode" "$dst" "$MARU_DATA/todo-done.txt" "$(date +%s)" <<'PY' 2>&1
+  stmp=$(mktemp "$MARU_DATA/.todo-src.XXXXXX" 2>/dev/null) || stmp=""   # 출처 파일 임시본(못 만들면 출처만 건너뜀)
+  res=$(python3 -I - "$src" "$tmp" "$stg" "$_maru_lib" "$MARU_DATA/projects.txt" "$mode" "$dst" "$MARU_DATA/todo-done.txt" "$(date +%s)" "$ssid" "$scwd" "$stp" "$MARU_DATA/todo-src.txt" "$stmp" <<'PY' 2>&1
 import os, re, stat, sys
-src, tmp, stg, libdir, regpath, mode, dstpath, donepath, nowstr = sys.argv[1:10]
+src, tmp, stg, libdir, regpath, mode, dstpath, donepath, nowstr, a_sid, a_cwd, a_tp, srcpath, srctmp = sys.argv[1:15]
 sys.path.insert(0, libdir)
 from textclean import strip_bad, neutralize_body, looks_secret, valid_tag, safe_start, split_project, read_projects, read_todo_done, title_key
+from textclean import valid_session_uuid, valid_src_cwd, claude_project_slug, read_todo_src_checked, merge_todo_src, format_todo_src
 MAX_BYTES, MAX_NEW, MAX_TOTAL, MAX_MARKERS, MAX_TITLE, MAX_PROMPT = 32768, 7, 12, 3, 60, 120
 merge = mode == "merge"
 registry = {(t, s) for t, s, _ in read_projects(regpath)}   # 등록된 프로젝트만 참조할 수 있다
@@ -332,6 +340,7 @@ over = max(0, len(items) - MAX_NEW)
 keep = sorted(range(len(items)), key=lambda i: (-items[i][2], i))[:MAX_NEW]   # 중요도 높은 순(안정)으로 7개
 items = [items[i] for i in sorted(keep)]
 note = ""
+fresh = list(items)   # 이 실행이 추가·갱신하는 항목(출처 기록 대상)
 if merge:
     old, oldnote = [], "기존 목록 없음"
     try:
@@ -364,16 +373,52 @@ out = []
 for t in order: out.extend(sorted(groups[t], key=lambda x: -x[2]))         # 안정 정렬
 with open(tmp, "w", encoding="utf-8") as f: f.write("".join("%s|%d|%s|%s\n" % (x[0] + ("/" + x[1] if x[1] else ""), x[2], x[3], x[4]) for x in out))
 with open(stg, "w", encoding="utf-8") as f: f.write("".join(x[4] + "\n" for x in out if x[4]))
+# 출처 세션: 새로 쓰는 todos.txt 에 남는 항목만. 실패해도 할 일 목록 반영에는 영향 없다(여기서만 예외를 삼킨다)
+wrote = False
+try:
+    if srctmp and now:
+        newsrc, why_not = [], ""
+        if merge and a_sid:
+            sid_l = a_sid.lower()
+            if not valid_session_uuid(sid_l): why_not = "세션 id 형식"
+            elif not valid_src_cwd(a_cwd): why_not = "cwd 형식"
+            elif not a_tp or os.path.basename(a_tp) != sid_l + ".jsonl": why_not = "transcript 파일 이름이 세션 id 와 다름(또는 경로 없음)"
+            elif os.path.basename(os.path.dirname(a_tp)) != claude_project_slug(a_cwd): why_not = "transcript 폴더와 cwd 불일치"
+            else: newsrc = [(now, sid_l, a_cwd, x[0] + ("/" + x[1] if x[1] else ""), title_key(x[3])) for x in fresh]
+        live = {(x[0], title_key(x[3])) for x in out}
+        oldsrc, rerr = read_todo_src_checked(srcpath, now)
+        if rerr: raise RuntimeError(rerr)   # 읽을 수 없는 기존 파일은 덮어쓰지 않는다(빈 목록으로 출처가 모두 사라지는 것 방지)
+        rows = merge_todo_src(oldsrc, newsrc, live, now)
+        body = format_todo_src(rows)
+        cur = None
+        try:
+            if stat.S_ISREG(os.lstat(srcpath).st_mode):
+                with open(srcpath, "rb") as f: cur = f.read(70000).decode("utf-8", "replace")
+        except OSError: pass
+        if body != (cur if cur is not None else ""):
+            with open(srctmp, "w", encoding="utf-8") as f: f.write(body)
+            wrote = True
+        note += ", 출처 %d줄(새 %d)%s" % (len(rows), len(newsrc), (" — 새 출처 안 씀: " + why_not) if why_not else "")
+except RuntimeError as e:
+    wrote = False
+    note += ", 출처 파일을 읽을 수 없어 건드리지 않음(%s)" % e
+except Exception as e:
+    wrote = False
+    note += ", 출처 기록 실패(%s)" % type(e).__name__
+if srctmp and not wrote:   # 쓰지 않은 임시본(빈 파일)이 출처 파일을 덮어쓰지 못하게 지운다
+    try: os.unlink(srctmp)
+    except OSError: pass
 print("ok %d줄(버린 줄 %d, 상한 초과 %d%s)" % (len(out), dropped, over, note))
 PY
   ) && [ -f "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$dst" 2>/dev/null
   if [ $? -eq 0 ]; then
     type log >/dev/null 2>&1 && log "할 일 목록 갱신($mode): $res"
+    [ -n "$stmp" ] && [ -f "$stmp" ] && [ ! -L "$stmp" ] && chmod 600 "$stmp" && mv -f "$stmp" "$MARU_DATA/todo-src.txt" 2>/dev/null
     if [ -s "$stg" ]; then apply_suggestions "$stg"
     else : > "$stg" && chmod 600 "$stg" && mv -f "$stg" "$MARU_DATA/suggestions.txt" 2>/dev/null   # 프롬프트가 있는 할 일이 없으면 추천도 비운다
     fi
   else rm -f "$tmp"; type log >/dev/null 2>&1 && log "할 일 목록 유지(기존 목록 그대로): ${res:-반영 실패}"; fi
-  rm -f "$stg"
+  rm -f "$stg" "$stmp"
   return 0
 }
 

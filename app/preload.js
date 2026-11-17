@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld('maru', {
   getPanels: () => ipcRenderer.invoke('panels:get'),
   fillQuest: (id, index, shown) => ipcRenderer.invoke('quest:fill', String(id), index | 0, String(shown)),
   // 할 일 완료/안 함: 위치·본 항목 문자열·종류만 싣는다(main 이 자기 항목과 대조). 되돌리기는 main 이 준 id 만.
+  openTodo: (index, shown, choice) => ipcRenderer.invoke('todos:open', index | 0, String(shown).slice(0, 400), choice === 'new' || choice === 'original' ? choice : null),
+  retryTodoFill: (token) => ipcRenderer.invoke('todos:retry-fill', String(token).slice(0, 32)),
   markTodo: (index, shown, kind) => ipcRenderer.invoke('todos:mark', index | 0, String(shown).slice(0, 400), String(kind).slice(0, 8)),
   undoTodoMark: (id) => ipcRenderer.invoke('todos:undo', String(id).slice(0, 32)),
   // 프로젝트 추적: 키·상태·짧은 이름 문자열만 싣는다(경로·문장은 받지 않는다). main 이 자기 목록과 대조한다.

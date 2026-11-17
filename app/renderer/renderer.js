@@ -157,7 +157,7 @@
   window.maru.onPtyData((id, d) => { const e = terms.get(id); if (e) e.term.write(d); });
   window.maru.onPtyExit((id, code) => {
     const e = terms.get(id);
-    if (e) e.term.write('\r\n\x1b[38;5;208m' + T('term.exit', { code }) + '\x1b[0m\r\n');
+    if (e) e.term.write('\r\n\x1b[38;5;208m' + T(code === 127 ? 'term.noclaude' : 'term.exit', { code }) + '\x1b[0m\r\n');
   });
   window.maru.onPtyRestart(async (id) => {
     const e = terms.get(id);
@@ -343,6 +343,51 @@
     }
     return acts;
   }
+  // ---- 할 일 -> 원래 세션으로 이동해 입력줄에 채우기(출처가 있는 항목). 렌더러는 항목의 정체(index + shown)만 보낸다 ----
+  const srcHint = (h) => { const days = Math.max(0, Math.floor((Date.now() / 1000 - h.at) / 86400)); return days < 1 ? T('todo.src.today', { folder: h.folder }) : T('todo.src.days', { folder: h.folder, n: days }); };
+  const validSrcHint = (h) => !!h && typeof h.folder === 'string' && h.folder.length > 0 && h.folder.length <= 80 && Number.isFinite(h.at);
+  let openingTodo = false;
+  function openNote(box, nodes, ms) {
+    clearTimeout(noteTimer); clearTimeout(projNoteTimer);
+    box.replaceChildren(...nodes);
+    noteTimer = setTimeout(() => { if (box.isConnected) box.replaceChildren(); }, ms);
+  }
+  function noteButton(label, fn) { const b = el('button', 'note-undo', label); b.type = 'button'; b.addEventListener('click', fn); return b; }
+  function showOpenResult(box, res, idx, shown, isDetail) {
+    if (res && !res.ok && res.reason === 'cancel') { box.replaceChildren(); return; } // 사용자가 확인 창에서 취소: 아무 일도 없다
+    if (!res || !res.ok) { openNote(box, [el('span', '', T(Lib.openNoticeKey(res && res.reason)))], 6000); return; }
+    const nodes = [];
+    if (res.mode === 'choose') { // 오래된 세션: 어디에도 채우지 않고 사용자가 고른 곳에만 채운다
+      nodes.push(el('span', '', T('todo.open.too-old')), document.createTextNode(' '));
+      nodes.push(noteButton(T('todo.open.choose.new'), () => openTodoSession(idx, shown, box, false, 'new')), document.createTextNode(' · '));
+      nodes.push(noteButton(T('todo.open.choose.orig'), () => openTodoSession(idx, shown, box, false, 'original')));
+      openNote(box, nodes, 30000); return;
+    }
+    if (res.filled === false) {
+      if (res.reason === 'agent-busy') nodes.push(el('span', '', T('todo.open.agent-busy')));
+      else if (typeof res.token === 'string') {
+        const clip = [...String(res.text || '')].slice(0, 120).join('');
+        nodes.push(el('span', '', T(res.reason === 'inactive' ? 'todo.open.inactive' : 'todo.open.timeout', { text: clip })), document.createTextNode(' '));
+        nodes.push(noteButton(T('todo.open.retry'), async () => {
+          let r = null; try { r = await window.maru.retryTodoFill(res.token); } catch (x) { r = null; }
+          if (r && r.ok && r.filled) { box.replaceChildren(); focusTerm(); return; }
+          openNote(box, [el('span', '', r && r.ok && r.reason === 'agent-busy' ? T('todo.open.agent-busy') : T(Lib.fillNoticeKey(r && r.reason)))], 6000);
+        }));
+      } else nodes.push(el('span', '', T(Lib.openNoticeKey(res.reason))));
+    } else if (typeof res.fallback === 'string') nodes.push(el('span', '', T(Lib.openNoticeKey(res.fallback))));
+    openNote(box, nodes, nodes.length > 1 ? 12000 : 6000);
+  }
+  async function openTodoSession(idx, shown, box, isDetail, choice) {
+    if (openingTodo) return;
+    openingTodo = true;
+    openNote(box, [el('span', '', T('todo.open.working'))], 25000);
+    let res = null;
+    try { res = await window.maru.openTodo(idx, shown, choice || null); } catch (x) { res = null; } finally { openingTodo = false; }
+    const target = isDetail && res && res.ok ? $('quest-note') : box; // 상세 화면은 닫고 터미널로 돌아가므로 안내는 메인 패널에
+    if (isDetail && res && res.ok) { box.replaceChildren(); closeDetail(false); }
+    showOpenResult(target, res, idx, shown, false);
+    focusTerm();
+  }
   const markTimers = new Map(); // 상자별 타이머(두 상자가 하나를 나눠 쓰면 먼저 뜬 쪽의 되돌리기 안내가 남는다)
   const todoErr = (res) => T(res && res.reason === 'unsupported' ? 'todo.err.unsupported' : res && res.reason === 'save' ? 'todo.err.save' : 'todo.err.stale');
   function clearMarkNote(box) {
@@ -411,14 +456,17 @@
       const rowEl = el('div', 'todo-row'); rowEl.dataset.i = String(i); rowEl.dataset.k = Lib.todoKey(it);
       const b = el(canFill ? 'button' : 'div', 'todo todo-main' + (canFill ? '' : ' manual'));
       if (canFill) b.type = 'button';
+      const hasSrc = canFill && validSrcHint(it.src);
       const body = el('span', 'body'); body.append(el('span', 't', it.title));
       if (canFill) { const pe = el('span', 'p', it.prompt); pe.title = it.prompt; body.append(pe); }
+      if (hasSrc) { const se = el('span', 'p src', srcHint(it.src)); se.title = T('todo.src.aria', { folder: it.src.folder }); body.append(se); } // 어디로 가는지(폴더·며칠 전)
       const imp = el('span', 'imp');
       if (Lib.todoStarred(it.importance)) { imp.textContent = '★'; imp.title = T('todo.imp'); imp.setAttribute('aria-label', imp.title); }
       b.append(imp, body);
       if (!canFill) b.append(el('span', 'own', T('todo.own')));
       if (canFill) b.addEventListener('click', async () => {
         closeDetail(false); // 상세가 열려 있으면 터미널로 돌아간 뒤 채운다
+        if (hasSrc) { await openTodoSession(i, Lib.todoKey(it), $('quest-note'), false, null); return; } // 출처 세션이 있으면 그리로(없거나 열 수 없으면 main 이 지금처럼 마루 세션에 채운다)
         let res = null;
         try { res = await window.maru.fillQuest(activeId || '', i, Lib.todoKey(it)); } catch (e) { /* 무시 */ }
         if (!res || !res.ok) note(T(Lib.fillNoticeKey(res && res.reason)));
@@ -539,7 +587,7 @@
     if (r === 'check-failed') return T('inbox.err.check');
     if (r === 'install-failed') return T('inbox.err.install');
     if (['exists', 'changed', 'builtin', 'trash', 'save', 'busy', 'not-maru'].includes(r)) return T('inbox.err.' + r);
-    if (['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive'].includes(r)) return T(Lib.fillNoticeKey(r));
+    if (['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive', 'shell'].includes(r)) return T(Lib.fillNoticeKey(r));
     return T('inbox.err.invalid');
   }
   async function inboxRun(fn, okText, slug) {
@@ -860,7 +908,13 @@
     for (const t of d.todos) {
       const r = el('div', 'pd-todo'); const imp = el('span', 'imp');
       if (Lib.todoStarred(t.importance)) { imp.textContent = '★'; imp.title = T('todo.imp'); imp.setAttribute('aria-label', imp.title); }
-      r.append(imp, el('span', 'pd-todo-t', t.title));
+      if (t.canOpen === true && Number.isInteger(t.idx) && typeof t.shown === 'string') { // 눌러서 원래 세션으로(출처가 없으면 마루 세션에 채운다)
+        const ob = el('button', 'pd-todo-t pd-todo-open', t.title); ob.type = 'button';
+        if (validSrcHint(t.src)) ob.title = T('todo.src.aria', { folder: t.src.folder });
+        ob.addEventListener('click', () => openTodoSession(t.idx, t.shown, $('pd-note'), true, null));
+        r.append(imp, ob);
+        if (validSrcHint(t.src)) r.append(el('span', 'pd-src', srcHint(t.src)));
+      } else r.append(imp, el('span', 'pd-todo-t', t.title));
       if (t.markable === true && Number.isInteger(t.idx) && typeof t.shown === 'string') r.append(todoActs(t.title, (kind) => markTodo(t.idx, t.shown, kind, $('pd-note'), true)));
       td.append(r);
     }
@@ -1560,7 +1614,7 @@
     if (r && r.ok) { flashNote(T('meet.note.ok')); refreshMeet(); return; }
     const reason = r && r.reason;
     if (reason === 'cancel') return;
-    flashNote(T(reason === 'not-maru' ? 'meet.note.not-maru' : reason === 'not-ready' || reason === 'no-term' ? 'meet.note.not-ready' : 'meet.note.fail'));
+    flashNote(T(reason === 'not-maru' ? 'meet.note.not-maru' : reason === 'not-ready' || reason === 'no-term' || reason === 'shell' ? 'meet.note.not-ready' : 'meet.note.fail'));
   }
   $('meet-start').addEventListener('click', startMeet);
   $('meet-dismiss').addEventListener('click', async () => { try { await window.maru.meetDismiss(); } catch (e) { /* 무시 */ } $('meet-banner').hidden = true; });

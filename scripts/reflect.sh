@@ -189,13 +189,14 @@ fi
 # 일지: 트랜잭션이 성공으로 끝난 뒤(= 되돌림 경로는 여기 오지 않음) 이 실행이 쥔 잠금 안에서 셸이 덧붙인다.
 # 모델 실행 전후 스냅샷 밖이라 롤백 대상이 아니고, 아래 before/after 비교에 잡혀 기억과 같은 hist 커밋에 들어간다.
 # 프로젝트 라벨은 다이제스트 머리의 cwd 에서 얻는다(없으면 생략).
-jlabel=$(sed -n '2s/^cwd: //p' "$dg" 2>/dev/null | head -1); jlabel=$(basename "${jlabel:-/}" 2>/dev/null); [ "$jlabel" = / ] && jlabel=""
+jcwd=$(sed -n '2s/^cwd: //p' "$dg" 2>/dev/null | head -1)   # 출처 세션 기록에도 쓴다(apply_todos 가 형식·transcript 폴더와의 일치를 검증)
+jlabel=$(basename "${jcwd:-/}" 2>/dev/null); [ "$jlabel" = / ] && jlabel=""
 journaled=""
 apply_projects "$STAGE/projects.txt"          # 새 프로젝트 등록: 아래 일지·할 일이 같은 실행의 새 슬러그를 참조할 수 있게 먼저 적용(lib.sh)
 apply_journal "$STAGE/journal.txt" "$short" "$jlabel" && journaled=1
 apply_todo_marks && journaled=1             # 사용자가 앱에서 표시한 완료/안 함을 일지에 한 번만 반영(lib.sh)
 apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식) 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
-apply_todos "$STAGE/todos.txt" merge         # 오늘 할 일: 이 세션이 다룬 태그만 교체하고 나머지는 보존(검증 후 data/todos.txt + suggestions.txt 재생성, 위 옛 추천보다 우선)
+apply_todos "$STAGE/todos.txt" merge "$sid" "$jcwd" "$tp"   # 오늘 할 일: 이 세션이 다룬 태그만 교체하고 나머지는 보존(검증 후 data/todos.txt + suggestions.txt 재생성, 위 옛 추천보다 우선)
 rm -rf "$STAGE"
 
 [ $rc -eq 0 ] && echo "$total" > "$LINES_FILE"

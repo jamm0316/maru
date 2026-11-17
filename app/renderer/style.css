@@ -329,6 +329,10 @@ body.mod .kbd{display:inline-block}
 .todo-act:hover,.todo-act:focus-visible{border-color:var(--or);color:var(--or);background:var(--sel);outline:none}
 .todo-act:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
 .pd-todo .pd-todo-t{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.pd-todo .pd-todo-open{padding:0;border:0;background:transparent;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+.pd-todo .pd-todo-open:hover,.pd-todo .pd-todo-open:focus-visible{color:var(--or);text-decoration:underline;outline:none}
+.pd-todo .pd-src,.todo .p.src{flex:none;font-size:11px;color:var(--mute);white-space:nowrap}
+.todo .p.src{display:block;white-space:normal}
 .note-undo{margin:0;padding:0 2px;border:0;background:transparent;color:var(--or2);font:inherit;text-decoration:underline;cursor:pointer}
 .note-undo:hover,.note-undo:focus-visible{color:var(--or);outline:none}
 .note-undo:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3);border-radius:3px}

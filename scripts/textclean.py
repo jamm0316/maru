@@ -302,3 +302,99 @@ def read_todo_done(path, now, window=TODO_DONE_WINDOW):
         out.append((e, kind, tag, slug, title, title_key(title)))
     out.sort(key=lambda x: x[0])
     return out
+
+
+# ---- 할 일의 출처 세션(data/todo-src.txt): 셸 소유, 앱은 읽기만 한다(앱은 이 파일을 신뢰하지 않고 다시 검증한다) ----
+# 줄 `<epoch>|<세션 uuid>|<cwd>|<태그[/슬러그]>|<제목 키>` (정확히 5칸). 제목 키 = title_key(제목), 태그는 최상위 태그로 비교한다(완료 표시와 같은 규칙).
+# 상한(app/lib.js 의 TODO_SRC_* 와 같아야 한다. 시험이 대조한다): 65536바이트·100줄·30일.
+TODO_SRC_MAX_BYTES = 65536
+TODO_SRC_MAX_LINES = 100
+TODO_SRC_TTL = 30 * 86400
+TODO_SRC_CWD_MAX = 400
+_UUID_RE = None
+
+
+def valid_session_uuid(s):
+    """Claude Code 의 세션 id(소문자 uuid) 형식. 앱의 resume 인자 검증과 같은 규칙."""
+    import re
+    return isinstance(s, str) and bool(re.fullmatch("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", s))
+
+
+def valid_src_cwd(c):
+    """절대 경로·정규화된 형태·제어/서식 문자와 `|` 없음·400자 이하."""
+    import os
+    # 앱 validSrcCwd 와 같은 규칙: 모든 조각이 비어 있지 않고 `.`·`..` 가 아니다(`//x`·끝의 `/`·`/./` 거부)
+    return (isinstance(c, str) and c.startswith("/") and 1 < len(c) <= TODO_SRC_CWD_MAX and not has_bad(c)
+            and "|" not in c and "\n" not in c and "\r" not in c
+            and all(seg not in ("", ".", "..") for seg in c[1:].split("/")))
+
+
+def claude_project_slug(cwd):
+    """Claude Code 가 대화 기록 폴더 이름으로 쓰는 slug: 영숫자가 아닌 UTF-16 코드 단위마다 `-`(app/lib.js projectSlug 와 같다)."""
+    return "".join(c if (c.isascii() and c.isalnum()) else ("--" if ord(c) > 0xFFFF else "-") for c in cwd)
+
+
+def src_pair(tagfield, title):
+    """(최상위 태그, 제목 키) — 출처와 할 일을 맺는 키."""
+    return (tagfield.split("/")[0], title_key(title))
+
+
+def read_todo_src_checked(path, now):
+    """-> (rows, err). err: None(읽음 또는 파일 없음) | 읽을 수 없는 이유 문자열(일반 파일 아님·크기 초과·읽기 실패).
+    rows = [(epoch, uuid, cwd, 태그칸, 키)] 파일 순서. 깨진 바이트(UTF-8 아님)는 그 줄만 버린다. 틀린 줄(칸 수·epoch·uuid·cwd·태그·키·30일 초과·하루 넘는 미래)도 줄 단위로 버리고,
+    같은 (최상위 태그, 키)는 가장 새 것 하나만(같으면 뒤의 것). err 가 있으면 호출 쪽은 이 파일을 다시 쓰지 않는다(읽지 못한 걸 빈 목록으로 덮어쓰면 출처가 모두 사라진다)."""
+    import os, re, stat
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return [], None
+    except OSError as e:
+        return [], "읽기 실패(%s)" % type(e).__name__
+    if not stat.S_ISREG(st.st_mode): return [], "일반 파일 아님"
+    if st.st_size > TODO_SRC_MAX_BYTES: return [], "크기 초과(%d바이트)" % st.st_size
+    try:
+        with open(path, "rb") as f: text = f.read(TODO_SRC_MAX_BYTES + 1).decode("utf-8", "replace")
+    except OSError as e:
+        return [], "읽기 실패(%s)" % type(e).__name__
+    best = {}
+    for line in text.split("\n"):
+        line = line.rstrip("\r")
+        if not line or "\ufffd" in line: continue
+        parts = line.split("|")
+        if len(parts) != 5: continue
+        ep, sid, cwd, tagf, key = parts
+        if not re.fullmatch("[0-9]{9,12}", ep) or not valid_session_uuid(sid) or not valid_src_cwd(cwd): continue
+        tag, slug = split_project(tagf)
+        if not valid_tag(tag) or (("/" in tagf) and slug is None): continue
+        if not key or len(key) > 240 or has_bad(key): continue
+        e = int(ep)
+        if e > now + 86400 or e < now - TODO_SRC_TTL: continue
+        k = (tag, key)
+        if k not in best or e >= best[k][0]: best[k] = (e, sid, cwd, tagf, key)
+    return list(best.values()), None
+
+
+def read_todo_src(path, now):
+    return read_todo_src_checked(path, now)[0]
+
+
+def merge_todo_src(old, new, live, now):
+    """기존(old)과 새(new) 출처를 합쳐 쓸 목록을 만든다. live = 지금 목록에 있는 (최상위 태그, 키) 집합.
+    목록에 없는 것·30일 지난 것은 뺀다 / 같은 (태그, 키)는 가장 새 것(새 항목 우선) / 오래된 줄부터 줄 수·바이트 상한 안으로 줄인다. 오래된 순으로 돌려준다."""
+    best = {}
+    for ent in list(old) + list(new):
+        e, sid, cwd, tagf, key = ent
+        k = (tagf.split("/")[0], key)
+        if k not in live or e < now - TODO_SRC_TTL: continue
+        if k not in best or e >= best[k][0]: best[k] = ent
+    rows = sorted(best.values(), key=lambda x: x[0])
+    rows = rows[-TODO_SRC_MAX_LINES:]
+    def size(r): return len(("%d|%s|%s|%s|%s\n" % r).encode("utf-8"))
+    total = sum(size(r) for r in rows)
+    while rows and total > TODO_SRC_MAX_BYTES:
+        total -= size(rows[0]); rows = rows[1:]
+    return rows
+
+
+def format_todo_src(rows):
+    return "".join("%d|%s|%s|%s|%s\n" % r for r in rows)

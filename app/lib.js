@@ -206,8 +206,191 @@ function saveTodoDone(file, entries) {
   return writeTextAtomic(file, formatTodoDone(fitTodoDone(entries)), 'todo-done'); // 바이트 상한을 넘으면 오래된 줄부터 덜어 내고 쓴다
 }
 
+// ---- 할 일의 출처 세션 (셸 소유 data/todo-src.txt; 이 파일은 신뢰하지 않는다) ----
+// 한 줄 `<epoch초>|<세션 uuid>|<cwd>|<태그[/슬러그]>|<제목 키>`(정확히 5칸). 제목 키는 titleKey(제목)과 같은 규칙, 태그는 최상위 태그로 비교한다(완료 표시와 같다).
+// 상한은 셸 scripts/textclean.py 의 TODO_SRC_* 와 같아야 한다(시험이 대조한다).
+const TODO_SRC_MAX_BYTES = 65536;
+const TODO_SRC_MAX_LINES = 100;
+const TODO_SRC_TTL_SEC = 30 * 86400;
+const TODO_SRC_CWD_MAX = 400;
+const TODO_SRC_KEY_MAX = 240;
+const TODO_RESUME_STALE_SEC = 2 * 86400; // 마지막 활동이 이보다 오래된 세션은 기본으로 이어 열지 않는다(대화 전체를 다시 불러와 사용량이 든다)
+const RESUME_RECENT_MS = 10 * 60 * 1000;
+const RETRY_TTL_MS = 5 * 60 * 1000;
+const SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const validSessionUuid = (s) => typeof s === 'string' && SESSION_UUID_RE.test(s);
+// cwd: 절대 경로, 1~400자, 제어·서식 문자·`|` 없음, 정규화된 형태(빈 칸·. · .. 조각·끝 / 없음)
+function validSrcCwd(c) {
+  if (typeof c !== 'string' || !c.startsWith('/') || c.length < 2 || [...c].length > TODO_SRC_CWD_MAX || hasBadChars(c) || c.includes('|')) return false;
+  return c.slice(1).split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+}
+// 본문 -> [{ at, sid, cwd, tag, project?, key }] (파일 순서). 틀린 줄(칸 수·epoch·uuid·cwd·태그·키·30일 초과·하루 넘는 미래)은 버리고, 같은 (최상위 태그, 키)는 가장 새 것 하나만(같으면 뒤의 것)
+function parseTodoSrc(text, nowSec, truncated = false) {
+  if (typeof text !== 'string' || !Number.isFinite(nowSec)) return [];
+  const rows = text.split(/\r?\n/);
+  if (truncated) rows.pop();
+  const best = new Map();
+  for (const raw of rows) {
+    if (!raw || raw.length > 2000 || raw.includes('\uFFFD')) continue; // 깨진 바이트가 든 줄만 버린다
+    const f = raw.split('|');
+    if (f.length !== 5) continue;
+    const [ep, sid, cwd, tagField, key] = f;
+    if (!/^[0-9]{9,12}$/.test(ep) || !validSessionUuid(sid) || !validSrcCwd(cwd)) continue;
+    const { tag, slug } = splitProjectField(tagField);
+    if (!TODO_TAG_RE.test(tag) || (tagField.includes('/') && !slug)) continue;
+    if (!key || [...key].length > TODO_SRC_KEY_MAX || hasBadChars(key)) continue;
+    const at = Number(ep);
+    if (at > nowSec + 86400 || at < nowSec - TODO_SRC_TTL_SEC) continue;
+    const k = tag + '\n' + key;
+    const cur = best.get(k);
+    if (!cur || at >= cur.at) best.set(k, { at, sid, cwd, tag, project: slug ? tag + '/' + slug : undefined, key });
+  }
+  return [...best.values()];
+}
+// 시작·갱신 때 읽기(Node 전용): 일반 파일(링크 아님)·소유자가 현재 사용자·다른 사람이 쓸 수 없음·TODO_SRC_MAX_BYTES 이하일 때만. 아니면 []
+function readTodoSrcFile(file, nowSec, uid) {
+  const fs = require('fs');
+  let fd = null;
+  try {
+    const lst = fs.lstatSync(file);
+    if (!lst.isFile() || lst.size > TODO_SRC_MAX_BYTES || lst.uid !== uid || (lst.mode & 0o022) !== 0) return [];
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > TODO_SRC_MAX_BYTES || st.uid !== uid) return [];
+    const buf = Buffer.alloc(st.size);
+    const n = fs.readSync(fd, buf, 0, st.size, 0);
+    return parseTodoSrc(buf.toString('utf8', 0, n), nowSec);
+  } catch { return []; } finally { if (fd !== null) try { fs.closeSync(fd); } catch { /* 무시 */ } }
+}
+// 할 일 항목 -> 출처 항목(없으면 null). 항목은 최상위 태그(item.tag)와 제목 키로 맺는다
+function findTodoSrc(entries, item) {
+  if (!item || !Array.isArray(entries)) return null;
+  const tag = String(item.tag); const key = titleKey(item.title);
+  return entries.find((e) => e.tag === tag && e.key === key) || null;
+}
+// 화면 힌트: 폴더 이름(정리·짧게)과 기록 시각만. 경로 전체는 렌더러로 보내지 않는다
+function todoSrcHint(src) {
+  if (!src) return null;
+  const base = src.cwd.split('/').filter(Boolean).pop() || '/';
+  const folder = [...cleanQuestText(base)].slice(0, 24).join('').trim();
+  return folder ? { folder, at: src.at } : null;
+}
+// Claude 가 기록(transcript)을 두는 위치: <projects>/<slug(cwd)>/<세션 uuid>.jsonl
+function transcriptFileFor(projectsDir, cwd, sid) {
+  return String(projectsDir).replace(/\/+$/, '') + '/' + projectSlug(cwd) + '/' + sid + '.jsonl';
+}
+// 상태 파일의 transcript_path -> Claude 세션 uuid(없으면 null). <projects>/<slug>/<uuid>.jsonl 형태만 받는다(하위 에이전트 기록·바깥 경로·.. 조각·대문자 uuid 는 거부)
+function transcriptSessionId(p, projectsDirs) {
+  if (!validTranscriptPath(p) || p.includes('//') || p.split('/').some((seg) => seg === '.' || seg === '..')) return null;
+  const dirs = (Array.isArray(projectsDirs) ? projectsDirs : [projectsDirs]).filter((d) => typeof d === 'string' && d.startsWith('/') && d.length > 1).map((d) => d.replace(/\/+$/, ''));
+  const parts = p.split('/'); // ['', ..., projects 폴더들..., slug, '<uuid>.jsonl']
+  if (parts.length < 4) return null;
+  const file = parts[parts.length - 1]; const slug = parts[parts.length - 2];
+  if (!slug || slug === '.' || slug === '..') return null;
+  const dir = parts.slice(0, -2).join('/');
+  if (!dirs.includes(dir)) return null;
+  const m = /^([0-9a-f-]{36})\.jsonl$/.exec(file);
+  return m && validSessionUuid(m[1]) ? m[1] : null;
+}
+// 클릭 결정(순수): src = 출처 항목 또는 null / ctx = { projectsDir, nowMs, uid, force, workspaces: [{ id, sid, atMs, live }], fs: { lstat, stat, realpath } }
+//  -> { action: 'switch', wsId } | { action: 'resume', sid, cwd, lastMs } | { action: 'new', reason, canForce? }
+// reason: no-source | bad-source | no-folder | no-transcript | too-old. 파일 시스템은 ctx.fs 로만 만진다(읽기 전용)
+function decideTodoOpen(src, ctx) {
+  if (!src || typeof src !== 'object') return { action: 'new', reason: 'no-source' };
+  if (!validSessionUuid(src.sid) || !validSrcCwd(src.cwd) || !ctx || typeof ctx.projectsDir !== 'string' || !ctx.fs) return { action: 'new', reason: 'bad-source' };
+  // 그 세션이 이미 열려 있으면 그리로(여럿이면 가장 최근에 활동한 것)
+  let hit = null;
+  for (const w of Array.isArray(ctx.workspaces) ? ctx.workspaces : []) {
+    if (!w || w.sid !== src.sid || w.live !== true || typeof w.id !== 'string') continue;
+    if (!hit || (Number.isFinite(w.atMs) ? w.atMs : 0) >= (Number.isFinite(hit.atMs) ? hit.atMs : 0)) hit = w;
+  }
+  if (hit) return { action: 'switch', wsId: hit.id };
+  try {
+    const l = ctx.fs.lstat(src.cwd); // 마지막 조각이 링크이면 거부
+    if (!l || !l.isDirectory() || (typeof l.isSymbolicLink === 'function' && l.isSymbolicLink())) return { action: 'new', reason: 'no-folder' };
+    if (!workspaceDirOk(ctx.fs.stat(ctx.fs.realpath(src.cwd)), ctx.uid)) return { action: 'new', reason: 'no-folder' };
+  } catch { return { action: 'new', reason: 'no-folder' }; }
+  let lastMs;
+  try {
+    const t = ctx.fs.lstat(transcriptFileFor(ctx.projectsDir, src.cwd, src.sid));
+    if (!t || !t.isFile() || (typeof t.isSymbolicLink === 'function' && t.isSymbolicLink()) || !Number.isFinite(t.mtimeMs)) return { action: 'new', reason: 'no-transcript' };
+    lastMs = t.mtimeMs;
+  } catch { return { action: 'new', reason: 'no-transcript' }; }
+  if (ctx.force !== true && ctx.nowMs - lastMs > TODO_RESUME_STALE_SEC * 1000) return { action: 'new', reason: 'too-old', canForce: true };
+  return { action: 'resume', sid: src.sid, cwd: src.cwd, lastMs, recent: ctx.nowMs - lastMs < RESUME_RECENT_MS }; // recent: 방금까지 쓰던 세션 — 다른 곳에서 열려 있을 수 있다(main 이 확인을 묻는다)
+}
+// 클릭 결과 사유 -> 문구 키(문구는 i18n.js 의 'todo.open.<사유>')
+const OPEN_REASONS = ['no-source', 'bad-source', 'no-folder', 'no-transcript', 'too-old', 'agent-busy', 'timeout', 'busy-ui', 'max', 'stale', 'no-prompt', 'invalid', 'inactive', 'no-term', 'not-ready', 'unsafe-start', 'no-maru', 'shell', 'typed'];
+function openNoticeKey(reason) { return 'todo.open.' + (OPEN_REASONS.includes(reason) ? reason : 'invalid'); }
+
+// ---- 입력줄 채우기 안전장치(순수 함수; main 이 pty 상태를 모아 넘긴다) ----
+// 포그라운드 프로세스 이름이 셸·login 이면 true. 명시한 이름만 거부한다(비었거나 모르는 이름은 false — 기존 채우기를 막지 않는다). `-zsh`·경로 형태도 같은 이름으로 본다
+const SHELL_NAMES = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
+function isShellProcessName(name) {
+  if (typeof name !== 'string' || !name || name.length > 1024) return false;
+  const base = name.trim().replace(/\/+$/, '').split('/').pop().replace(/^-+/, '').toLowerCase();
+  return SHELL_NAMES.has(base);
+}
+// pty 로 가는 데이터가 사용자의 입력인가: 터미널이 스스로 보내는 응답(CSI·OSC·DCS: 포커스·커서 위치·장치 속성)을 빼고 남는 게 있으면 입력
+function isUserInput(data) {
+  if (typeof data !== 'string' || !data) return false;
+  const rest = data.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1bP[^\x1b]*\x1b\\/g, '').replace(/\x1b\[[0-9;?<>=! ]*[@-~]/g, '');
+  return rest.length > 0;
+}
+// 붙여넣기 모드 표시(?2004h/l)를 청크마다 따라간다. st = { tail, bracketed, awaitClaude, sawOff, claudeUp } -> 새 st(입력은 바꾸지 않는다)
+// awaitClaude(우리가 연 작업 공간): 셸이 줄을 받아들이며 끄고(l) 그 뒤 켜는(h) 것을 claudeUp 으로 센다. 셸이 살아 있어도 같은 순서가 나오므로 claudeUp 만으로 "Claude 가 떴다"를 확정하지 않는다 — fillStep 이 포그라운드 프로세스도 본다
+function bpStep(st, chunk) {
+  const s = String((st && st.tail) || '') + String(chunk);
+  const re = /\x1b\[\?2004([hl])/g; let m; let last = null; let sawOff = !!(st && st.sawOff); let claudeUp = !!(st && st.claudeUp);
+  while ((m = re.exec(s)) !== null) {
+    last = m[1];
+    if (st && st.awaitClaude) { if (m[1] === 'l') sawOff = true; else if (sawOff) claudeUp = true; }
+  }
+  return { ...st, tail: s.slice(-7), bracketed: last === 'h' ? true : last === 'l' ? false : !!(st && st.bracketed), sawOff, claudeUp };
+}
+// 기다리며 채우기의 한 걸음(순수). c = { elapsedMs, timeoutMs, exists, active, hasTerm, state, claudeOnly, claudeUp, bracketed, quietMs, procName, typed }
+//  -> { do: 'abort', reason } | 'busy' | 'cancel'(기다리는 사이 사용자가 입력했다) | { do: 'stash', reason } | 'fill' | 'wait'
+const READY_QUIET_MS = 400;
+function fillStep(c) {
+  if (!c || !c.exists) return { do: 'abort', reason: 'invalid' }; // 닫혔다
+  if (c.typed) return { do: 'cancel' };
+  if (c.state === 'exited') return { do: 'abort', reason: 'no-term' };
+  if (c.state === 'unavailable') return { do: 'abort', reason: 'no-folder' };
+  if (c.hasTerm) {
+    if (c.state === 'busy' || c.state === 'waiting') return { do: 'busy' };
+    const up = c.claudeOnly ? c.claudeUp === true : true;
+    if (up && c.bracketed === true && c.quietMs >= READY_QUIET_MS && !isShellProcessName(c.procName)) {
+      return c.active ? { do: 'fill' } : { do: 'stash', reason: 'inactive' }; // 기다리는 사이 다른 작업 공간으로 옮겼다: 몰래 채우지 않는다
+    }
+  }
+  if (c.elapsedMs >= c.timeoutMs) return { do: 'stash', reason: 'timeout' };
+  return { do: 'wait' };
+}
+// "채우기" 재시도 토큰: 만든 작업 공간이 아직 같은 pty(gen = 앱이 pty 마다 새로 만드는 id)이고 5분 안일 때만
+function retryCheck(entry, cur, nowMs) {
+  if (!entry || typeof entry.text !== 'string' || !entry.text || !Number.isFinite(entry.at)) return { ok: false, reason: 'stale' };
+  if (!cur || cur.exists !== true || typeof entry.gen !== 'string' || !entry.gen || cur.gen !== entry.gen) return { ok: false, reason: 'stale' };
+  if (!(nowMs - entry.at >= 0 && nowMs - entry.at <= RETRY_TTL_MS)) return { ok: false, reason: 'stale' };
+  return { ok: true };
+}
+// 열려 있는 작업 공간이 어느 세션인가: 훅이 적은 transcript(상태 파일·마지막으로 본 값)가 우선. 우리가 --resume 으로 띄운 uuid 는
+// 훅 상태가 아직 없고 사용자가 그 pty 에 입력을 넣기 전까지만 쓴다(그 뒤에는 /clear 등으로 다른 세션이 됐을 수 있다)
+function sessionUuidOf({ hookSid, lastSid, resumeSid, hasState, typed } = {}) {
+  if (validSessionUuid(hookSid)) return hookSid;
+  if (validSessionUuid(lastSid)) return lastSid;
+  if (validSessionUuid(resumeSid) && !hasState && !typed) return resumeSid;
+  return null;
+}
+// 저장할 작업 공간: 이어 열기로 띄운 임시 작업 공간(transient)은 빼고(앱을 다시 켜면 그 폴더의 새 claude 로 쌓이므로), 활성 위치를 그 안의 위치로 바꾼다. 남는 게 없으면 null(파일을 건드리지 않는다)
+function workspacesToSave(items, activeId) {
+  const keep = (Array.isArray(items) ? items : []).filter((x) => x && !x.transient);
+  if (!keep.length) return null;
+  const a = keep.findIndex((x) => x.id === activeId);
+  return { list: keep.map((x) => ({ cwd: x.cwd, title: x.title })), active: a >= 0 ? a : 0 };
+}
+
 // 채우기 거부 사유 -> 문구 키(문구는 i18n.js 의 'fill.<사유>')
-const FILL_REASONS = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive', 'invalid'];
+const FILL_REASONS = ['stale', 'no-prompt', 'unsafe-start', 'not-ready', 'no-term', 'inactive', 'invalid', 'shell'];
 function fillNoticeKey(reason) { return 'fill.' + (FILL_REASONS.includes(reason) ? reason : 'invalid'); }
 
 // pty 에 써 넣을 문장 정리: 개행·\r·제어문자·보이지 않는 문자 제거
@@ -266,7 +449,7 @@ function buildDropPaste(paths) {
   return '\x1b[200~' + paths.map(shellQuote).join(' ') + ' \x1b[201~';
 }
 // 드롭 거부 사유 -> 문구 키('drop.<사유>')
-const DROP_REASONS = ['invalid', 'inactive', 'busy-ui', 'not-ready', 'no-term', 'too-many', 'missing'];
+const DROP_REASONS = ['invalid', 'inactive', 'busy-ui', 'not-ready', 'no-term', 'too-many', 'missing', 'shell'];
 function dropNoticeKey(reason) { return 'drop.' + (DROP_REASONS.includes(reason) ? reason : 'invalid'); }
 
 // ---- 서브에이전트·모델 표시 ----
@@ -414,9 +597,11 @@ function matchSubs(subs, knownNames) {
 // 스쿼드 묶음을 펼칠지: 사용자가 직접 정했으면 그대로, 아니면 그 스쿼드의 에이전트가 돌 때만
 function squadOpen(userChoice, active) { return typeof userChoice === 'boolean' ? userChoice : !!active; }
 // 작업 공간에서 claude 를 띄우는 한 줄(셸에 쓴다). wrapper = 저장소의 maru-claude.sh 절대 경로(없거나 이상하면 null -> 그냥 claude)
-function claudeLaunchCommand(sid, wrapper) {
+// resumeId(선택): 있으면 소문자 uuid 형식이어야 하고(아니면 null — 호출 쪽은 실행하지 않는다) `--resume <uuid>` 를 붙인다. 래퍼는 받은 인자를 그대로 claude 에 넘긴다.
+function claudeLaunchCommand(sid, wrapper, resumeId) {
   const ok = typeof wrapper === 'string' && wrapper.startsWith('/') && wrapper.length <= 1024 && !hasBadChars(wrapper) && !/[\r\n]/.test(wrapper);
-  return 'command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + '\r';
+  if (resumeId !== undefined && resumeId !== null && !validSessionUuid(resumeId)) return null;
+  return 'command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + (resumeId ? ' --resume ' + resumeId : '') + ' ; exit 127\r'; // exec 가 안 되면(claude 없음·실패) 셸이 남지 않게 끝낸다(남은 셸에 문장을 채우는 사고 방지). 종료 코드 127 은 렌더러가 "claude 를 찾지 못함" 으로 알린다
 }
 
 // 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru -> ~/.maru(managed)
@@ -2479,7 +2664,7 @@ const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,

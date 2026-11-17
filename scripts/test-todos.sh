@@ -793,10 +793,186 @@ o=$(run_env MARU_HOME="$REPO" MARU_DATA="$PD" MARU_STATE="$PD/state" PATH="$T/sp
 checkall "병합 중에는 회고와 같은 잠금을 쥐고 있음" [ $rc = 0 ] '&&' [ -s "$T/spy/held" ]
 # apply_projects 는 같은 본체를 쓰므로 동작이 그대로(위 섹션이 이미 검증)
 
+echo "== 할 일 출처 세션(data/todo-src.txt)"
+SRCF=$DATA/todo-src.txt
+SLUGOF() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+CWD1=/Users/someone/proj-a; CWD2="/Users/someone/proj b"
+S1=aaaaaaaa-1111-4222-8333-444444444441; S2=bbbbbbbb-1111-4222-8333-444444444442; S3=cccccccc-1111-4222-8333-444444444443
+TP1=$PROJ/$(SLUGOF "$CWD1")/$S1.jsonl; TP2=$PROJ/$(SLUGOF "$CWD2")/$S2.jsonl; TP3=$PROJ/$(SLUGOF "$CWD1")/$S3.jsonl
+ATS() { # <stage> <mode> <sid> <cwd> <tp>
+  LIBRUN 'apply_todos "$1" "$2" "$3" "$4" "$5"; echo "rc=$?"' "$@"
+}
+srcfield() { # <최상위 태그> <1=uuid 2=cwd 3=epoch> — 출처 파일에서 값 하나
+  "$REAL_PY" -I -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from textclean import read_todo_src
+now = int(sys.argv[4])
+for e, sid, cwd, tagf, key in read_todo_src(sys.argv[2], now):
+    if tagf.split("/")[0] == sys.argv[3] and (not sys.argv[6] or key == sys.argv[6]):
+        print({"1": sid, "2": cwd, "3": e}[sys.argv[5]]); break' "$REPO/scripts" "$SRCF" "$1" "$(date +%s)" "$2" "${3:-}"
+}
+srccount() { "$REAL_PY" -I -c '
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from textclean import read_todo_src
+print(len(read_todo_src(sys.argv[2], int(time.time()))))' "$REPO/scripts" "$SRCF"; }
+rm -f "$TODOS" "$SRCF" "$DATA/todo-done.txt" "$DATA/projects.txt"
+printf '%s\n' 'a|5|첫 일|p1' 'b/xx|6|둘째  일|p2' > "$T/st/s1.txt"
+out=$(ATS "$T/st/s1.txt" merge "$S1" "$CWD1" "$TP1")
+checkall "merge: 새 항목마다 출처가 기록됨(세션·cwd)" has "$out" "출처 2줄(새 2)" '&&' [ "$(srcfield a 1)" = "$S1" ] '&&' [ "$(srcfield b 1)" = "$S1" ] '&&' [ "$(srcfield a 2)" = "$CWD1" ]
+check "출처 파일 모드 600" [ "$(stat -f %Lp "$SRCF")" = 600 ]
+check "todos.txt 의 4칸 형식은 그대로" [ "$(cat "$TODOS")" = "$(printf '%s\n' 'b|6|둘째  일|p2' 'a|5|첫 일|p1')" ]
+check "제목 키는 완료 표시와 같은 규칙(공백 접기)" sh -c 'grep -q "|b|둘째 일$" "$1"' _ "$SRCF"
+check "임시 파일 잔여 없음" [ -z "$(ls -A "$DATA" | grep '^\.todo-src')" ]
+printf '%s\n' 'c|5|셋째|p3' > "$T/st/s2.txt"
+out=$(ATS "$T/st/s2.txt" merge "$S2" "$CWD2" "$TP2")
+checkall "다른 태그만 낸 세션은 기존 항목의 출처를 건드리지 않음" [ "$(srcfield a 1)" = "$S1" ] '&&' [ "$(srcfield b 1)" = "$S1" ] '&&' [ "$(srcfield c 1)" = "$S2" ] '&&' [ "$(srcfield c 2)" = "$CWD2" ]
+sleep 1
+printf '%s\n' 'a|5|첫 일|새 프롬프트' > "$T/st/s3.txt"
+e_old=$(srcfield a 3); out=$(ATS "$T/st/s3.txt" merge "$S3" "$CWD1" "$TP3")
+checkall "같은 항목을 다시 낸 세션이 출처를 갱신(새 세션·더 새 시각)" [ "$(srcfield a 1)" = "$S3" ] '&&' [ "$(srcfield a 3)" -gt "$e_old" ] '&&' [ "$(srcfield b 1)" = "$S1" ] '&&' [ "$(srcfield c 1)" = "$S2" ] '&&' [ "$(srccount)" = 3 ]
+# 새벽 정리(replace): 새 줄을 더하지 않고, 태그+제목 키가 살아남은 항목의 출처만 남긴다. 바뀐 제목·사라진 항목은 출처도 없음
+printf '%s\n' 'a|5|첫 일|p' 'b|4|둘째 일을 고쳐 쓴 제목|p' 'd|3|새 항목|p' > "$T/st/s4.txt"
+out=$(ATS "$T/st/s4.txt" replace "" "" "")
+checkall "replace: 살아남은 a 는 출처 유지, 제목이 바뀐 b·사라진 c 는 출처 없음, 새 d 도 없음" [ "$(srcfield a 1)" = "$S3" ] '&&' [ -z "$(srcfield b 1)" ] '&&' [ -z "$(srcfield c 1)" ] '&&' [ -z "$(srcfield d 1)" ] '&&' [ "$(srccount)" = 1 ]
+out=$(ATS "$T/st/s4.txt" replace "$S2" "$CWD2" "$TP2")
+check "replace 에 세션을 넘겨도 새 줄을 더하지 않음" [ -z "$(srcfield d 1)" ]
+# 같은 제목을 두 태그가 내면 목록에는 먼저 나온 것만 남고(제목 중복은 버림) 출처도 그 한 줄뿐
+printf '%s\n' 'a|5|공통|p' 'e|5|공통|p' > "$T/st/s5.txt"
+out=$(ATS "$T/st/s5.txt" merge "$S1" "$CWD1" "$TP1")
+checkall "같은 제목 두 태그: 출처는 먼저 나온 a 의 한 줄뿐(이전 줄은 목록에서 사라져 정리됨)" [ "$(srccount)" = 1 ] '&&' [ "$(srcfield a 1 공통)" = "$S1" ] '&&' [ -z "$(srcfield e 1)" ] '&&' [ "$(cut -d'|' -f2-5 "$SRCF")" = "$S1|$CWD1|a|공통" ]
+# 30일: 목록에 있어도 30일 지난 줄은 쓸 때 지운다
+rm -f "$TODOS" "$SRCF"
+printf '%s\n' 'a|5|오래된 일|p' > "$T/st/s6.txt"; ATS "$T/st/s6.txt" merge "$S1" "$CWD1" "$TP1" >/dev/null
+OLD=$(( $(date +%s) - 31*86400 ))
+printf '%s|%s|%s|a|오래된 일\n' "$OLD" "$S2" "$CWD2" > "$SRCF"
+printf '%s\n' 'z|5|딴 일|p' > "$T/st/s7.txt"; ATS "$T/st/s7.txt" merge "$S3" "$CWD1" "$TP3" >/dev/null
+checkall "30일 지난 줄은 읽을 때도 쓸 때도 사라짐(a 의 출처 없음, z 는 새로)" [ -z "$(srcfield a 1)" ] '&&' [ "$(srcfield z 1)" = "$S3" ]
+# 목록에서 사라지면(완료 표시 포함) 출처도 정리
+NOWD=$(date +%s); printf '%s|done|z|딴  일\n' "$NOWD" > "$DATA/todo-done.txt"
+printf '%s\n' 'y|5|또 다른 일|p' > "$T/st/s8.txt"; ATS "$T/st/s8.txt" merge "$S1" "$CWD1" "$TP1" >/dev/null
+checkall "완료 표시로 가려진 항목의 출처는 정리됨" [ -z "$(srcfield z 1)" ] '&&' [ "$(srcfield y 1)" = "$S1" ]
+rm -f "$DATA/todo-done.txt"
+# 입력 거부: 잘못된 cwd·세션 id·transcript 폴더 불일치면 todos 는 반영되지만 출처는 안 만든다
+rejects() { # <이름> <sid> <cwd> <tp>
+  local name=$1
+  rm -f "$TODOS" "$SRCF"
+  printf '%s\n' 'r|5|거부 시험|p' > "$T/st/r.txt"
+  out=$(ATS "$T/st/r.txt" merge "$2" "$3" "$4")
+  checkall "$name: 할 일은 반영되고 출처는 없음" [ "$(cat "$TODOS")" = "r|5|거부 시험|p" ] '&&' [ ! -s "$SRCF" ] '&&' has "$out" "새 출처 안 씀"
+}
+rejects "cwd 에 |" "$S1" "/Users/x/a|b" "$PROJ/-Users-x-a-b/$S1.jsonl"
+rejects "cwd 에 개행" "$S1" $'/Users/x/a\nb' "$PROJ/-Users-x-a-b/$S1.jsonl"
+rejects "cwd 에 제어 문자" "$S1" $'/Users/x/a\001b' "$PROJ/-Users-x-a-b/$S1.jsonl"
+rejects "상대 경로 cwd" "$S1" "Users/x/a" "$PROJ/Users-x-a/$S1.jsonl"
+rejects "정규화되지 않은 cwd(..)" "$S1" "/Users/x/../y" "$PROJ/-Users-x----y/$S1.jsonl"
+rejects "빈 cwd" "$S1" "" "$PROJ/x/$S1.jsonl"
+rejects "세션 id 형식 오류" "not-a-uuid" "$CWD1" "$PROJ/$(SLUGOF "$CWD1")/x.jsonl"
+rejects "transcript 폴더와 cwd 불일치(cd 로 바뀐 cwd)" "$S1" "$CWD1/sub" "$TP1"
+rejects "transcript 경로 없음" "$S1" "$CWD1" ""
+rejects "transcript 파일 이름이 세션 id 와 다름" "$S1" "$CWD1" "$PROJ/$(SLUGOF "$CWD1")/$S2.jsonl"
+rejects "cwd 가 //x 형태" "$S1" "//x/y" "$PROJ/--x-y/$S1.jsonl"
+rejects "cwd 끝에 /" "$S1" "/Users/x/a/" "$PROJ/-Users-x-a-/$S1.jsonl"
+# 읽을 수 없는 기존 출처 파일(링크·크기 초과·폴더)은 새로 쓰지 않고 그대로 둔다(로그에 한 줄). 할 일 목록 자체는 반영된다
+rm -f "$SRCF" "$TODOS"; printf 'victim\n' > "$T/victim.txt"; ln -s "$T/victim.txt" "$SRCF"
+out=$(ATS "$T/st/s1.txt" merge "$S1" "$CWD1" "$TP1")
+checkall "링크인 출처 파일은 건드리지 않고 로그를 남김(대상도 그대로, 목록은 반영)" [ -L "$SRCF" ] '&&' [ "$(cat "$T/victim.txt")" = victim ] '&&' has "$out" "출처 파일을 읽을 수 없어 건드리지 않음" '&&' [ "$(wc -l < "$TODOS" | tr -d ' ')" = 2 ]
+rm -f "$SRCF"; head -c 70000 /dev/zero | tr '\0' 'a' > "$SRCF"; cp "$SRCF" "$T/big.keep"
+out=$(ATS "$T/st/s1.txt" merge "$S1" "$CWD1" "$TP1")
+checkall "크기 초과 출처 파일도 그대로(덮어쓰지 않음)" cmp -s "$SRCF" "$T/big.keep" '&&' has "$out" "크기 초과"
+rm -f "$SRCF"; mkdir "$SRCF"; out=$(ATS "$T/st/s1.txt" merge "$S1" "$CWD1" "$TP1")
+checkall "폴더가 된 출처 파일도 그대로" [ -d "$SRCF" ] '&&' has "$out" "출처 파일을 읽을 수 없어"
+rmdir "$SRCF"
+# 깨진 바이트 한 줄은 그 줄만 버리고 나머지 출처는 유지
+rm -f "$SRCF" "$TODOS"
+printf '%s\n' 'a|5|첫 일|p1' 'b|6|둘째 일|p2' > "$T/st/s9.txt"; ATS "$T/st/s9.txt" merge "$S1" "$CWD1" "$TP1" >/dev/null
+printf '%s|%s|/Users/x/\377bad|b|둘째 일\n' "$(date +%s)" "$S2" >> "$SRCF"
+printf '%s\n' 'c|5|셋째|p3' > "$T/st/s10.txt"; out=$(ATS "$T/st/s10.txt" merge "$S3" "$CWD1" "$TP3")
+checkall "깨진 바이트 줄만 버려지고 기존 출처 a·b·새 c 가 모두 남음" [ "$(srcfield a 1)" = "$S1" ] '&&' [ "$(srcfield b 1)" = "$S1" ] '&&' [ "$(srcfield c 1)" = "$S3" ] '&&' [ "$(srccount)" = 3 ] '&&' hasnt "$out" "읽을 수 없어"
+check "다시 쓴 파일은 정상 UTF-8" "$REAL_PY" -I -c 'import sys;sys.stdin.buffer.read().decode("utf-8")' < "$SRCF"
+# 같은 입력이면 줄은 늘지 않는다
+rm -f "$TODOS" "$SRCF"; ATS "$T/st/s1.txt" merge "$S1" "$CWD1" "$TP1" >/dev/null; ATS "$T/st/s1.txt" merge "$S1" "$CWD1" "$TP1" >/dev/null
+check "같은 세션이 같은 목록을 다시 내도 줄은 늘지 않음" [ "$(srccount)" = 2 ]
+# 상한: 줄 수·바이트(textclean.merge_todo_src 를 직접)
+out=$("$REAL_PY" -I - "$REPO/scripts" <<'PY'
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import textclean as t
+now = int(time.time()); sid = "aaaaaaaa-1111-4222-8333-444444444441"
+live = {("t%d" % i, "k%d" % i) for i in range(300)}
+new = [(now - 300 + i, sid, "/a/b", "t%d" % i, "k%d" % i) for i in range(300)]
+rows = t.merge_todo_src([], new, live, now)
+print("lines", len(rows), rows[-1][4], rows[0][4])
+big = "/" + "가" * 390
+live2 = {("t%d" % i, "k%d" % i) for i in range(100)}
+new2 = [(now - 100 + i, sid, big, "t%d" % i, "k%d" % i) for i in range(100)]
+rows2 = t.merge_todo_src([], new2, live2, now)
+print("bytes", len(t.format_todo_src(rows2).encode("utf-8")) <= t.TODO_SRC_MAX_BYTES, len(rows2) < 100, rows2[-1][4])
+print("old", len(t.merge_todo_src([(now - 40 * 86400, sid, "/a", "t1", "k1")], [], live, now)))
+PY
+)
+checkall "줄 수 상한 100(가장 새 것을 남김)" has "$out" "lines 100 k299 k200"
+checkall "바이트 상한 안으로 줄이되 새 것을 남김" has "$out" "bytes True True k99"
+check "30일 지난 줄은 합칠 때 버림" has "$out" "old 0"
+# 읽기: 깨진 파일·크기 초과·잘못된 줄은 버린다
+printf '%s\n' 'garbage' "$(date +%s)|bad-uuid|/a|a|k" "$(date +%s)|$S1|rel|a|k" "$(date +%s)|$S1|/a/b|bad tag!|k" "$(date +%s)|$S1|/a/b|a|ok1" "$(( $(date +%s) - 100 ))|$S2|/a/c|a|ok1" "$(( $(date +%s) + 90000 ))|$S2|/a/c|a|future" > "$SRCF"
+out=$("$REAL_PY" -I -c '
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from textclean import read_todo_src
+r = read_todo_src(sys.argv[2], int(time.time()))
+print(len(r), r[0][1][:8] if r else "-", r[0][4] if r else "-")' "$REPO/scripts" "$SRCF")
+check "읽기: 틀린 줄·미래·옛 중복을 버리고 같은 키는 새 것(1줄)" [ "$out" = "1 aaaaaaaa ok1" ]
+head -c 70000 /dev/zero | tr '\0' 'a' > "$SRCF"; check "읽기: 크기 초과 파일은 통째로 무시" [ "$(srccount)" = 0 ]
+# 실제 reflect 경로의 잠금·세션 연결은 test-journal.sh 가 시험한다
+rm -f "$SRCF" "$TODOS"
+if [ -n "${NODE:-}" ] && [ -f "$REPO/app/lib.js" ]; then
+  "$REAL_PY" - "$T/keys.json" <<'PY'
+import json, sys
+json.dump(["앱", "  A  b ", "Hello   World", "한글  제목", "ÄÖ ß", "Σίσυφος ΑΣ", "a\tb", "Straße", "ΣΑΣ"], open(sys.argv[1], "w"))
+PY
+  sk=$("$REAL_PY" -I - "$T/keys.json" "$REPO/scripts" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from textclean import title_key, claude_project_slug
+c = json.load(open(sys.argv[1]))
+print(json.dumps([[title_key(x), claude_project_slug("/u/" + x)] for x in c], ensure_ascii=True))
+PY
+  )
+  jk=$("$NODE" -e '
+const L = require(process.argv[1]); const c = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+console.log(JSON.stringify(c.map((x) => [L.titleKey(x), L.projectSlug("/u/" + x)])).replace(/[\u0080-￿]/g, (m) => "\\u" + m.charCodeAt(0).toString(16).padStart(4, "0")));' "$REPO/app/lib.js" "$T/keys.json")
+  check "제목 키(title_key/titleKey)와 claude slug 규칙이 셸·앱에서 같음" [ -n "$sk" ] && [ "$sk" = "$jk" ]
+  if [ "$sk" != "$jk" ]; then "$REAL_PY" -I -c '
+import json, sys
+a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2]); c = json.load(open(sys.argv[3]))
+for x, p, q in zip(c, a, b):
+    if p != q: print("  차이:", ascii(x), p, q)' "$sk" "$jk" "$T/keys.json"; fi
+  "$REAL_PY" - "$T/cwds.json" <<'PY'
+import json, sys
+json.dump(["/a/b", "//x", "//x/y", "/a/b/", "/a//b", "/a/./b", "/a/../b", "/..", "/.", "/", "", "rel/x", "/a b/c", "/한글/폴더", "/a|b", "/a\nb", "/a\u0007b", "/a\u202eb", "/a/\ufe0fb", "/" + "a" * 399, "/" + "a" * 400, "/😀/x", "/a/b.c/.d", "/a/..b/c.."], open(sys.argv[1], "w"))
+PY
+  sc=$("$REAL_PY" -I - "$T/cwds.json" "$REPO/scripts" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from textclean import valid_src_cwd
+print(json.dumps([valid_src_cwd(x) for x in json.load(open(sys.argv[1]))]))
+PY
+  )
+  jc=$("$NODE" -e '
+const L = require(process.argv[1]); const c = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+console.log(JSON.stringify(c.map((x) => L.validSrcCwd(x))));' "$REPO/app/lib.js" "$T/cwds.json")
+  check "cwd 검증(valid_src_cwd/validSrcCwd)이 24개 말뭉치에서 셸·앱 모두 같음" [ -n "$sc" ] && [ "$sc" = "$jc" ]
+  ps=$("$REAL_PY" -I -c 'import sys;sys.path.insert(0,sys.argv[1]);from textclean import claude_project_slug as s;print(s("/a/😀b/한"))' "$REPO/scripts")
+  pj=$("$NODE" -e 'console.log(require(process.argv[1]).projectSlug("/a/😀b/한"))' "$REPO/app/lib.js")
+  check "이모지(UTF-16 두 단위)도 slug 가 같음" [ "$ps" = "$pj" ]
+fi
+
 echo "== 가드"
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
 # 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
-check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
+check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name todo-src.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
 check "시험이 쓰는 데이터 폴더는 모두 임시 폴더 안" sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$DATA" "$T"
 echo
 if [ "$FAIL" = 0 ]; then echo "test-todos: OK ($N 항목)"; exit 0; else echo "test-todos: $FAIL/$N 실패"; exit 1; fi
