@@ -53,7 +53,11 @@
       "Bash(scripts/maru-status.sh *)",
       "Bash(./scripts/maru-status.sh *)",
       "Bash(scripts/hist *)",
-      "Bash(./scripts/hist *)"
+      "Bash(./scripts/hist *)",
+      "Bash(bin/maru project list)",
+      "Bash(./bin/maru project list)",
+      "Bash(bin/maru project add *)",
+      "Bash(./bin/maru project add *)"
     ]
   },
   "hooks": {
