@@ -576,7 +576,7 @@ function wsChanged(structural) {
 function addWorkspace(cwd, title, fx, unavailable, extra) {
   const x = extra || {};
   const id = L.validWsId(x.id) && !wss.has(x.id) ? x.id : crypto.randomBytes(8).toString('hex');
-  const w = { id, cwd, title: L.uniqueTitle(title || L.workspaceTitle(cwd, tr('ws.untitled')), [...wss.values()].map((o) => o.title)), term: null, sessionId: null, bracketed: false, seqTail: '', lastOutputAt: 0, exited: false, unavailable: !!unavailable, fx: fx || null,
+  const w = { id, cwd, title: L.uniqueTitle(L.managedWsTitle(title || L.workspaceTitle(cwd, tr('ws.untitled')), cwd, MANAGED && ROOT ? [ROOT, realOrNull(ROOT)] : [], tr('app.title')), [...wss.values()].map((o) => o.title)), term: null, sessionId: null, bracketed: false, seqTail: '', lastOutputAt: 0, exited: false, unavailable: !!unavailable, fx: fx || null,
     parentId: L.validWsId(x.parentId) ? x.parentId : null, project: L.isProjectKey(x.project) ? x.project : null, origin: x.origin === 'child' || L.validWsId(x.parentId) ? 'child' : null, cwdReal: realOrNull(cwd), inRoot: false, isRoot: false, reqKey: null };
   w.inRoot = insideRoot(w.cwdReal); const rr = realOrNull(ROOT); w.isRoot = !!rr && w.cwdReal === rr; // isRoot: 저장소 루트 폴더(마루 세션 후보)
   wss.set(id, w);
@@ -867,12 +867,12 @@ function buildMenu() {
 }
 
 // ---- 자식 프로세스 (고정 argv, 셸 문자열 보간 없음) ----
-function childEnv() {
+function childEnv(withClaude) {
   const env = L.sanitizeHostEnv(process.env);
   for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP')) delete env[k];
   const home = os.homedir();
   const extra = [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-  env.PATH = [...new Set([...extra, ...String(env.PATH || '').split(':').filter(Boolean)])].join(':');
+  env.PATH = L.childPath({ extra, current: env.PATH, claudeBin: withClaude ? claudeBin : null, isDir: (d) => fs.statSync(d).isDirectory() }); // withClaude: resolveClaude() 가 찾은 claude 폴더를 맨 앞에(install.sh·점검용)
   if (ROOT) env.MARU_HOME = ROOT;
   return env;
 }
@@ -910,7 +910,7 @@ const row = (id, status, key, params, action, extra) => ({ id, status, detail: {
 async function checkAuth() {
   const bin = await resolveClaude();
   if (!bin) return row('auth', 'unknown', 'auth.noClaude', null, 'copyLogin');
-  const r = await exec(bin, ['auth', 'status'], { timeout: 10000, cwd: os.homedir() });
+  const r = await exec(bin, ['auth', 'status'], { timeout: 10000, cwd: os.homedir(), env: childEnv(true) });
   const a = L.parseAuthStatus(r.stdout); // 이메일·조직 필드는 여기서 버려진다
   if (!a) return row('auth', 'unknown', 'auth.fail', null, 'copyLogin');
   if (!a.loggedIn) return row('auth', 'need', 'auth.out', null, 'copyLogin');
@@ -1031,14 +1031,14 @@ let installPreviewHash = null; // 미리보기 때 install.sh 의 sha256
 let installPreviewCount = 0;
 const hashInstall = () => { try { return crypto.createHash('sha256').update(fs.readFileSync(installSh())).digest('hex'); } catch { return null; } };
 let installBusy = false;
-const installEnv = () => ({ ...childEnv(), MARU_LANG: curLang(), MARU_HOME: ROOT }); // install.sh 에 언어와 홈을 알린다
+const installEnv = async () => { await resolveClaude(); return { ...childEnv(true), MARU_LANG: curLang(), MARU_HOME: ROOT }; }; // install.sh 에 언어와 홈을 알린다(claude 폴더가 PATH 맨 앞)
 const installSh = () => (ROOT ? path.join(ROOT, 'install.sh') : null);
 async function previewInstall() {
   if (!ROOT || !isFileSafe(installSh())) return { ok: false, reason: 'noInstall' };
   if (installBusy) return { ok: false, reason: 'busy' };
   installBusy = true;
   try {
-    const r = await exec('/bin/bash', [installSh(), '--dry-run'], { timeout: 60000, maxBuffer: 1 << 20, env: installEnv() });
+    const r = await exec('/bin/bash', [installSh(), '--dry-run'], { timeout: 60000, maxBuffer: 1 << 20, env: await installEnv() });
     const output = L.cleanBlock(r.stdout + (r.stderr ? '\n' + r.stderr : ''));
     if (r.err) { installPreviewAt = 0; installPreviewHash = null; return { ok: false, reason: 'failed', output }; }
     installPreviewAt = Date.now(); installPreviewHash = hashInstall(); installPreviewCount = L.parseInstallSections(r.stdout).length;
@@ -1057,8 +1057,9 @@ async function runInstall() {
     // main 에서도 한 번 더 확인(렌더러 대화상자와 별개)
     const ans = await dialog.showMessageBox(win, { type: 'question', buttons: [tr('hooks.apply'), tr('common.cancel')], defaultId: 1, cancelId: 1, noLink: true, message: tr('hooks.confirmTitle', { n: count }), detail: tr('hooks.mainConfirm') });
     if (ans.response !== 0) return { ok: false, reason: 'cancelled' };
+    const env = await installEnv(); // await 는 해시 확인 전에 끝낸다(확인과 실행 사이에 끼지 않게)
     if (hashInstall() !== want) return { ok: false, reason: 'changed' };
-    const r = await exec('/bin/bash', [installSh()], { timeout: 120000, maxBuffer: 1 << 20, env: installEnv() });
+    const r = await exec('/bin/bash', [installSh()], { timeout: 120000, maxBuffer: 1 << 20, env });
     if (!r.err && setupState) saveSetup({ connect: 'done' }); // 연결이 끝났음을 기록한다(첫 설정 상태)
     return { ok: !r.err, output: L.cleanBlock(r.stdout + (r.stderr ? '\n' + r.stderr : '')) };
   } finally { installBusy = false; }
@@ -1952,10 +1953,10 @@ async function runTool(name, args, cltOk) {
 async function checkPrereqs() {
   const clt = (await exec('/usr/bin/xcode-select', ['-p'], { timeout: 4000, cwd: os.homedir() })).code === 0;
   const bin = await resolveClaude();
-  const claudeP = bin ? exec(bin, ['--version'], { timeout: 15000, cwd: os.homedir() }).then((r) => (r.code === 0 ? 'ok' : 'broken')) : Promise.resolve('missing');
+  const claudeP = bin ? exec(bin, ['--version'], { timeout: 15000, cwd: os.homedir(), env: childEnv(true) }).then((r) => (r.code === 0 ? 'ok' : 'broken')) : Promise.resolve('missing');
   const [claude, git, python3, jq, perl] = await Promise.all([claudeP, runTool('git', ['--version'], clt), runTool('python3', ['--version'], clt), runTool('jq', ['--version'], clt), runTool('perl', ['-e', 'exit 0'], clt)]);
   let auth = null;
-  if (claude === 'ok') { const r = await exec(bin, ['auth', 'status'], { timeout: 10000, cwd: os.homedir() }); auth = L.parseAuthStatus(r.stdout); }
+  if (claude === 'ok') { const r = await exec(bin, ['auth', 'status'], { timeout: 10000, cwd: os.homedir(), env: childEnv(true) }); auth = L.parseAuthStatus(r.stdout); }
   let macosVersion = null; try { macosVersion = process.getSystemVersion(); } catch { /* 모름 */ }
   const list = L.modelPrereqs({ macos: process.platform === 'darwin', macosVersion, claude, auth, git, python3, jq, perl });
   return { list, ready: L.prereqsReady(list) };
@@ -2016,26 +2017,50 @@ ipcMain.handle('meet:get', async (e) => {
   return { show: L.firstMeetingBanner({ memories, probe, state: setupState, profile }) };
 });
 ipcMain.handle('meet:dismiss', (e) => (fromMain(e) && setupState ? { ok: setupState.dismissedAt ? true : saveSetup({ dismissedAt: nowIso() }) } : { ok: false }));
+// 첫 만남 준비 판단: 비동기 사실 모으기(설정 파일·auth status)와 동기 판정(meetGate)을 나눈다. 판정은 lib.js firstMeetingGate(순수)
+const claudeConfigJson = () => (process.env.CLAUDE_CONFIG_DIR && path.isAbsolute(process.env.CLAUDE_CONFIG_DIR) ? path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json') : path.join(os.homedir(), '.claude.json'));
+const CLAUDE_CFG_MAX = 4 << 20; // 설정 파일 읽기 상한(넘으면 모름). readRegular 는 O_NOFOLLOW 로 연다
+// -> { onboarded: true|false|null, loggedIn: true|false|null }. 파일이 없으면 모름(null): 셸 프로필에만 CLAUDE_CONFIG_DIR 가 있어 엉뚱한 파일을 볼 수 있다. auth status 는 onboarded 가 true 가 아닐 때만 부른다
+async function meetFacts() {
+  const cfg = readRegular(claudeConfigJson(), CLAUDE_CFG_MAX, false);
+  const onboarded = !cfg || cfg.truncated ? null : L.parseOnboarded(cfg.text);
+  let loggedIn = null;
+  if (onboarded !== true) {
+    const bin = await resolveClaude();
+    if (bin) { const r = await exec(bin, ['auth', 'status'], { timeout: 10000, cwd: os.homedir(), env: childEnv(true) }); const a = L.parseAuthStatus(r.stdout); loggedIn = a ? a.loggedIn : null; }
+  }
+  return { onboarded, loggedIn };
+}
+// 동기 판정: 호출한 시점의 작업 공간·터미널 상태를 그대로 본다(await 가 끼지 않는다). term: 사실을 모으기 전에 잡아 둔 pty 객체
+function meetGate(id, w, term, facts) {
+  if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' };
+  if (!term || w.term !== term) return { ok: false, reason: 'no-term' };
+  return L.firstMeetingGate({ hasTerm: true, procName: termProc(w), bracketed: w.bracketed === true, awaitClaude: w.awaitClaude === true, claudeUp: w.claudeUp === true, quietMs: Date.now() - (w.lastOutputAt || 0), onboarded: facts.onboarded, hookState: !!readAgentState(w), loggedIn: facts.loggedIn });
+}
+let meetBusy = false; // 확인 창·검사가 진행 중이면 두 번째 요청은 무시(더블 클릭으로 확인 창·붙여넣기가 둘 되지 않게)
 // 시작/다시 하기: 스킬 "설치 요청" 과 같은 보호(활성 마루 작업 공간만, 붙여넣기 준비, 네이티브 확인, Enter 는 보내지 않음). 고정 문장 /first-meeting 만 쓴다.
 ipcMain.handle('meet:start', async (e, id) => {
   const w = wsFrom(e, id);
   if (!w || !ROOT) return { ok: false, reason: 'invalid' };
   if (w.id !== activeId) return { ok: false, reason: 'inactive' };
   if (!isMaruWs(w)) return { ok: false, reason: 'not-maru' };
-  if (!w.term) return { ok: false, reason: 'no-term' };
-  if (!w.bracketed) return { ok: false, reason: 'not-ready' };
-  if (shellFront(w)) return { ok: false, reason: 'shell' };
-  const text = L.FIRST_MEETING_TEXT;
-  const paste = L.firstMeetingPaste(text); // 고정 문장일 때만(일반 퀘스트 필터는 '/' 로 시작하는 문장을 거부한다)
-  if (!paste) return { ok: false, reason: 'invalid' };
-  if (!(await confirmBox(tr('meet.confirm.title'), tr('meet.confirm.detail', { text }), tr('meet.start')))) return { ok: false, reason: 'cancel' };
-  if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' };
-  if (!w.term || !w.bracketed) return { ok: false, reason: 'not-ready' };
-  if (shellFront(w)) return { ok: false, reason: 'shell' };
-  w.term.write(paste); // Enter 는 보내지 않는다
-  const r = { ok: true };
-  if (r.ok && setupState && !setupState.metAt) saveSetup({ metAt: nowIso() });
-  return r;
+  if (meetBusy) return { ok: false, reason: 'busy' };
+  meetBusy = true;
+  try {
+    const text = L.FIRST_MEETING_TEXT;
+    const paste = L.firstMeetingPaste(text); // 고정 문장일 때만(일반 퀘스트 필터는 '/' 로 시작하는 문장을 거부한다)
+    if (!paste) return { ok: false, reason: 'invalid' };
+    const term0 = w.term;
+    const g0 = meetGate(id, w, term0, await meetFacts()); // 첫 설정(테마·로그인) 화면에는 입력줄이 없다: 준비가 확인될 때만 확인 창을 띄운다
+    if (!g0.ok) return { ok: false, reason: g0.reason };
+    if (!(await confirmBox(tr('meet.confirm.title'), tr('meet.confirm.detail', { text }), tr('meet.start')))) return { ok: false, reason: 'cancel' };
+    const facts = await meetFacts(); // 비동기 일은 여기까지. 아래 판정과 쓰기 사이에는 await 가 없다
+    const g = meetGate(id, w, term0, facts);
+    if (!g.ok) return { ok: false, reason: g.reason };
+    w.term.write(paste); // Enter 는 보내지 않는다
+    if (setupState && !setupState.metAt) saveSetup({ metAt: nowIso() });
+    return { ok: true };
+  } finally { meetBusy = false; }
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
   homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,

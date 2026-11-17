@@ -305,6 +305,25 @@ check "python 이 없거나 고장나도 상태는 쓰고 exit 0" sh -c '[ "$1" 
 rc=$(as_run '{"agent_id":"a9","agent_type":"worker"}' sub-start); check "python 없으면 sub-start 는 조용히 건너뜀" sh -c '[ "$1" = 0 ] && [ ! -e "$2/a9" ]' _ "$rc" "$SD/$SID.subs"
 unset ASDIRS ASENV
 
+echo "== plist PATH 에 claude 폴더 덧붙임"
+rp() { run_env MARU_TOOL_DIRS="$T/good" MARU_HOME="$REPO" PATH="$1:$BASEPATH" -- bash -c '. "$1/scripts/lib.sh"; . "$1/scripts/launchd.sh"; render_plist "$1/launchd/com.maru.dream.plist.template"' _ "$REPO"; }
+pathline() { echo "$1" | grep "<key>PATH</key>"; }
+mkdir -p "$T/cl/bin"; printf '#!/bin/sh\n' > "$T/cl/bin/claude"; chmod +x "$T/cl/bin/claude"
+pa=$(pathline "$(rp "$T/cl/bin")")
+check "표준 밖 claude 폴더가 launchd PATH 맨 뒤에" has "$pa" "/usr/sbin:/sbin:$T/cl/bin</string>"
+pb=$(pathline "$(run_env MARU_TOOL_DIRS="$T/good" MARU_HOME="$REPO" -- bash -c '. "$1/scripts/lib.sh"; . "$1/scripts/launchd.sh"; render_plist "$1/launchd/com.maru.dream.plist.template"' _ "$REPO")")
+check "claude 가 없으면 기본 PATH 그대로(끝 ':'·'::' 없음)" sh -c 'echo "$1" | grep -q "/sbin</string>" && ! echo "$1" | grep -q "::"' _ "$pb"
+mkdir -p "$T/cl&amp<x>/bin"; printf '#!/bin/sh\n' > "$T/cl&amp<x>/bin/claude"; chmod +x "$T/cl&amp<x>/bin/claude"
+px=$(pathline "$(rp "$T/cl&amp<x>/bin")")
+check "XML 특수문자는 이스케이프" has "$px" "cl&amp;amp&lt;x&gt;/bin</string>"
+mkdir -p "$T/co:lon"; printf '#!/bin/sh\n' > "$T/co:lon/claude"; chmod +x "$T/co:lon/claude"
+pc=$(pathline "$(rp "$T/co:lon")")
+check "':' 든 폴더는 건너뜀" sh -c '! echo "$1" | grep -q "co:lon" && echo "$1" | grep -q "/sbin</string>"' _ "$pc"
+pd=$(pathline "$(rp /opt/homebrew/bin)")
+check "표준 폴더는 중복 추가하지 않음" sh -c '[ "$(echo "$1" | grep -o "/opt/homebrew/bin" | wc -l | tr -d " ")" = 1 ]' _ "$pd"
+check "claude_path_note: 표준 밖이면 추가 안내 한 줄" has "$(run_env MARU_TOOL_DIRS="$T/good" MARU_HOME="$REPO" PATH="$T/cl/bin:$BASEPATH" MARU_LANG=en -- bash -c '. "$1/scripts/lib.sh"; . "$1/scripts/launchd.sh"; claude_path_note' _ "$REPO")" "was added to the end of the nightly job's PATH"
+check "claude_path_note: 못 찾으면 표준 위치 안내" has "$(run_env MARU_TOOL_DIRS="$T/good" MARU_HOME="$REPO" MARU_LANG=en -- bash -c '. "$1/scripts/lib.sh"; . "$1/scripts/launchd.sh"; claude_path_note' _ "$REPO")" "relies on the standard locations"
+
 echo "== 가드 확인"
 check "진짜 launchctl 은 호출되지 않음" [ ! -e "$T/real-launchctl.called" ]
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.

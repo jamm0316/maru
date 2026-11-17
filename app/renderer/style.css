@@ -200,8 +200,8 @@ html[lang="en"] .card,html[lang="en"] .quest,html[lang="en"] .todo,html[lang="en
 .dlg-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .field{display:flex;flex-direction:column;gap:6px}
 .lbl{font-size:12px;color:var(--mute);letter-spacing:.5px}
-#name-input{font:inherit;font-size:16px;color:var(--ink);background:#0E0B08;border:1px solid #3A2A1C;border-radius:10px;padding:10px 12px}
-#name-input:focus{border-color:var(--or);outline:none;box-shadow:0 0 0 2px rgba(255,138,42,.25)}
+#name-input,#su-name{font:inherit;font-size:16px;color:var(--ink);background:#0E0B08;border:1px solid #3A2A1C;border-radius:10px;padding:10px 12px}
+#name-input:focus,#su-name:focus{border-color:var(--or);outline:none;box-shadow:0 0 0 2px rgba(255,138,42,.25)}
 .err{min-height:1.2em;font-size:12px;color:#FF9A7A}
 .seg{display:flex;gap:8px}
 .seg-b{flex:1;font:inherit;font-size:13px;color:var(--soft);background:transparent;border:1px solid var(--line);border-radius:10px;padding:9px 12px;cursor:pointer}
@@ -412,14 +412,14 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 /* 첫 설정 덮개·첫 만남 배너 */
 .setup{position:fixed;inset:0;z-index:90;background:var(--bg);display:flex;align-items:flex-start;justify-content:center;padding:24px;overflow:auto}
 .setup[hidden]{display:none}
-.su-card{margin:auto;width:min(860px,100%);display:flex;flex-direction:column;gap:12px;background:var(--panel);border:1px solid #3A2A1C;border-radius:14px;padding:24px;box-shadow:0 24px 80px rgba(0,0,0,.6)}
-.su-wrap{display:flex;gap:24px;min-height:340px}
+.su-card{margin:0 auto;width:min(860px,100%);height:min(640px,calc(100vh - 48px));box-sizing:border-box;display:flex;flex-direction:column;gap:12px;background:var(--panel);border:1px solid #3A2A1C;border-radius:14px;padding:24px;box-shadow:0 24px 80px rgba(0,0,0,.6)}
+.su-wrap{display:flex;gap:24px;flex:1 1 auto;min-height:0}
 .su-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;width:210px;flex:0 0 auto}
 .su-steps li{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);color:var(--mute);font-size:13px}
 .su-steps li.current{border-color:var(--or);color:var(--ink);background:var(--sel)}
 .su-steps li.done{color:var(--soft)}
 .su-steps .st{font-size:11px;color:var(--mute)}
-.su-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:12px}
+.su-body{flex:1 1 auto;min-width:0;min-height:0;overflow-y:auto;scrollbar-gutter:stable;scroll-padding-bottom:64px;display:flex;flex-direction:column;gap:12px}
 .su-body h2{margin:0;font-size:17px;color:var(--ink)}
 .su-body p,.su-body li{font-size:13px;line-height:1.6;color:var(--soft)}
 .su-body ul{margin:0;padding-left:18px}
@@ -428,7 +428,8 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 .su-row .rt{display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:13px;color:var(--ink)}
 .su-row .how{font-size:12px;color:var(--mute);user-select:text;-webkit-user-select:text;cursor:text}
 .su-err{color:var(--or2);font-size:13px}
-.su-body .btn-row{margin-top:auto}
+.su-body .btn-row{margin-top:auto;position:sticky;bottom:0;background:var(--panel);padding-top:8px}
+.su-steps{overflow-y:auto}
 .meet{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .meet[hidden]{display:none}
 .meet #meet-text{flex:1 1 auto}

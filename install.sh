@@ -87,6 +87,7 @@ for spec in "SessionStart:session-context.sh" "Stop:journal-tick.sh" "PreCompact
 done
 
 say "$(T "launchd 작업 $LABEL (매일 03:30)" "launchd job $LABEL (daily 03:30)")"
+claude_path_note
 install_launchd "$LABEL" "$MARU_HOME/launchd/$LABEL.plist.template" "$PLIST" "${DRY:+1}" "$MARU_DATA/backups" || die "$(T "launchd 작업 $LABEL 설치 실패" "launchd job $LABEL install failed")"
 
 if [ -n "$TG" ]; then

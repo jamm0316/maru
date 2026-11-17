@@ -2277,7 +2277,7 @@ t('앱 연결(소스 구조): fromMain·고정 문장·dev 전용 환경변수·
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   for (const ch of ['setup:get', 'setup:prereqs', 'setup:create-home', 'setup:connect-later', 'setup:finish', 'meet:get', 'meet:dismiss']) assert.ok(new RegExp("ipcMain\\.handle\\('" + ch + "', (async )?\\(e[,)][^\\n]*\\n?[\\s\\S]{0,80}fromMain\\(e\\)").test(main), ch);
   const ms = main.split("ipcMain.handle('meet:start'")[1].split('\n});')[0];
-  assert.ok(/wsFrom\(e, id\)/.test(ms) && /isMaruWs\(w\)/.test(ms) && /w\.bracketed/.test(ms) && /confirmBox/.test(ms) && /firstMeetingPaste\(text\)/.test(ms) && !/writePrompt/.test(ms) && !/\\r|\\n/.test(ms));
+  assert.ok(/wsFrom\(e, id\)/.test(ms) && /isMaruWs\(w\)/.test(ms) && /meetFacts\(\)/.test(ms) && /meetGate\(id, w, term0/.test(ms) && /bracketed: w\.bracketed === true/.test(main) && /awaitClaude: w\.awaitClaude === true/.test(main) && /meetBusy/.test(ms) && /confirmBox/.test(ms) && /firstMeetingPaste\(text\)/.test(ms) && !/writePrompt/.test(ms) && !/\\r|\\n/.test(ms));
   assert.ok(/!app\.isPackaged && typeof process\.env\[k\]/.test(main) && /MARU_APP_MANAGED_HOME/.test(main) && /MARU_APP_PAYLOAD/.test(main));
   assert.ok(/MARU_LANG: curLang\(\)/.test(main) && /installEnv\(\)/.test(main));
   assert.ok(/app\.relaunch\(\)/.test(main) && /'hierarchy'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main));
@@ -3243,6 +3243,55 @@ t('상태 기록 읽기 상한(R7): cwd 가 긴 한글 경로여도 8192 안에�
   assert.ok(esc.length > 4096 && esc.length <= 8192); assert.strictEqual(L.parseAgentRecord(esc).cwd, cwd); assert.strictEqual(L.parseAgentRecord(' '.repeat(8193) + '{}'), null);
   const f = path.join(tmp, 'agent-state.json'); fs.writeFileSync(f, esc); assert.strictEqual(L.parseAgentRecord(L.readRegular(f, 8192, false).text).cwd, cwd); // main 의 읽기 상한(8192)과 같은 값
   assert.ok(/readRegular\(f, 8192, false\)/.test(fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8')));
+});
+
+t('childPath: claude 폴더는 맨 뒤에(절대·실재·"/" 아님만), 중복 제거', () => {
+  const extra = ['/h/.local/bin', '/usr/bin']; const isDir = (d) => d === '/n/v20/bin' || d === '/usr/bin' || d === '/';
+  assert.strictEqual(L.childPath({ extra, current: '/x:/usr/bin', claudeBin: '/n/v20/bin/claude', isDir }), '/h/.local/bin:/usr/bin:/x:/n/v20/bin');
+  assert.strictEqual(L.childPath({ extra, current: '/x', claudeBin: '/usr/bin/claude', isDir }), '/h/.local/bin:/usr/bin:/x'); // 표준 폴더는 중복 없이 그대로
+  assert.strictEqual(L.childPath({ extra, current: '/x', claudeBin: '/없는/bin/claude', isDir }), '/h/.local/bin:/usr/bin:/x');
+  assert.strictEqual(L.childPath({ extra, current: '/x', claudeBin: 'claude', isDir }), '/h/.local/bin:/usr/bin:/x');
+  assert.strictEqual(L.childPath({ extra, current: '/x', claudeBin: '/claude', isDir }), '/h/.local/bin:/usr/bin:/x'); // "/" 는 건너뜀
+  assert.strictEqual(L.childPath({ extra, current: '/x', claudeBin: '/a:b/claude', isDir: () => true }), '/h/.local/bin:/usr/bin:/x');
+  assert.strictEqual(L.childPath({ extra, current: '/x', claudeBin: null, isDir }), '/h/.local/bin:/usr/bin:/x');
+  assert.strictEqual(L.childPath({ extra, current: undefined, claudeBin: '/n/v20/bin/claude', isDir: () => { throw new Error('x'); } }), '/h/.local/bin:/usr/bin');
+});
+t('parseOnboarded: true/false/null', () => {
+  assert.strictEqual(L.parseOnboarded('{"hasCompletedOnboarding":true,"x":1}'), true);
+  assert.strictEqual(L.parseOnboarded('{"theme":"dark"}'), false);
+  assert.strictEqual(L.parseOnboarded('{"hasCompletedOnboarding":"true"}'), false);
+  for (const bad of ['', 'not json', '[1]', 'null', 42, undefined]) assert.strictEqual(L.parseOnboarded(bad), null);
+});
+t('firstMeetingGate: 첫 설정 중·셸·준비 전에는 채우지 않는다', () => {
+  const ok = { hasTerm: true, procName: 'claude', bracketed: true, awaitClaude: true, claudeUp: true, quietMs: 1000, onboarded: true, hookState: false, loggedIn: true };
+  assert.deepStrictEqual(L.firstMeetingGate(ok), { ok: true });
+  assert.deepStrictEqual(L.firstMeetingGate({ ...ok, hasTerm: false }), { ok: false, reason: 'no-term' });
+  assert.deepStrictEqual(L.firstMeetingGate({ ...ok, procName: 'zsh' }), { ok: false, reason: 'shell' });
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: false }).reason, 'setup'); // 테마 선택 화면(설정 파일은 읽었고 키가 true 아님)
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: false, loggedIn: true }).reason, 'setup');
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: false, hookState: true }).ok, true); // 훅 상태가 있으면 진짜 세션이 시작된 것
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: true, loggedIn: false }).ok, true); // 환경변수로 로그인한 사람을 auth status 로 막지 않는다
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: null, loggedIn: false }).reason, 'setup'); // 설정 파일 없음 + 로그인 안 됨 = 첫 실행
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: null, loggedIn: null }).ok, true);
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: null, loggedIn: true }).ok, true);
+  assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: null, loggedIn: false, hookState: true }).ok, true);
+  assert.strictEqual(L.firstMeetingGate({ ...ok, bracketed: false }).reason, 'not-ready');
+  assert.strictEqual(L.firstMeetingGate({ ...ok, awaitClaude: true, claudeUp: false }).reason, 'not-ready'); // 우리가 연 작업 공간은 claudeUp 필요
+  assert.strictEqual(L.firstMeetingGate({ ...ok, awaitClaude: false, claudeUp: false }).ok, true); // 처음 작업 공간·복원된 작업 공간은 awaitClaude 가 없다
+  assert.strictEqual(L.firstMeetingGate({ ...ok, quietMs: 100 }).reason, 'not-ready');
+  assert.strictEqual(L.firstMeetingGate(null).reason, 'no-term');
+});
+t('첫 만남 안내문이 ko·en 모두 있고 렌더러가 setup 사유를 쓴다', () => {
+  for (const lang of ['ko', 'en']) assert.ok(I.t(lang, 'meet.note.setup').length > 10);
+  assert.ok(/reason === 'setup' \? 'meet.note.setup'/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8')));
+});
+t('managedWsTitle: 관리형 홈의 기본/".maru" 제목만 제품 이름으로', () => {
+  const roots = ['/h/.maru', '/real/h/.maru'];
+  assert.strictEqual(L.managedWsTitle('.maru', '/h/.maru', roots, '마루'), '마루');
+  assert.strictEqual(L.managedWsTitle('', '/real/h/.maru/', roots, 'Maru'), 'Maru');
+  assert.strictEqual(L.managedWsTitle('내 제목', '/h/.maru', roots, '마루'), '내 제목');
+  assert.strictEqual(L.managedWsTitle('.maru', '/h/other/.maru', roots, '마루'), '.maru'); // 관리형 홈이 아니면 그대로
+  assert.strictEqual(L.managedWsTitle('.maru', '/h/.maru', [], '마루'), '.maru');
 });
 
 (async () => {

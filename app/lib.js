@@ -967,6 +967,11 @@ function workspaceTitle(cwd, fallback) {
   const c = [...cleanQuestText(base || (cwd === '/' ? '/' : ''))].slice(0, WS_TITLE_MAX).join('').trim();
   return c || (typeof fallback === 'string' && fallback ? fallback : 'workspace');
 }
+// 관리형 홈(roots: ROOT 와 그 realpath)의 작업 공간 기본 제목은 폴더 이름(".maru")이 아니라 제품 이름. 비었거나 자동으로 붙은 ".maru" 일 때만 바꾸고 사용자가 정한 제목은 그대로 둔다
+function managedWsTitle(title, cwd, roots, product) {
+  const isRoot = typeof cwd === 'string' && Array.isArray(roots) && roots.some((r) => typeof r === 'string' && r && r.replace(/\/+$/, '') === cwd.replace(/\/+$/, ''));
+  return isRoot && typeof product === 'string' && product && (!title || title === '.maru') ? product : title;
+}
 // 이미 쓰는 제목(taken)과 겹치면 " 2", " 3" … 을 붙인다
 function uniqueTitle(base, taken) {
   const used = new Set(taken);
@@ -2714,6 +2719,26 @@ function appendSyncLog(root, line, io) {
 }
 
 // 첫 만남 입력줄에 붙이는 고정 문장. 상수와 정확히 같을 때만 붙여넣기 문자열을 돌려준다(그 밖은 null). 일반 퀘스트용 isSafeQuestStart 는 '/' 로 시작하는 문장을 거부하므로 따로 둔다.
+// Claude Code 첫 실행 화면(테마·로그인)이 떠 있는 동안에는 입력줄이 없다. 붙여넣기 모드(bracketed)가 그 화면에서 꺼져 있는지 알 수 없어서 그것만 믿지 않고,
+// 첫 화면 동안에는 참일 수 없는 신호를 함께 본다: onboarded(설정 파일의 hasCompletedOnboarding 가 true 이거나 이 작업 공간의 훅 상태 파일이 있음)와 loggedIn(claude auth status).
+// ~/.claude.json 내용 -> true | false | null(읽지 못함·형식 이상: 막지 않는다)
+function parseOnboarded(text) {
+  if (typeof text !== 'string') return null;
+  let o; try { o = JSON.parse(text); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  return o.hasCompletedOnboarding === true;
+}
+// c = { hasTerm, procName, bracketed, awaitClaude, claudeUp, quietMs, onboarded: true|false|null, hookState: boolean, loggedIn: true|false|null }
+// -> { ok: true } | { ok: false, reason: 'no-term' | 'shell' | 'setup' | 'not-ready' }.
+// 'setup'(첫 설정 미완료): 훅 상태가 없고, onboarded === false(설정 파일을 읽었고 키가 true 가 아님)이거나 onboarded === null(모름)인데 loggedIn === false.
+// onboarded === true 면 loggedIn 은 보지 않는다(셸 프로필의 환경변수로 로그인한 사람을 앱 환경의 auth status 로 막지 않는다). claudeUp 은 우리가 연 작업 공간(awaitClaude)일 때만 요구한다(fillStep 과 같다)
+function firstMeetingGate(c) {
+  if (!c || !c.hasTerm) return { ok: false, reason: 'no-term' };
+  if (isShellProcessName(c.procName)) return { ok: false, reason: 'shell' };
+  if (c.hookState !== true && c.onboarded !== true && (c.onboarded === false || c.loggedIn === false)) return { ok: false, reason: 'setup' };
+  if (c.bracketed !== true || (c.awaitClaude === true && c.claudeUp !== true) || !(c.quietMs >= READY_QUIET_MS)) return { ok: false, reason: 'not-ready' };
+  return { ok: true };
+}
 function firstMeetingPaste(text) { return text === FIRST_MEETING_TEXT ? '\x1b[200~' + FIRST_MEETING_TEXT + '\x1b[201~' : null; }
 
 // 기억 폴더 읽기 가능 여부: 'missing'(아직 없음=새 사용자) | 'ok' | 'unreadable'(링크·권한 등)
@@ -2772,6 +2797,17 @@ function setupUnfinished({ found, state }) {
 // ---- 사전 요구사항 ----
 const PREREQ_IDS = ['macos', 'claude', 'auth', 'git', 'python3', 'jq', 'perl'];
 const PREREQ_HOW = { macos: 'prereq.how.macos', claude: 'prereq.how.claude', auth: 'prereq.how.auth', git: 'prereq.how.clt', python3: 'prereq.how.clt', jq: 'prereq.how.jq', perl: 'prereq.how.perl' };
+// install.sh·점검이 쓰는 PATH(순수): 기본 폴더·현재 PATH 뒤에 claude 가 있는 폴더(절대 경로·실재·"/" 아님·":" 없음)를 덧붙인다(중복 제거).
+// 앞이 아니라 뒤인 이유: 버전 관리자 shim 폴더가 git·python3 를 가리지 않게. 뒤에 있어도 claude 의 #!/usr/bin/env node 는 옆의 node 를 찾는다.
+// claudeBin: resolveClaude() 결과(없으면 null). isDir(path) -> boolean
+function childPath({ extra, current, claudeBin, isDir }) {
+  const path = require('path'); const out = [];
+  if (typeof claudeBin === 'string' && path.isAbsolute(claudeBin)) {
+    const d = path.dirname(claudeBin); let ok = false; try { ok = d !== '/' && !d.includes(':') && isDir(d) === true; } catch { ok = false; }
+    if (ok) out.push(d);
+  }
+  return [...new Set([...(Array.isArray(extra) ? extra : []), ...String(current || '').split(':').filter(Boolean), ...out])].join(':');
+}
 // PATH 문자열에서 실행 파일 찾기(io.isExec(path) -> boolean)
 function findInPath(name, pathStr, isExec) {
   const path = require('path');
@@ -3239,9 +3275,9 @@ const api = {
   CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
   macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, promptHandoff, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
   hierarchyOrder, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
-  MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
+  MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, parseOnboarded, firstMeetingGate, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
   defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
-  PREREQ_IDS, findInPath, modelPrereqs, prereqsReady, firstMeetingBanner,
+  PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, firstMeetingBanner,
   INBOX_NOTIF_MAX, PROPOSAL_FILE_MAX, PROPOSAL_TOTAL_MAX, PROPOSAL_FILES_MAX, logAtMs, plausibleLogAt, fmtLogAt, seenToStore, PROPOSAL_LIST_MAX, INBOX_SEEN_MAX_BYTES, validProposalSlug, cleanDisplay, cleanProposalText, proposalMeta, scanProposalDir, listProposals, proposalDetail, trashProposalDir, skillRequestText, parseSquadCheck, summarizeSquadCheck, validateInboxSeen, parseInboxSeen, readInboxSeenFile, saveInboxSeen, markUnseen, newestAt, relativeAgo,
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
@@ -3254,7 +3290,7 @@ const api = {
   SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, matchSubs, squadOpen, claudeLaunchCommand,
   TODO_DONE_MAX, TODO_DONE_MAX_BYTES, fitTodoDone, todoMarkKey, TODO_DONE_KEEP_SEC, TODO_DONE_HIDE_SEC, titleKey, todoTitleRecordable, validTodoDoneEntry, makeTodoDone, todoMarkable, formatTodoDone, parseTodoDone, pruneTodoDone, addTodoDone, removeTodoDone, filterTodos, readTodoDoneFile, saveTodoDone, projectOpenTodos,
   confirmClose, confirmRestart, closeRequestAction, lookupWs, ringFrameInterval, readWorkspacesFile, backupCorruptFile,
-  WS_MAX, WS_STATES, workspaceTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,
+  WS_MAX, WS_STATES, workspaceTitle, managedWsTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,
   LOGO, logoShapesSvg, RING, ringInit, stepRing, ringView,
   traySummary, trayTitle, trayTodoTitles, trayMenuModel, trayIconPath,
   splitProjectField, projectKey, isProjectKey, neutralizeBody, looksSecret, cleanProjectTitle, parseProjectRegistry, parseJournalText, readJournalEntries,

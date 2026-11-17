@@ -1619,7 +1619,7 @@
 
   // ---- 첫 설정(덮개) ----
   const SU_STEPS = ['lang', 'prereq', 'home', 'connect', 'done'];
-  const su = { blocked: null, open: false, step: 'lang', name: '', prereq: null, checking: false, busy: false, err: '', later: false, fake: false };
+  const su = { blocked: null, open: false, step: 'lang', name: '', prereq: null, checking: false, busy: false, err: '', later: false, fake: false, authOk: null };
   let suUnfinished = false;
   let homeManaged = false; let homeNotice = null;
   function suOpen(step, fake, blocked) {
@@ -1628,10 +1628,16 @@
     $('setup').hidden = false; $('root-missing').hidden = true; $('meet-banner').hidden = true;
     syncModalState();
     renderSetup(true);
-    if (step === 'prereq') suCheck();
+    if (step === 'prereq') suCheck(); else if (step === 'done') suAuth();
   }
   function suClose() { su.open = false; $('setup').hidden = true; syncModalState(); focusTerm(); refreshMeet(); }
-  function suGo(step) { su.step = step; su.err = ''; renderSetup(true); if (step === 'prereq') suCheck(); }
+  function suGo(step) { su.step = step; su.err = ''; renderSetup(true); if (step === 'prereq') suCheck(); else if (step === 'done') suAuth(); }
+  // 마지막 단계: 로그인 상태를 다시 읽어(앱이 다시 시작돼 이전 점검 결과가 없다) 로그인 전이면 그렇게 말한다
+  async function suAuth() {
+    su.authOk = null; let r = null; try { r = await window.maru.setupPrereqs(); } catch (e) { r = null; }
+    const a = r && Array.isArray(r.list) ? r.list.find((x) => x.id === 'auth') : null; su.authOk = a ? a.status === 'ok' : null;
+    if (su.step === 'done' && su.open) renderSetup(false);
+  }
   async function suCheck() {
     su.checking = true; su.prereq = null; su.err = ''; renderSetup(false);
     let r = null; try { r = await window.maru.setupPrereqs(); } catch (e) { r = null; }
@@ -1699,6 +1705,7 @@
       row.append(suBtn(T('su.connect.later'), 'ghost', suLater, su.busy), suBtn(T('su.connect.preview'), 'primary', suConnect, su.busy));
     } else {
       body.append(el('h2', '', T('su.done.title')), el('p', '', T('su.done.textMeet')));
+      if (su.authOk === false) body.append(el('div', 'hint', T('su.prereq.authNote') + ' ' + T('prereq.how.auth')));
       if (su.later) body.append(el('p', 'hint', T('su.done.later')));
       row.append(suBtn(T('su.done.skip'), 'ghost', () => suFinish(false)), suBtn(T('su.done.meet'), 'primary', () => suFinish(true)));
     }
@@ -1739,13 +1746,16 @@
     let r = null; try { r = await window.maru.meetGet(); } catch (e) { r = null; }
     $('meet-banner').hidden = !(r && r.show) || su.open;
   }
+  let meetPending = false; // 확인 창이 떠 있는 동안 다시 누르지 못하게
   async function startMeet() {
-    if (!activeId || modalOpen()) return;
-    let r = null; try { r = await window.maru.meetStart(activeId); } catch (e) { r = null; }
+    if (!activeId || modalOpen() || meetPending) return;
+    meetPending = true; $('meet-start').disabled = true;
+    let r = null; try { r = await window.maru.meetStart(activeId); } catch (e) { r = null; } finally { meetPending = false; $('meet-start').disabled = false; }
+    if (r && r.reason === 'busy') return;
     if (r && r.ok) { flashNote(T('meet.note.ok')); refreshMeet(); return; }
     const reason = r && r.reason;
     if (reason === 'cancel') return;
-    flashNote(T(reason === 'not-maru' ? 'meet.note.not-maru' : reason === 'not-ready' || reason === 'no-term' || reason === 'shell' ? 'meet.note.not-ready' : 'meet.note.fail'));
+    flashNote(T(reason === 'not-maru' ? 'meet.note.not-maru' : reason === 'setup' ? 'meet.note.setup' : reason === 'not-ready' || reason === 'no-term' || reason === 'shell' ? 'meet.note.not-ready' : 'meet.note.fail'));
   }
   $('meet-start').addEventListener('click', startMeet);
   $('meet-dismiss').addEventListener('click', async () => { try { await window.maru.meetDismiss(); } catch (e) { /* 무시 */ } $('meet-banner').hidden = true; });

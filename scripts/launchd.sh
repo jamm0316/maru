@@ -7,19 +7,37 @@ MARU_PLIST_RENDER=${MARU_PLIST_RENDER:-render_plist}
 MARU_LAUNCHCTL=${MARU_LAUNCHCTL:-launchctl}
 MARU_PLUTIL=${MARU_PLUTIL:-plutil}
 
-# 템플릿의 {{MARU_HOME}} {{MARU_DATA}} {{HOME}} {{CLAUDE_CONFIG_ENV}} 를 채워 stdout 으로 낸다: render_plist <템플릿>
-# 값은 환경(MARU_HOME, MARU_DATA, HOME, CLAUDE_CONFIG_DIR)에서 읽는다. 실패하면 0 이 아닌 코드.
+# 템플릿의 {{MARU_HOME}} {{MARU_DATA}} {{HOME}} {{CLAUDE_CONFIG_ENV}} {{CLAUDE_BIN_DIR}} 를 채워 stdout 으로 낸다: render_plist <템플릿>
+# 값은 환경(MARU_HOME, MARU_DATA, HOME, CLAUDE_CONFIG_DIR)에서 읽는다. {{CLAUDE_BIN_DIR}} 는 지금 PATH 의 claude 가 있는 폴더(절대 경로·실재·":" 없음·표준 폴더가 아님)를 ":폴더" 로 PATH 맨 뒤에 덧붙인다(비면 빈 문자열; 버전 관리자 shim 이 git·python3 를 가리지 않게) — launchd 의 최소 PATH 로는 버전 관리자·npm 전역 폴더의 claude 를 못 찾아 새벽 정리가 조용히 실패하기 때문. 실패하면 0 이 아닌 코드.
 render_plist() {
-  python3 -I - "$1" "$MARU_HOME" "$MARU_DATA" "$HOME" "${CLAUDE_CONFIG_DIR:-}" <<'PY'
-import sys
+  python3 -I - "$1" "$MARU_HOME" "$MARU_DATA" "$HOME" "${CLAUDE_CONFIG_DIR:-}" "$(command -v claude 2>/dev/null)" <<'PY'
+import os, sys
 from xml.sax.saxutils import escape
 t = open(sys.argv[1], encoding="utf-8").read()
 for k, v in zip(("{{MARU_HOME}}", "{{MARU_DATA}}", "{{HOME}}"), sys.argv[2:5]):
     t = t.replace(k, escape(v))
 cfg = sys.argv[5]
 env = f"    <key>CLAUDE_CONFIG_DIR</key><string>{escape(cfg)}</string>\n" if cfg else ""
-sys.stdout.write(t.replace("{{CLAUDE_CONFIG_ENV}}", env).rstrip("\n") + "\n")
+cb = os.path.dirname(sys.argv[6]) if sys.argv[6].startswith("/") else ""
+std = (sys.argv[4] + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+pre = ":" + escape(cb) if cb and ":" not in cb and os.path.isdir(cb) and cb != "/" and cb not in std else ""
+sys.stdout.write(t.replace("{{CLAUDE_BIN_DIR}}", pre).replace("{{CLAUDE_CONFIG_ENV}}", env).rstrip("\n") + "\n")
 PY
+}
+
+# 야간 작업 PATH 안내 한 줄(render_plist 와 같은 판정): claude 폴더가 표준 밖이면 덧붙였다고, claude 를 못 찾으면 표준 위치에 기댄다고 알린다.
+claude_path_note() {
+  local c d
+  c=$(command -v claude 2>/dev/null)
+  case "$c" in
+    /*) d=$(dirname "$c")
+      case "$d" in
+        /|*:*) ;;
+        "$HOME/.local/bin"|/opt/homebrew/bin|/usr/local/bin|/usr/bin|/bin|/usr/sbin|/sbin) return 0;;
+        *) [ -d "$d" ] && { echo "$(T "  참고: claude 폴더($d)를 야간 작업의 PATH 끝에 추가했습니다" "  Note: the claude folder ($d) was added to the end of the nightly job's PATH")"; return 0; };;
+      esac;;
+  esac
+  echo "$(T "  참고: claude 위치를 찾지 못해 야간 작업은 표준 위치(~/.local/bin, /opt/homebrew/bin, /usr/local/bin)에 기댑니다" "  Note: claude was not found here, so the nightly job relies on the standard locations (~/.local/bin, /opt/homebrew/bin, /usr/local/bin)")"
 }
 
 # 렌더 결과 검증: 비어 있지 않음 + 치환 안 된 자리표시자 없음 + plutil -lint. 실패하면 이유를 출력하고 1.
