@@ -62,7 +62,7 @@ window.MARU_COPY = {
     "s2.diagram": "A diagram of three layers: now, today and for good, joined by a line. A moon marked 03:30 sits between today and for good.",
     "s2.doc.t": "One reference document per project.",
     "s2.doc.b": "Goals, decisions, open questions and current state live in one document that Maru and every project session read, so they work from the same facts. It is a plain Markdown file, so you can read and edit it too.",
-    "s2.foot": "The structure borrows from how human memory is described — working, short-term and long-term memory, and consolidation during sleep — and from published research on agent memory. What we left out and why is in the README.",
+    "s2.foot": "The structure borrows from how human memory is described — working, short-term and long-term memory, and consolidation during sleep — and from published research on agent memory.",
 
     "s3.label": "03 — What you get",
     "s3.h2": "What changes when there is only one.",
@@ -111,7 +111,7 @@ window.MARU_COPY = {
     "s4.p3.b": "It runs on the Claude subscription you already have.",
     "s4.p4.t": "It asks before every session.",
     "s4.p4.b": "Before a session opens, you see exactly what will be handed over — and you decide.",
-    "s4.note": "Reflection and nightly tidying use part of your subscription's usage. You can turn them down or off.",
+    "s4.note": "Reflection and nightly tidying use part of your subscription's usage.",
 
     "s5.label": "05 — Why it exists",
     "s5.p": "I opened a new session one afternoon and it had no idea what I had done that morning. So I read about how people remember — what stays in mind for a moment, what lasts a day, what lasts for years, and what sleep does to all of it. Maru is that shape, built for an agent. It is the tool I wanted: one that lets me move fast and still know where everything is.",
@@ -205,7 +205,7 @@ window.MARU_COPY = {
     "s2.diagram": "세 층의 도식: 지금, 오늘, 오래가 선으로 이어져 있고, 오늘과 오래 사이에 03:30이 적힌 달이 있습니다.",
     "s2.doc.t": "프로젝트마다 기준 문서 하나.",
     "s2.doc.b": "목표, 결정, 아직 정하지 않은 것, 현재 상태가 한 문서에 담기고, Maru와 모든 프로젝트 세션이 그 문서를 읽습니다. 그래서 모두 같은 사실을 바탕으로 일합니다. 일반 Markdown 파일이라 직접 읽고 고칠 수도 있습니다.",
-    "s2.foot": "이 구조는 사람의 기억을 설명하는 방식(작업 기억, 단기 기억, 장기 기억, 수면 중 정리)과 에이전트 기억에 관한 공개 연구에서 빌려 왔습니다. 무엇을 빼고 왜 뺐는지는 README에 적어 두었습니다.",
+    "s2.foot": "이 구조는 사람의 기억을 설명하는 방식(작업 기억, 단기 기억, 장기 기억, 수면 중 정리)과 에이전트 기억에 관한 공개 연구에서 빌려 왔습니다.",
 
     "s3.label": "03 — 얻는 것",
     "s3.h2": "하나만 남으면 달라지는 것.",
@@ -254,7 +254,7 @@ window.MARU_COPY = {
     "s4.p3.b": "이미 쓰는 Claude 구독으로 동작합니다.",
     "s4.p4.t": "세션을 열 때마다 묻습니다.",
     "s4.p4.b": "세션을 열기 전에 맡길 내용을 그대로 보여 주고, 열지는 당신이 정합니다.",
-    "s4.note": "회고와 밤사이 정리는 구독 사용량의 일부를 씁니다. 줄이거나 끌 수 있습니다.",
+    "s4.note": "회고와 밤사이 정리는 구독 사용량의 일부를 씁니다.",
 
     "s5.label": "05 — 만든 이유",
     "s5.p": "어느 오후 새 세션을 열었는데, 아침에 한 일을 전혀 모르고 있었습니다. 그래서 사람이 어떻게 기억하는지를 읽었습니다. 잠깐 머무는 것, 하루를 가는 것, 몇 해를 가는 것, 그리고 잠이 그 모두에 하는 일을요. Maru는 그 모양을 에이전트에 옮긴 것입니다. 빠르게 움직이면서도 모든 것이 어디 있는지 아는 도구, 제가 갖고 싶던 도구입니다.",
