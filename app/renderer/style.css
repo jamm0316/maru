@@ -428,6 +428,9 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 .su-row .rt{display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:13px;color:var(--ink)}
 .su-row .how{font-size:12px;color:var(--mute);user-select:text;-webkit-user-select:text;cursor:text}
 .su-err{color:var(--or2);font-size:13px}
+.su-body>*{flex:0 0 auto}
+.su-act{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.su-act .btn{padding:4px 12px;font-size:12px}
 .su-body .btn-row{margin-top:auto;position:sticky;bottom:0;background:var(--panel);padding-top:8px}
 .su-steps{overflow-y:auto}
 .meet{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -478,3 +481,4 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 .trust-item{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .trust-path{font-family:var(--mono);font-size:12px;color:var(--soft);overflow-wrap:anywhere;min-width:0}
 .rep-none{color:var(--mute);font-style:italic}
+.su-body p,.su-row .how,.su-body .hint{word-break:keep-all}

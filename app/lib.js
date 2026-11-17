@@ -2821,7 +2821,7 @@ function findInPath(name, pathStr, isExec) {
   return null;
 }
 // raw: { macos: boolean, claude: 'ok'|'missing'|'broken', auth: parseAuthStatus 결과|null, git/python3/jq/perl: 'ok'|'missing'|'broken' }
-// -> [{ id, status: 'ok'|'missing'|'need'|'unknown', required, how }]. auth 는 필수가 아니다(홈 만들기는 로그인 없이 가능).
+// -> [{ id, status: 'ok'|'missing'|'need'|'unknown', required, how }]. auth 는 필수가 아니다(필요 표시와 로그인 단추는 있지만 막지 않는다: API 키·Bedrock 처럼 셸 환경변수로 인증하는 사용자도 지나가야 한다).
 function modelPrereqs(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
   const tool = (v) => (v === 'ok' ? 'ok' : v === 'broken' ? 'need' : 'missing');
@@ -2833,9 +2833,65 @@ function modelPrereqs(raw) {
   else auth = 'need';
   out.push({ id: 'auth', status: auth, required: false });
   for (const id of ['git', 'python3', 'jq', 'perl']) out.push({ id, status: tool(r[id]), required: true });
-  return out.map((x) => ({ ...x, how: x.status === 'ok' ? null : PREREQ_HOW[x.id] }));
+  const howKey = (x) => (x.id === 'claude' && x.status === 'need' ? 'prereq.how.claudeBroken' : x.id === 'auth' && r.claude !== 'ok' ? 'prereq.how.authFirst' : PREREQ_HOW[x.id]); // 고장 난 claude 는 재설치 안내, claude 가 없으면 로그인보다 설치가 먼저
+  return out.map((x) => ({ ...x, how: x.status === 'ok' ? null : howKey(x) }));
 }
 function prereqsReady(list) { return Array.isArray(list) && PREREQ_IDS.every((id) => { const x = list.find((y) => y && y.id === id); return !!x && (x.status === 'ok' || !x.required); }); }
+
+// ---- claude 위치 찾기(순수) ----
+// home: 홈 폴더, lines: 셸 탐색(`command -v claude`)이 낸 후보 줄들, nvmDirs: ~/.nvm/versions/node 아래 폴더 이름들
+// -> 시도할 절대 경로 배열(셸이 알려 준 것 먼저, 고정 위치, nvm 최신 버전 순; 중복·상대 경로·제어 문자 제외)
+const NVM_MAX = 50;
+function nvmVersionDirs(names) {
+  const key = (v) => v.replace(/^v/, '').split('.').map(Number);
+  return (Array.isArray(names) ? names : []).filter((x) => typeof x === 'string' && /^v\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(x))
+    .sort((a, b) => { const ka = key(a); const kb = key(b); for (let i = 0; i < 3; i++) if (ka[i] !== kb[i]) return kb[i] - ka[i]; return 0; }).slice(0, NVM_MAX);
+}
+function claudeCandidates({ home, lines, nvmDirs }) {
+  const path = require('path');
+  const ok = (p) => typeof p === 'string' && p.startsWith('/') && !/[\x00-\x1f\x7f]/.test(p);
+  const out = [];
+  for (const l of Array.isArray(lines) ? lines : []) { const p = typeof l === 'string' ? l.trim() : l; if (ok(p)) out.push(p); }
+  if (ok(home) && path.isAbsolute(home)) {
+    const h = (...a) => path.join(home, ...a);
+    out.push(h('.local', 'bin', 'claude'), h('.claude', 'local', 'claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude', h('.npm-global', 'bin', 'claude'), h('.bun', 'bin', 'claude'), h('.volta', 'bin', 'claude'));
+    for (const v of nvmVersionDirs(nvmDirs)) out.push(h('.nvm', 'versions', 'node', v, 'bin', 'claude'));
+  } else out.push('/opt/homebrew/bin/claude', '/usr/local/bin/claude');
+  return [...new Set(out)];
+}
+
+// 셸 탐색 출력에서 claude 경로만 뽑는다: 센티널 줄(__MARU_CLAUDE__<경로>)만 보고 rc·로그아웃 문구 같은 잡음은 무시한다. 절대 경로(제어 문자 없음)가 아니면 null
+const CLAUDE_PROBE_CMD = "printf '\\n__MARU_CLAUDE__%s\\n' \"$(command -v claude)\"";
+function parseClaudeProbe(out) {
+  let found = null;
+  for (const l of String(out || '').split('\n')) {
+    const x = l.replace(/\r$/, '');
+    if (!x.startsWith('__MARU_CLAUDE__')) continue;
+    const p = x.slice('__MARU_CLAUDE__'.length);
+    found = p.startsWith('/') && !/[\x00-\x1f\x7f]/.test(p) ? p : null;
+  }
+  return found;
+}
+
+// ---- 첫 설정: 터미널에서 돌릴 명령(순수) ----
+// 설치 명령은 여기 한 곳에서만 고친다(확인 창의 상세와 스크립트가 같은 문자열을 쓴다).
+const SETUP_INSTALL_CMD = 'curl -fsSL https://claude.ai/install.sh | bash';
+const SETUP_KINDS = ['install-claude', 'login'];
+// kind -> 명령 문자열. login 은 claudeBin(절대 경로·제어 문자 없음)을 shellQuote 로 인용한 것만 끼운다. 그 밖은 null
+function setupCommand(kind, claudeBin) {
+  if (kind === 'install-claude') return SETUP_INSTALL_CMD;
+  if (kind === 'login') return typeof claudeBin === 'string' && claudeBin.startsWith('/') && !/[\x00-\x1f\x7f]/.test(claudeBin) ? shellQuote(claudeBin) + ' auth login' : null;
+  return null;
+}
+// .command 스크립트 본문. strings: { run, done, fail }(현재 언어 문구; fail 의 {code} 자리에 종료 코드가 들어간다).
+// 문구는 작은따옴표로 인용해 글자 그대로 출력한다(printf '%s'). 명령이 실패하면(pipefail 포함) done 대신 fail 을 출력한다. 잘못된 입력이면 null
+function buildSetupScript({ kind, claudeBin, strings }) {
+  const cmd = setupCommand(kind, claudeBin);
+  const sq = (x) => "'" + String(x).replace(/'/g, "'\\''") + "'";
+  if (!cmd || !strings || typeof strings.run !== 'string' || typeof strings.done !== 'string' || typeof strings.fail !== 'string') return null;
+  const fail = strings.fail.split('{code}').map(sq).join('"$rc"');
+  return '#!/bin/bash\nset -o pipefail\nprintf \'%s\\n\' ' + sq(strings.run) + '\n' + cmd + '\nrc=$?\nif [ "$rc" -eq 0 ]; then\n  printf \'\\n%s\\n\' ' + sq(strings.done) + '\nelse\n  printf \'\\n%s\\n\' ' + fail + '\nfi\nexit $rc\n';
+}
 
 // ---- 첫 만남 배너 ----
 // 기억 파일이 0개이고 metAt·dismissedAt 이 없고 프로필이 있을 때만 보인다. memories = readMemoryFiles 결과({items, skipped})|null
@@ -3277,7 +3333,7 @@ const api = {
   hierarchyOrder, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
   MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, parseOnboarded, firstMeetingGate, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
   defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
-  PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, firstMeetingBanner,
+  PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, claudeCandidates, nvmVersionDirs, parseClaudeProbe, CLAUDE_PROBE_CMD, setupCommand, buildSetupScript, SETUP_KINDS, SETUP_INSTALL_CMD, firstMeetingBanner,
   INBOX_NOTIF_MAX, PROPOSAL_FILE_MAX, PROPOSAL_TOTAL_MAX, PROPOSAL_FILES_MAX, logAtMs, plausibleLogAt, fmtLogAt, seenToStore, PROPOSAL_LIST_MAX, INBOX_SEEN_MAX_BYTES, validProposalSlug, cleanDisplay, cleanProposalText, proposalMeta, scanProposalDir, listProposals, proposalDetail, trashProposalDir, skillRequestText, parseSquadCheck, summarizeSquadCheck, validateInboxSeen, parseInboxSeen, readInboxSeenFile, saveInboxSeen, markUnseen, newestAt, relativeAgo,
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,

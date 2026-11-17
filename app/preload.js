@@ -85,7 +85,9 @@ contextBridge.exposeInMainWorld('maru', {
   onUpdateProgress: (cb) => { ipcRenderer.on('update:progress', (_e, p) => cb(Number(p) || 0)); },
   // 첫 설정·첫 만남: 경로는 받지 않는다(이름·언어 문자열, 작업 공간 id 만)
   setupGet: () => ipcRenderer.invoke('setup:get'),
-  setupPrereqs: () => ipcRenderer.invoke('setup:prereqs'),
+  setupPrereqs: (force) => ipcRenderer.invoke('setup:prereqs', force === true),
+  setupTerminal: (kind, lang) => ipcRenderer.invoke('setup:terminal', String(kind).slice(0, 20), String(lang).slice(0, 8)), // 명령은 main 이 정한다: 종류(enum)와 안내 언어만
+  setupOpenGuide: () => ipcRenderer.invoke('setup:open-guide'),
   setupCreateHome: (name, lang) => ipcRenderer.invoke('setup:create-home', { name: String(name).slice(0, 200), lang: String(lang).slice(0, 8) }),
   setupConnectLater: () => ipcRenderer.invoke('setup:connect-later'),
   setupFinish: () => ipcRenderer.invoke('setup:finish'),

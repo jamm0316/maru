@@ -1619,7 +1619,7 @@
 
   // ---- 첫 설정(덮개) ----
   const SU_STEPS = ['lang', 'prereq', 'home', 'connect', 'done'];
-  const su = { blocked: null, open: false, step: 'lang', name: '', prereq: null, checking: false, busy: false, err: '', later: false, fake: false, authOk: null };
+  const su = { blocked: null, open: false, step: 'lang', name: '', prereq: null, checking: false, busy: false, err: '', later: false, fake: false, authOk: null, termBusy: false, termLock: false, termHint: false, auto: false, lastAt: 0 };
   let suUnfinished = false;
   let homeManaged = false; let homeNotice = null;
   function suOpen(step, fake, blocked) {
@@ -1631,20 +1631,42 @@
     if (step === 'prereq') suCheck(); else if (step === 'done') suAuth();
   }
   function suClose() { su.open = false; $('setup').hidden = true; syncModalState(); focusTerm(); refreshMeet(); }
-  function suGo(step) { su.step = step; su.err = ''; renderSetup(true); if (step === 'prereq') suCheck(); else if (step === 'done') suAuth(); }
+  function suGo(step) { su.step = step; su.err = ''; su.termHint = false; renderSetup(true); if (step === 'prereq') suCheck(); else if (step === 'done') suAuth(); }
   // 마지막 단계: 로그인 상태를 다시 읽어(앱이 다시 시작돼 이전 점검 결과가 없다) 로그인 전이면 그렇게 말한다
   async function suAuth() {
     su.authOk = null; let r = null; try { r = await window.maru.setupPrereqs(); } catch (e) { r = null; }
-    const a = r && Array.isArray(r.list) ? r.list.find((x) => x.id === 'auth') : null; su.authOk = a ? a.status === 'ok' : null;
+    const a = r && Array.isArray(r.list) ? r.list.find((x) => x.id === 'auth') : null; su.authOk = a && a.status === 'ok' ? true : a && a.status === 'need' ? false : null; // 읽지 못한 것(unknown)은 안내하지 않는다
     if (su.step === 'done' && su.open) renderSetup(false);
   }
-  async function suCheck() {
-    su.checking = true; su.prereq = null; su.err = ''; renderSetup(false);
-    let r = null; try { r = await window.maru.setupPrereqs(); } catch (e) { r = null; }
-    su.checking = false; su.prereq = r && Array.isArray(r.list) ? r : null;
-    if (!su.prereq) su.err = T('su.prereq.failed');
+  // auto: 창으로 돌아왔을 때의 자동 재확인. 목록을 비우지 않고(깜박임 없이) 결과만 바꾼다
+  async function suCheck(auto, force) {
+    su.checking = true; su.auto = auto === true; su.lastAt = Date.now(); su.err = '';
+    if (!su.auto) su.prereq = null;
+    renderSetup(false);
+    let r = null; try { r = await window.maru.setupPrereqs(force === true); } catch (e) { r = null; }
+    su.checking = false; su.termLock = false; su.lastAt = Date.now(); // 결과가 오면 터미널 단추를 다시 쓸 수 있다
+    if (r && Array.isArray(r.list)) { su.prereq = r; su.err = ''; } else if (!su.auto) { su.prereq = null; su.err = T('su.prereq.failed'); }
+    su.auto = false;
     if (su.step === 'prereq') renderSetup(false);
   }
+  // 터미널 단추: main 이 명령을 정하고 확인 창에서 보여 준다(렌더러는 종류만 보낸다)
+  async function suTerm(kind) {
+    if (su.termBusy || su.termLock) return;
+    if (su.fake) { su.err = T('setup.term.err.invalid'); renderSetup(false); return; }
+    su.termBusy = true; su.err = ''; renderSetup(false);
+    let r = null; try { r = await window.maru.setupTerminal(kind, lang); } catch (e) { r = null; }
+    su.termBusy = false; su.lastAt = Date.now(); // 확인 창을 닫고 돌아온 포커스로 바로 다시 확인하지 않게
+    const reason = r && r.reason;
+    if (r && r.ok) { su.termHint = true; su.termLock = true; } // 다음 확인 결과가 올 때까지 두 번째 터미널을 열지 못하게
+    else if (reason !== 'cancelled') su.err = T(['invalid', 'prereq', 'write', 'launch'].includes(reason) ? 'setup.term.err.' + reason : 'setup.term.err.launch');
+    renderSetup(false);
+  }
+  // 아직 못 갖춘 행이 있는가(로그인처럼 막지 않는 행도 포함)
+  const suPending = () => !!(su.prereq && su.prereq.list.some((x) => x.status === 'missing' || x.status === 'need'));
+  // 창으로 돌아오면(포커스) 못 갖춘 도구가 있을 때 다시 확인한다: 1.5초 안 중복·확인 중에는 건너뜀
+  window.addEventListener('focus', () => {
+    if (su.open && su.step === 'prereq' && !su.checking && !su.fake && su.prereq && suPending() && Date.now() - su.lastAt >= 1500) suCheck(true);
+  });
   function suSeg() {
     const seg = el('div', 'seg'); seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', T('ob.lang'));
     for (const l of I18N.LANGS) {
@@ -1679,19 +1701,28 @@
     } else if (su.step === 'prereq') {
       body.append(el('h2', '', T('su.step.prereq')), el('p', '', T('su.prereq.intro')));
       const list = el('div', 'su-list');
-      if (su.checking) list.append(el('p', '', T('su.prereq.checking')));
+      if (su.checking && !su.prereq) list.append(el('p', '', T('su.prereq.checking')));
+      const claudeSt = ((su.prereq && su.prereq.list.find((y) => y.id === 'claude')) || {}).status;
       for (const x of (su.prereq && su.prereq.list) || []) {
         const r = el('div', 'su-row'); const rt = el('div', 'rt');
-        rt.append(el('span', '', T('prereq.name.' + x.id) + (x.detail ? ' ' + x.detail : '') + (x.required ? '' : ' (' + T('prereq.optional') + ')')), el('span', 'pill ' + (x.status === 'ok' ? 'ok' : x.status === 'unknown' ? 'unknown' : 'need'), T('prereq.status.' + x.status)));
+        rt.append(el('span', '', T('prereq.name.' + x.id) + (x.detail ? ' ' + x.detail : '')), el('span', 'pill ' + (x.status === 'ok' ? 'ok' : x.status === 'unknown' ? 'unknown' : 'need'), T('prereq.status.' + x.status)));
         r.append(rt);
         if (x.how) r.append(el('div', 'how', T(x.how)));
+        const acts = [];
+        if (x.id === 'claude' && x.status === 'missing') acts.push(suBtn(T('setup.term.install'), 'primary', () => suTerm('install-claude'), su.termBusy || su.termLock), suBtn(T('setup.term.guide'), 'ghost', () => { window.maru.setupOpenGuide().catch(() => {}); }));
+        else if (x.id === 'claude' && x.status === 'need') acts.push(suBtn(T('setup.term.guide'), 'ghost', () => { window.maru.setupOpenGuide().catch(() => {}); }));
+        else if (x.id === 'auth' && x.status !== 'ok' && claudeSt === 'ok') acts.push(suBtn(T('setup.term.login'), 'primary', () => suTerm('login'), su.termBusy || su.termLock));
+        if (acts.length) { const a = el('div', 'su-act'); a.append(...acts); r.append(a); }
         list.append(r);
       }
       body.append(list);
-      if (su.prereq && su.prereq.list.some((x) => x.id === 'auth' && x.status !== 'ok')) body.append(el('div', 'hint', T('su.prereq.authNote')));
-      if (su.prereq && !su.prereq.ready) body.append(el('div', 'hint', T('su.prereq.blocked')));
+      if (su.termHint && suPending()) body.append(el('div', 'hint', T('setup.term.hint')));
+      const lst = (su.prereq && su.prereq.list) || [];
+      const au = lst.find((x) => x.id === 'auth'); const cl = lst.find((x) => x.id === 'claude');
+      if (au && au.status === 'need' && cl && cl.status === 'ok') body.append(el('div', 'hint', T('su.prereq.authNote'))); // 막지는 않는다(API 키 등 다른 방법도 있다)
+      if (su.prereq && !su.prereq.ready) body.append(el('div', 'hint', T('su.prereq.blocked'))); // ready 는 auth 를 보지 않는다: 필수 도구가 빠졌을 때만
       body.append(err());
-      row.append(suBtn(T('su.back'), 'ghost', () => suGo('lang')), suBtn(T('su.prereq.recheck'), '', suCheck, su.checking), suBtn(T('su.next'), 'primary', () => suGo('home'), su.checking || !(su.prereq && su.prereq.ready)));
+      row.append(suBtn(T('su.back'), 'ghost', () => suGo('lang')), suBtn(T('su.prereq.recheck'), '', () => suCheck(false, true), su.checking && !su.auto), suBtn(T('su.next'), 'primary', () => suGo('home'), (su.checking && !su.auto) || !(su.prereq && su.prereq.ready)));
     } else if (su.step === 'home') {
       body.append(el('h2', '', T('su.home.title')));
       const ul = el('ul'); for (const k of ['su.home.l1', 'su.home.l2', 'su.home.l3', 'su.home.l4']) ul.append(el('li', '', T(k)));
@@ -1705,7 +1736,7 @@
       row.append(suBtn(T('su.connect.later'), 'ghost', suLater, su.busy), suBtn(T('su.connect.preview'), 'primary', suConnect, su.busy));
     } else {
       body.append(el('h2', '', T('su.done.title')), el('p', '', T('su.done.textMeet')));
-      if (su.authOk === false) body.append(el('div', 'hint', T('su.prereq.authNote') + ' ' + T('prereq.how.auth')));
+      if (su.authOk === false) body.append(el('div', 'hint', T('su.done.authCheck')));
       if (su.later) body.append(el('p', 'hint', T('su.done.later')));
       row.append(suBtn(T('su.done.skip'), 'ghost', () => suFinish(false)), suBtn(T('su.done.meet'), 'primary', () => suFinish(true)));
     }

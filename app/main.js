@@ -889,17 +889,37 @@ const isFileSafe = (f) => { try { const st = fs.statSync(f); return st.isFile() 
 
 // pty 가 쓰는 claude: 로그인 셸의 `command -v claude`(없으면 흔한 설치 위치)
 let claudeBin;
-async function resolveClaude() {
+let probeMissAt = 0; // 셸 탐색이 아무것도 못 찾은 시각: 30초간 다시 돌리지 않는다(고정 후보는 매번 본다)
+// 셸 탐색 한 번: stdin 은 닫고(spawn ignore) 출력은 64KB 까지만 받는다. 시간이 지나면 죽이고 지금까지의 출력을 낸다(백그라운드 프로세스가 stdout 을 쥐고 있어도 멈추지 않는다)
+function shellProbe(sh, args, ms) {
+  return withTimeout(new Promise((resolve) => {
+    let out = ''; let done = false; let child = null;
+    const fin = () => { if (done) return; done = true; clearTimeout(timer); try { child && child.kill('SIGKILL'); } catch { /* 이미 끝남 */ } resolve(out); };
+    const timer = setTimeout(fin, ms);
+    try {
+      child = require('child_process').spawn(sh, args, { stdio: ['ignore', 'pipe', 'ignore'], env: childEnv(), cwd: os.homedir() });
+      child.stdout.on('data', (d) => { if (out.length < 65536) out += d.toString('utf8'); });
+      child.on('error', fin); child.on('close', fin);
+    } catch { fin(); }
+  }), ms + 1000, '');
+}
+// force: 사용자가 "다시 확인"을 눌렀을 때(부정 캐시를 건너뛴다)
+async function resolveClaude(force) {
   if (claudeBin) return claudeBin;
   const home = os.homedir();
-  const cands = [];
-  const r = await exec(process.env.SHELL || '/bin/zsh', ['-l', '-c', 'command -v claude'], { timeout: 6000 });
-  const line = r.stdout.split('\n').map((x) => x.trim()).filter((x) => x.startsWith('/')).pop();
-  if (line) cands.push(line);
-  cands.push(path.join(home, '.local', 'bin', 'claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude');
-  for (const c of cands) {
-    try { fs.accessSync(c, fs.constants.X_OK); if (fs.statSync(c).isFile()) { claudeBin = c; return c; } } catch { /* 다음 후보 */ }
+  const sh = process.env.SHELL || '/bin/zsh';
+  const lines = [];
+  if (force || Date.now() - probeMissAt >= 30000) {
+    lines.push(L.parseClaudeProbe(await shellProbe(sh, ['-l', '-c', L.CLAUDE_PROBE_CMD], 6000)));
+    // 로그인 셸은 .zshrc 를 읽지 않는다: nvm·fnm·volta 나 .zshrc 에서만 PATH 를 잡은 설치는 대화형으로 한 번 더 본다
+    if (!lines[0] && /^(zsh|bash)$/.test(path.basename(sh))) lines.push(L.parseClaudeProbe(await shellProbe(sh, ['-l', '-i', '-c', L.CLAUDE_PROBE_CMD], 8000)));
   }
+  let nvmDirs = [];
+  try { nvmDirs = fs.readdirSync(path.join(home, '.nvm', 'versions', 'node')).slice(0, 500); } catch { /* nvm 없음 */ }
+  for (const c of L.claudeCandidates({ home, lines, nvmDirs })) {
+    try { fs.accessSync(c, fs.constants.X_OK); if (fs.statSync(c).isFile()) { claudeBin = c; probeMissAt = 0; return c; } } catch { /* 다음 후보 */ }
+  }
+  if (lines.length) probeMissAt = Date.now();
   return null;
 }
 
@@ -1950,9 +1970,9 @@ async function runTool(name, args, cltOk) {
   const r = await exec(p, args, { timeout: 8000, cwd: os.homedir() });
   return r.code === 0 ? 'ok' : 'broken';
 }
-async function checkPrereqs() {
+async function checkPrereqs(force) {
   const clt = (await exec('/usr/bin/xcode-select', ['-p'], { timeout: 4000, cwd: os.homedir() })).code === 0;
-  const bin = await resolveClaude();
+  const bin = await resolveClaude(force === true);
   const claudeP = bin ? exec(bin, ['--version'], { timeout: 15000, cwd: os.homedir(), env: childEnv(true) }).then((r) => (r.code === 0 ? 'ok' : 'broken')) : Promise.resolve('missing');
   const [claude, git, python3, jq, perl] = await Promise.all([claudeP, runTool('git', ['--version'], clt), runTool('python3', ['--version'], clt), runTool('jq', ['--version'], clt), runTool('perl', ['-e', 'exit 0'], clt)]);
   let auth = null;
@@ -1962,7 +1982,8 @@ async function checkPrereqs() {
   return { list, ready: L.prereqsReady(list) };
 }
 let prereqRun = null; // 점검이 겹쳐 돌지 않게 같은 약속을 나눠 쓴다
-const FAKE_PREREQS = L.modelPrereqs({ macos: true, macosVersion: '15.2', claude: 'ok', auth: { loggedIn: false }, git: 'ok', python3: 'ok', jq: 'missing', perl: 'ok' });
+const FAKE_CLAUDE = ['missing', 'broken'].includes(process.env.MARU_APP_SETUP_CLAUDE) ? process.env.MARU_APP_SETUP_CLAUDE : 'ok'; // 시험 전용: claude 없음·고장 화면
+const FAKE_PREREQS = L.modelPrereqs({ macos: true, macosVersion: '15.2', claude: FAKE_CLAUDE, auth: { loggedIn: false }, git: 'ok', python3: 'ok', jq: FAKE_CLAUDE === 'ok' ? 'missing' : 'ok', perl: 'ok' });
 const SETUP_STEPS = ['lang', 'prereq', 'home', 'connect', 'done'];
 ipcMain.handle('setup:get', (e) => {
   if (!fromMain(e)) return null;
@@ -1970,11 +1991,59 @@ ipcMain.handle('setup:get', (e) => {
   const sg = L.setupStage({ found, state: setupState });
   return { needed: sg.needed, stage: sg.stage, unfinished: L.setupUnfinished({ found, state: setupState }) && !sg.needed, blocked: HOME_BLOCK, fake: false };
 });
-ipcMain.handle('setup:prereqs', async (e) => {
+ipcMain.handle('setup:prereqs', async (e, force) => {
   if (!fromMain(e)) return null;
   if (SETUP_FAKE) return { list: FAKE_PREREQS, ready: false };
-  try { if (!prereqRun) prereqRun = checkPrereqs().finally(() => { prereqRun = null; }); return await prereqRun; } catch { return null; }
+  try { if (force === true && prereqRun) await prereqRun.catch(() => {}); if (!prereqRun) prereqRun = checkPrereqs(force === true).finally(() => { prereqRun = null; }); return await prereqRun; } catch { return null; }
 });
+// ---- 첫 설정: 터미널에서 설치·로그인 ----
+// 명령 문자열은 lib.js 의 setupCommand 한 곳에서 정한다(SETUP_INSTALL_CMD). 렌더러는 종류(enum)만 보낸다.
+const CLAUDE_GUIDE_URL = 'https://code.claude.com/docs/en/setup';
+const setupCmdDir = () => path.join(app.getPath('userData'), 'setup-cmd');
+// 소유자가 나이고 심볼릭 링크가 아닌 0700 폴더를 보장한다(아니면 null)
+function ensureSetupCmdDir() {
+  const d = setupCmdDir();
+  try {
+    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    const st = fs.lstatSync(d);
+    if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid()) return null;
+    if ((st.mode & 0o777) !== 0o700) fs.chmodSync(d, 0o700);
+    return d;
+  } catch { return null; }
+}
+// 임시 파일 -> rename 으로 원자적으로 쓴다. 종류마다 파일 이름은 고정
+function writeSetupScript(kind, text) {
+  const d = ensureSetupCmdDir(); if (!d) return null;
+  const f = path.join(d, kind + '.command'); const tmp = path.join(d, '.tmp-' + process.pid + '-' + Date.now());
+  try {
+    fs.writeFileSync(tmp, text, { mode: 0o700, flag: 'wx' });
+    fs.chmodSync(tmp, 0o700); fs.renameSync(tmp, f);
+    return f;
+  } catch { try { fs.unlinkSync(tmp); } catch { /* 없음 */ } return null; }
+}
+const openTerminalApp = (file) => new Promise((resolve) => execFile('/usr/bin/open', ['-a', 'Terminal', file], { timeout: 10000 }, (err) => resolve(!err)));
+let setupTermBusy = false;
+// launch: 시험에서만 바꾸는 실행기(file -> Promise<boolean>)
+async function setupTerminal(kind, lang, launch = openTerminalApp) {
+  if (!L.SETUP_KINDS.includes(kind) || setupTermBusy || SETUP_FAKE) return { ok: false, reason: 'invalid' };
+  setupTermBusy = true;
+  try {
+    const lg = I18N.isLang(lang) ? lang : curLang(); const t = (k, p) => I18N.t(lg, k, p);
+    let bin = null;
+    if (kind === 'login') { bin = await resolveClaude(); if (!bin) return { ok: false, reason: 'prereq' }; }
+    const cmd = L.setupCommand(kind, bin);
+    if (!cmd) return { ok: false, reason: 'prereq' };
+    const r = await box({ type: 'question', title: t('setup.term.confirmTitle'), message: t(kind === 'login' ? 'setup.term.confirmLogin' : 'setup.term.confirmInstall'), detail: t('setup.term.confirmDetail', { cmd }), buttons: [t('setup.term.run'), t('setup.term.cancel')], defaultId: 1, cancelId: 1, noLink: true });
+    if (r.response !== 0) return { ok: false, reason: 'cancelled' };
+    const text = L.buildSetupScript({ kind, claudeBin: bin, strings: { run: t('setup.term.line', { cmd }), done: t('setup.term.done'), fail: t('setup.term.fail', { code: '{code}' }) } });
+    if (!text) return { ok: false, reason: 'prereq' };
+    const f = writeSetupScript(kind, text);
+    if (!f) return { ok: false, reason: 'write' };
+    return (await launch(f)) ? { ok: true } : { ok: false, reason: 'launch' };
+  } catch { return { ok: false, reason: 'launch' }; } finally { setupTermBusy = false; }
+}
+ipcMain.handle('setup:terminal', (e, kind, lang) => (fromMain(e) ? setupTerminal(typeof kind === 'string' ? kind : '', lang) : { ok: false, reason: 'invalid' }));
+ipcMain.handle('setup:open-guide', (e) => { if (!fromMain(e)) return false; shell.openExternal(CLAUDE_GUIDE_URL).catch(() => { /* 열기 실패는 무시 */ }); return true; });
 let homeBusy = false;
 // 홈 만들기: 입력(이름·언어)은 main 이 다시 검증한다. 네이티브 확인 뒤 payload 를 풀고 프로필·상태를 저장한 다음 앱을 다시 띄운다(ROOT 가 모듈 상수라서 가장 단순하고 안정적인 방법).
 ipcMain.handle('setup:create-home', async (e, input) => {

@@ -2245,11 +2245,20 @@ t('setupStage·setupUnfinished', () => {
 t('prerequisites 모델링·PATH 탐색', () => {
   const ok = { macos: true, claude: 'ok', auth: { loggedIn: true, state: 'ok' }, git: 'ok', python3: 'ok', jq: 'ok', perl: 'ok' };
   const m = L.modelPrereqs({ ...ok, macosVersion: '15.2' }); assert.strictEqual(m[0].detail, '15.2'); assert.strictEqual(L.modelPrereqs({ ...ok, macosVersion: '<b>' })[0].detail, null); assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, macosVersion: '12.0' })), true); assert.deepStrictEqual(m.map((x) => x.id), L.PREREQ_IDS); assert.ok(m.every((x) => x.status === 'ok' && x.how === null)); assert.strictEqual(L.prereqsReady(m), true);
+  const by2 = (l, id) => l.find((x) => x.id === id);
   const m2 = L.modelPrereqs({ ...ok, jq: 'missing', git: 'broken', auth: { loggedIn: false, state: 'out' } });
   const by = (id) => m2.find((x) => x.id === id);
   assert.strictEqual(by('jq').status, 'missing'); assert.strictEqual(by('jq').how, 'prereq.how.jq'); assert.strictEqual(by('git').status, 'need'); assert.strictEqual(by('git').how, 'prereq.how.clt');
   assert.strictEqual(by('auth').status, 'need'); assert.strictEqual(L.prereqsReady(m2), false);
-  assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, auth: { loggedIn: false, state: 'out' } })), true); // 로그인은 필수가 아니다
+  assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, auth: { loggedIn: false, state: 'out' } })), true); // 로그인은 막지 않는다(need)
+  assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, auth: { loggedIn: true, state: 'expired' } })), true);
+  assert.strictEqual(by2(L.modelPrereqs({ ...ok, auth: { loggedIn: false } }), 'auth').status, 'need'); assert.strictEqual(by2(L.modelPrereqs(ok), 'auth').required, false);
+  const mu = L.modelPrereqs({ ...ok, auth: null }); assert.strictEqual(by2(mu, 'auth').status, 'unknown'); assert.strictEqual(L.prereqsReady(mu), true);
+  assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, claude: 'missing', auth: null })), false); // claude 는 여전히 막는다
+  assert.strictEqual(L.prereqsReady(mu.map((x) => (x.id === 'jq' ? { ...x, status: 'unknown' } : x))), false);
+  assert.strictEqual(by2(L.modelPrereqs({ ...ok, claude: 'broken' }), 'claude').how, 'prereq.how.claudeBroken');
+  assert.strictEqual(by2(L.modelPrereqs({ ...ok, claude: 'missing' }), 'auth').how, 'prereq.how.authFirst');
+  assert.strictEqual(by2(L.modelPrereqs({ ...ok, auth: { loggedIn: false } }), 'auth').how, 'prereq.how.auth');
   assert.strictEqual(L.prereqsReady(L.modelPrereqs({ ...ok, claude: 'missing' })), false);
   assert.strictEqual(L.modelPrereqs({ ...ok, auth: null }).find((x) => x.id === 'auth').status, 'unknown');
   assert.strictEqual(L.modelPrereqs({ ...ok, claude: 'missing' }).find((x) => x.id === 'auth').status, 'need');
@@ -3245,6 +3254,62 @@ t('상태 기록 읽기 상한(R7): cwd 가 긴 한글 경로여도 8192 안에�
   assert.ok(/readRegular\(f, 8192, false\)/.test(fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8')));
 });
 
+t('buildSetupScript: % 와 줄바꿈 문구는 글자 그대로, 실제 실행 분기(로컬만)', () => {
+  const cp = require('child_process');
+  const dir = fs.mkdtempSync(path.join(tmp, 'setup script '));
+  const dd = path.join(dir, "it's here"); fs.mkdirSync(dd);
+  const mk = (code) => { const f = path.join(dd, 'claude'); fs.writeFileSync(f, '#!/bin/sh\nexit ' + code + '\n', { mode: 0o755 }); return f; };
+  const st = { run: '실행 100% %s %d\n두번째 줄', done: '끝 %s\n완료', fail: '실패 %d 코드={code}\n다음 {code}' };
+  const run = (code) => { const bin = mk(code); const sc = path.join(dir, 's' + code + '.command'); fs.writeFileSync(sc, L.buildSetupScript({ kind: 'login', claudeBin: bin, strings: st }), { mode: 0o700 }); const r = cp.spawnSync('/bin/bash', [sc], { encoding: 'utf8', timeout: 10000 }); return r; };
+  const f = run(3);
+  assert.strictEqual(f.status, 3); assert.ok(f.stdout.includes('실행 100% %s %d\n두번째 줄\n')); assert.ok(f.stdout.includes('실패 %d 코드=3\n다음 3\n')); assert.ok(!f.stdout.includes('끝 %s'));
+  const g = run(0);
+  assert.strictEqual(g.status, 0); assert.ok(g.stdout.includes('끝 %s\n완료\n')); assert.ok(!g.stdout.includes('실패'));
+  const pf = L.buildSetupScript({ kind: 'login', claudeBin: '/x', strings: st }); assert.ok(pf.indexOf('set -o pipefail') < pf.indexOf('auth login')); // 파이프 중간 실패도 잡는다
+});
+t('claudeCandidates: 순서·중복·비절대 줄·nvm 정렬', () => {
+  const c = L.claudeCandidates({ home: '/h', lines: ['claude', null, '/s/claude', ' /s/claude ', '/x\u0007y', 'rel/claude'], nvmDirs: ['v20.5.0', 'v22.9.0', 'v22.10.0', 'junk', '.DS_Store', 'v22.10', 42] });
+  assert.strictEqual(c[0], '/s/claude'); assert.strictEqual(c.filter((x) => x === '/s/claude').length, 1); assert.ok(!c.some((x) => x.includes('rel/') || x.includes('\u0007')));
+  assert.deepStrictEqual(c.slice(1, 8), ['/h/.local/bin/claude', '/h/.claude/local/claude', '/opt/homebrew/bin/claude', '/usr/local/bin/claude', '/h/.npm-global/bin/claude', '/h/.bun/bin/claude', '/h/.volta/bin/claude']);
+  assert.deepStrictEqual(c.slice(8), ['/h/.nvm/versions/node/v22.10.0/bin/claude', '/h/.nvm/versions/node/v22.9.0/bin/claude', '/h/.nvm/versions/node/v20.5.0/bin/claude']);
+  assert.ok(L.claudeCandidates({ home: '/h', lines: ['/h/.local/bin/claude'], nvmDirs: [] }).filter((x) => x === '/h/.local/bin/claude').length === 1); // 셸 결과와 고정 후보 중복 제거
+  assert.deepStrictEqual(L.claudeCandidates({ home: 'rel', lines: [], nvmDirs: ['v1.0.0'] }), ['/opt/homebrew/bin/claude', '/usr/local/bin/claude']);
+  assert.deepStrictEqual(L.claudeCandidates({}), ['/opt/homebrew/bin/claude', '/usr/local/bin/claude']);
+  assert.strictEqual(L.nvmVersionDirs(Array.from({ length: 80 }, (_, i) => 'v18.0.' + i)).length, 50);
+});
+t('setupCommand·buildSetupScript: 인용·알 수 없는 종류·제어 문자', () => {
+  assert.strictEqual(L.setupCommand('install-claude'), L.SETUP_INSTALL_CMD);
+  assert.strictEqual(L.setupCommand('login', "/a b/it's/claude"), "/a\\ b/it\\'s/claude auth login");
+  for (const bad of [null, 'claude', '/x\ny/claude', '']) assert.strictEqual(L.setupCommand('login', bad), null);
+  for (const w of ['/a/$(touch x)/claude', '/a/`id`/claude', '/a/b;c/claude', '/a/b!c/claude', '/a/한글 폴더/claude', '/a/$HOME/claude', '/a/b|c&d>e/claude']) {
+    const c = L.setupCommand('login', w); assert.ok(c.endsWith(' auth login'));
+    const p = c.slice(0, -' auth login'.length); // 인용된 경로: 글자 그대로 한 단어로 풀린다
+    const r = require('child_process').spawnSync('/bin/bash', ['-c', 'printf "%s" ' + p]); assert.strictEqual(r.stdout.toString('utf8'), w); assert.strictEqual(r.status, 0);
+  }
+  assert.strictEqual(L.setupCommand('rm', '/x'), null); assert.strictEqual(L.setupCommand('', '/x'), null);
+  const st = { run: "실행: it's", done: '끝났습니다. 이 창을 닫고 마루로 돌아가세요.', fail: '실패(종료 코드 {code}).' };
+  const sc = L.buildSetupScript({ kind: 'login', claudeBin: "/a b/it's/claude", strings: st });
+  assert.ok(sc.startsWith('#!/bin/bash\n')); assert.ok(sc.includes("\n/a\\ b/it\\'s/claude auth login\n")); assert.ok(sc.includes("'실행: it'\\''s'")); assert.ok(sc.includes('exit $rc'));
+  const si = L.buildSetupScript({ kind: 'install-claude', claudeBin: "/evil';rm -rf ~;'", strings: st });
+  assert.ok(si.includes('\n' + L.SETUP_INSTALL_CMD + '\n') && !si.includes('evil')); // 설치 스크립트에는 경로가 끼지 않는다
+  assert.ok(sc.includes('set -o pipefail\n') && sc.includes('if [ "$rc" -eq 0 ]; then'));
+  assert.ok(sc.includes('\'실패(종료 코드 \'"$rc"\').\'')); // {code} 자리에만 $rc
+  assert.strictEqual(L.buildSetupScript({ kind: 'login', claudeBin: '/a', strings: { run: 'r', done: 'd' } }), null);
+  assert.strictEqual(L.buildSetupScript({ kind: 'x', claudeBin: '/a', strings: st }), null);
+  assert.strictEqual(L.buildSetupScript({ kind: 'login', claudeBin: null, strings: st }), null);
+  assert.strictEqual(L.buildSetupScript({ kind: 'login', claudeBin: '/a', strings: null }), null);
+  assert.deepStrictEqual(L.SETUP_KINDS, ['install-claude', 'login']);
+});
+t('parseClaudeProbe: 센티널 줄만 읽는다', () => {
+  assert.strictEqual(L.parseClaudeProbe('rc 잡음 /fake/claude\n\n__MARU_CLAUDE__/n/bin/claude\nlogout 잡음 /other/claude\n'), '/n/bin/claude');
+  assert.strictEqual(L.parseClaudeProbe('__MARU_CLAUDE__/n/claude\r\n'), '/n/claude');
+  assert.strictEqual(L.parseClaudeProbe('__MARU_CLAUDE__\n'), null); // 없음
+  assert.strictEqual(L.parseClaudeProbe('__MARU_CLAUDE__claude\n'), null); // alias·상대 경로
+  assert.strictEqual(L.parseClaudeProbe('__MARU_CLAUDE__/a\u0007b\n'), null);
+  assert.strictEqual(L.parseClaudeProbe('/only/path/claude\n'), null); // 센티널 없는 줄은 무시
+  assert.strictEqual(L.parseClaudeProbe(undefined), null);
+  assert.ok(L.CLAUDE_PROBE_CMD.includes('__MARU_CLAUDE__') && L.CLAUDE_PROBE_CMD.includes('command -v claude'));
+});
 t('childPath: claude 폴더는 맨 뒤에(절대·실재·"/" 아님만), 중복 제거', () => {
   const extra = ['/h/.local/bin', '/usr/bin']; const isDir = (d) => d === '/n/v20/bin' || d === '/usr/bin' || d === '/';
   assert.strictEqual(L.childPath({ extra, current: '/x:/usr/bin', claudeBin: '/n/v20/bin/claude', isDir }), '/h/.local/bin:/usr/bin:/x:/n/v20/bin');
