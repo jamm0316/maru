@@ -131,6 +131,7 @@ function readSubs(w) {
         const ls = fs.lstatSync(f);
         if (!ls.isFile()) continue;
         if (Date.now() - ls.mtimeMs > SUBS_TTL_MS) { fs.unlinkSync(f); continue; }
+        if (w.subsCutoff && ls.mtimeMs <= w.subsCutoff) continue; // Esc 중단 전에 시작된 것: 끝났다고 본다(훅이 안 온다)
         const r = readRegular(f, 256, false);
         const t = r ? L.parseSubType(r.text) : null;
         if (t) types.push(t);
@@ -168,13 +169,17 @@ function leadModel(w) {
 function readAgentState(w) {
   const f = stateFile(w);
   const r = f ? readRegular(f, 4096, false) : null;
-  return r ? L.parseAgentRecord(r.text) : null;
+  return r ? L.refineAgentAt(L.parseAgentRecord(r.text), r.mtimeMs) : null;
 }
 // busy | idle | waiting | none | pending(시작 전) | exited | unavailable(폴더 없음)
 function wsState(w) {
   if (w.unavailable) return 'unavailable';
   if (TEST_UI === 'party' && w.term) return 'busy'; // 시험 전용: 화면 확인용
-  if (w.term) return L.effectiveAgent(readAgentState(w), Date.now(), w.lastOutputAt);
+  if (w.term) {
+    const rec = readAgentState(w); const now = Date.now();
+    if (L.escInterrupted(rec, w.escAt, now)) w.subsCutoff = w.escAt; // Esc 로 끊긴 턴의 서브에이전트 표시는 앱 화면에서만 지운다(파일은 그대로)
+    return L.effectiveAgent(rec, now, w.lastOutputAt, undefined, w.escAt);
+  }
   return w.exited ? 'exited' : 'pending';
 }
 // 하루 넘은 상태 파일·임시 파일 정리(일반 파일만)
@@ -426,7 +431,7 @@ function spawnPty(w, cols, rows) {
     self = pty.spawn(shellBin, ['-l'], { name: 'xterm-256color', cols, rows, cwd: w.cwd, env });
   } catch { w.exited = true; wsChanged(false); return false; }
   removeStateFile(w);
-  w.sessionId = sid; w.term = self; w.exited = false; w.bracketed = false; w.seqTail = ''; w.lastOutputAt = 0;
+  w.sessionId = sid; w.term = self; w.exited = false; w.bracketed = false; w.seqTail = ''; w.lastOutputAt = 0; w.escAt = 0; w.subsCutoff = 0;
   self.onData((d) => {
     if (w.term !== self) return;
     w.lastOutputAt = Date.now();
@@ -516,7 +521,18 @@ function initWorkspaces() {
   activeId = addWorkspace(base).id; // 파일이 없거나 비면 저장소 루트 하나(예전 동작)
   saveWsNow();
 }
-const wsView = () => wsOrder().map((w) => ({ id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state: wsState(w), bp: w.bracketed }));
+// claude 실행 파일이 있는지(30초 캐시). 있으면 시작 명령의 exec 로 pty 가 Claude Code 가 된다
+let claudeFoundAt = 0; let claudeFoundVal = false;
+function claudeFound() {
+  const now = Date.now();
+  if (now - claudeFoundAt < 30000) return claudeFoundVal;
+  claudeFoundAt = now; claudeFoundVal = false;
+  const dirs = (process.env.PATH || '').split(':').concat([path.join(os.homedir(), '.claude', 'local'), path.join(os.homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']);
+  for (const d of dirs) { if (!d || !path.isAbsolute(d)) continue; try { fs.accessSync(path.join(d, 'claude'), fs.constants.X_OK); claudeFoundVal = true; break; } catch { /* 다음 */ } }
+  return claudeFoundVal;
+}
+// cc: 이 작업 공간 화면이 Claude Code 인지(렌더러가 Cmd+←/→ 를 alternate screen 에서도 보낼지 정한다). 시험용 가짜 작업 공간·스모크는 아님
+const wsView = () => wsOrder().map((w) => { const state = wsState(w); return { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, bp: w.bracketed, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }) }; });
 const attention = () => wsOrder().filter((w) => { const s = wsState(w); return s === 'busy' || s === 'waiting'; });
 function activate(id) { if (!wsOf(id) || id === activeId) return; activeId = id; wsChanged('active'); }
 function activateOffset(d) {
@@ -974,6 +990,14 @@ ipcMain.on('pty:write', (e, id, data) => {
   const w = wsFrom(e, id);
   if (!w || typeof data !== 'string' || data.length > 1 << 20 || !w.term) return;
   w.term.write(data);
+});
+// 사용자가 이 작업 공간 터미널에서 Esc 를 눌렀다(렌더러가 신뢰된 keydown 만 보낸다). busy/waiting 일 때만 시각을 적는다. 상태 파일은 쓰지 않는다
+ipcMain.on('pty:esc', (e, id) => {
+  const w = wsFrom(e, id);
+  if (!w || !w.term) return;
+  const now = Date.now();
+  const st = L.effectiveAgent(readAgentState(w), now, w.lastOutputAt, undefined, w.escAt);
+  if (st === 'busy' || st === 'waiting') w.escAt = now;
 });
 ipcMain.on('pty:resize', (e, id, cols, rows) => {
   const w = wsFrom(e, id);

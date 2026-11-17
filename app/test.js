@@ -243,6 +243,54 @@ t('parseAgentState', () => {
   assert.ok(L.isSessionId('abcd1234') && L.isSessionId('6054e0aa-03e5-4050-b22e-c186ad026154'));
   for (const bad of ['short', '../../etc/passwd1', 'a b c d e f g h', 'x'.repeat(65), '', null]) assert.strictEqual(L.isSessionId(bad), false);
 });
+t('keyToSeq Cmd+←/→: Claude Code 화면은 alternate screen 이어도 보낸다', () => {
+  const d = (key, o) => ({ type: 'keydown', key, metaKey: true, ...o });
+  assert.strictEqual(L.keyToSeq(d('ArrowLeft'), true, true), '\x01');
+  assert.strictEqual(L.keyToSeq(d('ArrowRight'), true, true), '\x05');
+  assert.strictEqual(L.keyToSeq(d('ArrowLeft'), true, false), null);   // vim 등
+  assert.strictEqual(L.keyToSeq(d('ArrowLeft'), true), null);
+  assert.strictEqual(L.keyToSeq(d('ArrowLeft', { isComposing: true }), true, true), null); // 조합 중
+  assert.strictEqual(L.keyToSeq(d('ArrowLeft', { altKey: true }), true, true), null);
+  assert.strictEqual(L.isLineNavKey({ type: 'keyup', key: 'ArrowRight', metaKey: true }, true, true), true); // keyup 도 삼킨다
+  const c = (o) => L.isClaudeUi(o);
+  assert.strictEqual(c({ launched: true, state: 'idle' }), true);
+  assert.strictEqual(c({ launched: true, state: 'busy' }), true);
+  assert.strictEqual(c({ launched: true, state: 'waiting' }), true);
+  assert.strictEqual(c({ launched: true, state: 'none', claudeFound: true }), true);   // 첫 프롬프트 전
+  assert.strictEqual(c({ launched: true, state: 'none', claudeFound: false }), false); // claude 없음: 셸이 남아 있다
+  assert.strictEqual(c({ launched: false, state: 'idle' }), false);
+  assert.strictEqual(c({ launched: true, state: 'exited', claudeFound: true }), false);
+  assert.strictEqual(c(), false);
+});
+t('effectiveAgent Esc 중단', () => {
+  const T = 1e6; const rec = (state, atMs) => ({ state, atMs });
+  const eff = (r, now, esc) => L.effectiveAgent(r, now, now, 20000, esc);
+  assert.strictEqual(eff(rec('busy', T), T + 1000, T + 500), 'busy');          // Esc 뒤 1.5초 전
+  assert.strictEqual(eff(rec('busy', T), T + 2000, T + 500), 'idle');          // 1.5초 뒤
+  assert.strictEqual(eff(rec('busy', T), T + 2000 - 1, T + 500), 'busy');      // 경계 직전
+  assert.strictEqual(eff(rec('busy', T + 800), T + 3000, T + 500), 'busy');    // Esc 뒤 새 busy 기록(PostToolUse): 이긴다
+  assert.strictEqual(eff(rec('busy', T + 500), T + 3000, T + 500), 'busy');    // 같은 시각이면 기록이 이긴다
+  assert.strictEqual(eff(rec('idle', T), T + 3000, T + 500), 'idle');          // 이미 idle: 영향 없음
+  assert.strictEqual(eff(rec('busy', T + 900), T + 3000, T + 500), 'busy');    // Esc 가 기록보다 오래됨: 영향 없음
+  assert.strictEqual(eff(rec('waiting', T), T + 2000, T + 500), 'idle');       // 권한 확인 중 Esc 도 같은 규칙
+  assert.strictEqual(eff(rec('waiting', T + 100), T + 2000, T + 500), 'idle');
+  assert.strictEqual(eff(rec('waiting', T + 700), T + 2000, T + 500), 'waiting');
+  assert.strictEqual(eff(rec('busy', T), T + 2000, 0), 'busy');                // Esc 없음
+  assert.strictEqual(eff(null, T + 2000, T + 500), 'none');
+  assert.strictEqual(eff({ state: 'busy', atMs: NaN }, T + 2000, T + 500), 'busy'); // 시각 불명: 기존 규칙(여기서는 출력이 최근이라 busy)
+  // 다음 프롬프트: 기록이 Esc 보다 새로워 덮어쓰기가 풀린다(같은 escAt 로 계속 물어도)
+  assert.strictEqual(eff(rec('busy', T), T + 5000, T + 500), 'idle');
+  assert.strictEqual(eff(rec('busy', T + 5000), T + 5100, T + 500), 'busy');
+  assert.strictEqual(L.escInterrupted(rec('busy', T), T + 500, T + 1999), false);
+  assert.strictEqual(L.escInterrupted(rec('busy', T), T + 500, T + 2000), true);
+  assert.strictEqual(L.escInterrupted(rec('busy', T), NaN, T + 2000), false);
+  // at 은 초 단위로 잘려 있다: mtime 이 2초 안이면 ms 로 다듬는다
+  assert.deepStrictEqual(L.refineAgentAt(rec('busy', 5000), 5700), rec('busy', 5700));
+  assert.deepStrictEqual(L.refineAgentAt(rec('busy', 5000), 9000), rec('busy', 5000));
+  assert.deepStrictEqual(L.refineAgentAt(rec('busy', 5000), 4000), rec('busy', 5000));
+  assert.strictEqual(L.refineAgentAt(null, 1), null);
+  assert.strictEqual(L.refineAgentAt(rec('busy', 5000), undefined).atMs, 5000);
+});
 t('effectiveAgent 되살림', () => {
   const rec = (state, ago) => ({ state, atMs: 1e6 - ago });
   assert.strictEqual(L.effectiveAgent(null, 1e6, 0), 'none');

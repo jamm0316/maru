@@ -226,15 +226,22 @@ function isNewlineKey(e) {
   return !!e && e.key === 'Enter' && !!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
 }
 
-// Cmd+←/→(다른 보조키 없음): 줄 맨 앞(Ctrl+A) / 맨 끝(Ctrl+E). 조합 중, 그리고 alternate screen(vim 등; altScreen=true)에서는 건드리지 않는다
-function isLineNavKey(e, altScreen) {
-  return !altScreen && !!e && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !!e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
+// Cmd+←/→(다른 보조키 없음): 줄 맨 앞(Ctrl+A) / 맨 끝(Ctrl+E). 조합 중, 그리고 alternate screen(vim 등; altScreen=true)에서는 건드리지 않는다.
+// 단, 화면이 Claude Code 자신(claudeUi=true: 마루가 claude 를 띄운 작업 공간이고 에이전트 상태가 알려져 있음)이면 alternate screen 이어도 보낸다.
+// Claude Code 의 fullscreen 렌더러(settings 의 "tui": "fullscreen")는 시작부터 alternate screen 을 쓰기 때문이다.
+function isLineNavKey(e, altScreen, claudeUi) {
+  return (!altScreen || !!claudeUi) && !!e && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !!e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
 }
 
-function keyToSeq(e, altScreen) {
+// 작업 공간이 Claude Code 화면인지: 마루가 claude 를 띄웠고(launched) 훅 상태가 busy/idle/waiting 으로 알려졌거나, 아직 상태가 없어도 claude 가 설치돼 있어 exec 됐을 때
+function isClaudeUi({ launched, state, claudeFound } = {}) {
+  return !!launched && (state === 'busy' || state === 'idle' || state === 'waiting' || (state === 'none' && !!claudeFound));
+}
+
+function keyToSeq(e, altScreen, claudeUi) {
   if (!e || e.type !== 'keydown') return null;
   if (e.isComposing || e.keyCode === 229) return null;
-  if (isLineNavKey(e, altScreen)) return e.key === 'ArrowLeft' ? '\x01' : '\x05';
+  if (isLineNavKey(e, altScreen, claudeUi)) return e.key === 'ArrowLeft' ? '\x01' : '\x05';
   // Shift+Enter: 줄바꿈(ESC+CR. Claude Code 가 Option+Enter 로 받는 입력과 같다). 전송하지 않는다
   if (e.key === 'Enter') return isNewlineKey(e) ? '\x1b\r' : null;
   if (e.key !== 'Backspace') return null;
@@ -464,9 +471,27 @@ function parseAgentRecord(text) {
   return rec;
 }
 
+// 상태 파일의 at 은 초 단위로 잘려 있다(date -u +%S). 파일 mtime 이 at 과 2초 안이면 그 값(ms)으로 다듬어 Esc 시각과 비교한다
+function refineAgentAt(rec, mtimeMs) {
+  if (!rec || !Number.isFinite(rec.atMs) || !Number.isFinite(mtimeMs)) return rec;
+  const d = mtimeMs - rec.atMs;
+  return d >= 0 && d < 2000 ? { ...rec, atMs: mtimeMs } : rec;
+}
+
+// Esc 로 중단했는데 Stop 훅이 없을 때: busy/waiting 기록보다 Esc 가 나중이고(그 뒤 새 기록 없음), Esc 뒤 delayMs(1.5초)가 지났으면 true.
+// 그 사이에 이미 끝나가던 도구가 PostToolUse(busy)를 쓰면 기록이 Esc 보다 새로워 false 가 된다. 다음 프롬프트(UserPromptSubmit)의 busy 도 마찬가지.
+const ESC_IDLE_MS = 1500;
+function escInterrupted(rec, escAt, now, delayMs = ESC_IDLE_MS) {
+  if (!rec || (rec.state !== 'busy' && rec.state !== 'waiting')) return false;
+  if (!Number.isFinite(escAt) || escAt <= 0 || !Number.isFinite(rec.atMs) || !Number.isFinite(now)) return false;
+  return escAt > rec.atMs && now - escAt >= delayMs;
+}
+
 // busy 인데 기록이 오래되고(staleMs) pty 출력도 그동안 없으면 idle 로 낮춘다(Esc 중단 등 Stop 훅이 없는 경우)
-function effectiveAgent(rec, now, lastOutputAt, staleMs = 20000) {
+// escAt: 이 작업 공간 터미널에서 busy/waiting 중에 사용자가 Esc 를 누른 시각(ms, 앱 메모리에만 둔다). 0 이면 없음
+function effectiveAgent(rec, now, lastOutputAt, staleMs = 20000, escAt = 0) {
   if (!rec) return 'none';
+  if (escInterrupted(rec, escAt, now)) return 'idle';
   if (rec.state !== 'busy') return rec.state;
   const quiet = now - lastOutputAt > staleMs;
   const old = !Number.isFinite(rec.atMs) || now - rec.atMs > staleMs;
@@ -563,7 +588,7 @@ function readRegular(file, maxBytes, fromEnd) {
     const len = Math.min(st.size, maxBytes);
     const buf = Buffer.alloc(len);
     const n = fs.readSync(fd, buf, 0, len, fromEnd ? st.size - len : 0);
-    return { text: buf.toString('utf8', 0, n), truncated: st.size > maxBytes };
+    return { text: buf.toString('utf8', 0, n), truncated: st.size > maxBytes, mtimeMs: st.mtimeMs };
   } catch { return null; } finally { if (fd !== null) try { fs.closeSync(fd); } catch { /* 무시 */ } }
 }
 
@@ -2454,7 +2479,7 @@ const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, isSessionId, resolveRoot, keyToSeq, isNewlineKey, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,

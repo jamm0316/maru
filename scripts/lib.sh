@@ -387,11 +387,12 @@ PY
 # 기존 data/projects.txt 가 있는데 읽을 수 없으면(링크·크기 초과·UTF-8 아님) 병합을 거부하고 파일을 그대로 둔다(로그에 이유).
 # 다시 쓰기 전에 기존 파일을 projects.txt.bak 으로 남긴다(형식이 틀린 기존 줄이 조용히 사라지지 않게). 유효한 새 줄이 없으면 기존 파일을 그대로 둔다.
 # 항상 0 을 반환한다(실패는 로그만). 일지·할 일 적용보다 먼저 불러야 같은 실행의 새 슬러그가 인정된다.
-apply_projects() {
+# 병합 본체(apply_projects 와 maru project add 가 함께 쓴다 — 규칙은 한 곳). _PROJ_RES 에 결과 문장을 두고 0=병합함 / 1=거부·새 줄 없음 / 2=환경 실패.
+_projects_merge() {
   local src=$1 dst=$MARU_DATA/projects.txt tmp res
-  [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
-  mkdir -p "$MARU_DATA" 2>/dev/null || { type log >/dev/null 2>&1 && log "프로젝트 목록: data 폴더 없음 — 건너뜀"; return 0; }
-  tmp=$(mktemp "$MARU_DATA/.projects.XXXXXX" 2>/dev/null) || { type log >/dev/null 2>&1 && log "프로젝트 목록: 임시 파일 실패 — 건너뜀"; return 0; }
+  _PROJ_RES=""
+  mkdir -p "$MARU_DATA" 2>/dev/null || { _PROJ_RES="data 폴더 없음 — 건너뜀"; return 2; }
+  tmp=$(mktemp "$MARU_DATA/.projects.XXXXXX" 2>/dev/null) || { _PROJ_RES="임시 파일 실패 — 건너뜀"; return 2; }
   res=$(python3 -I - "$src" "$tmp" "$dst" "$_maru_lib" "$MARU_DATA/project-state.json" <<'PY' 2>&1
 import os, stat, sys
 src, tmp, dst, libdir, statepath = sys.argv[1:6]
@@ -434,9 +435,70 @@ PY
   ) && [ -s "$tmp" ] && chmod 600 "$tmp" \
     && { [ ! -e "$dst" ] && [ ! -L "$dst" ] || { rm -f "$dst.bak" && cp -p "$dst" "$dst.bak"; }; } \
     && mv -f "$tmp" "$dst" 2>/dev/null
-  if [ $? -eq 0 ]; then type log >/dev/null 2>&1 && log "프로젝트 목록 갱신: $res"
-  else rm -f "$tmp"; type log >/dev/null 2>&1 && log "프로젝트 목록 유지(기존 그대로): ${res:-반영 실패}"; fi
+  if [ $? -eq 0 ]; then _PROJ_RES=$res; return 0
+  else rm -f "$tmp"; _PROJ_RES=${res:-반영 실패}; return 1; fi
+}
+
+apply_projects() {
+  local src=$1
+  [ -e "$src" ] || [ -L "$src" ] || return 0     # 파일이 없으면 모델이 쓸 게 없다고 판단한 것
+  _projects_merge "$src"
+  case $? in
+    0) type log >/dev/null 2>&1 && log "프로젝트 목록 갱신: $_PROJ_RES" ;;
+    2) type log >/dev/null 2>&1 && log "프로젝트 목록: $_PROJ_RES" ;;
+    *) type log >/dev/null 2>&1 && log "프로젝트 목록 유지(기존 그대로): $_PROJ_RES" ;;
+  esac
   return 0
+}
+
+# ---- maru project list | add <태그> <슬러그> <제목>
+# add 는 한 줄짜리 stage 를 만들어 위 병합 본체에 넘긴다(검증·중복·상한 규칙은 apply_projects 와 같다). 회고와 같은 잠금($STATE/lock.d)을 잡고 쓴다.
+# 종료 코드: 0 등록함 또는 이미 있음 / 2 입력 거부(형식·제어문자·비밀값 모양) / 3 열린 프로젝트 상한 / 4 잠금 못 잡음(회고가 기억을 갱신 중) / 1 그 밖의 실패.
+# 환경변수 MARU_PROJECT_LOCK_TRIES(1~12, 기본 6; 5초 간격)로 잠금 대기 횟수를 줄일 수 있다.
+project_list() {
+  local out
+  out=$(open_projects_text)
+  [ "$out" = "(없음)" ] && out=$(T "(없음)" "(none)")
+  printf '%s\n' "$out"
+}
+project_add() {
+  local tag=${1-} slug=${2-} title=${3-} a stage tries lock rc last
+  [ $# -eq 3 ] || { T "사용법: maru project add <태그> <슬러그> <제목>" "Usage: maru project add <tag> <slug> <title>" >&2; echo >&2; return 2; }
+  for a in "$tag" "$slug" "$title"; do
+    case "$a" in
+      "") ;;
+      -*) a="" ;;   # 옵션처럼 보이는 인자는 받지 않는다(인자는 정확히 세 개, 쓰는 위치는 고정)
+      *'|'*|*$'\n'*|*$'\r'*) a="" ;;
+    esac
+    [ -n "$a" ] || { T "등록 거부: 입력이 올바르지 않습니다(빈 칸·줄바꿈·|·앞의 - 는 쓸 수 없음)" "Rejected: invalid input (empty fields, newlines, | and a leading - are not allowed)" >&2; echo >&2; return 2; }
+  done
+  stage=$(mktemp "${TMPDIR:-/tmp}/maru-project.XXXXXX" 2>/dev/null) || { T "등록 실패: 임시 파일을 만들 수 없음" "Failed: cannot create a temporary file" >&2; echo >&2; return 1; }
+  printf '%s|%s|%s\n' "$tag" "$slug" "$title" > "$stage" || { rm -f "$stage"; return 1; }
+  tries=${MARU_PROJECT_LOCK_TRIES:-6}
+  case "$tries" in ''|*[!0-9]*) tries=6;; esac
+  [ "$tries" -ge 1 ] || tries=1; [ "$tries" -le 12 ] || tries=12
+  lock=$STATE/lock.d
+  mkdir -p "$STATE" 2>/dev/null
+  if ! acquire_lock "$lock" "$tries"; then
+    rm -f "$stage"
+    T "등록 보류: 다른 회고가 기억을 갱신 중입니다. 잠시 뒤 다시 시도하세요" "Not registered: a reflection is updating memory right now. Try again shortly" >&2; echo >&2
+    return 4
+  fi
+  _projects_merge "$stage"; rc=$?
+  last=$(tail -n 1 "$MARU_DATA/projects.txt" 2>/dev/null)
+  rm -rf "$lock"; rm -f "$stage"
+  if [ $rc -eq 0 ]; then
+    printf '%s\n' "$(T "프로젝트 등록: " "Project registered: ")${tag}/${slug} — ${last#*|*|}"
+    return 0
+  fi
+  # 결과 문장(lib 의 python 이 만든 "버린 줄 N, 이미 있음 M, 상한 초과 K")으로 이유를 가른다
+  case "$_PROJ_RES" in
+    *"이미 있음 "[1-9]*) printf '%s\n' "$(T "이미 있는 프로젝트입니다: " "Already registered: ")${tag}/${slug}$(T " (처음 등록한 제목을 유지합니다)" " (the first title is kept)")"; return 0 ;;
+    *"상한 초과 "[1-9]*) T "등록 거부: 열린 프로젝트가 상한에 도달했습니다(완료·합침 정리 필요)" "Rejected: the open-project limit has been reached (finish or merge some first)" >&2; echo >&2; return 3 ;;
+    *"버린 줄 "[1-9]*) T "등록 거부: 입력이 올바르지 않습니다(태그 1~12자·슬러그 1~24자 소문자·제목 1~40자 한글/영숫자/공백과 . , - _ / ( ) : · + # &)" "Rejected: invalid input (tag 1-12 chars, slug 1-24 lowercase chars, title 1-40 chars of letters, digits, spaces and . , - _ / ( ) : · + # &)" >&2; echo >&2; return 2 ;;
+  esac
+  T "등록 실패: 프로젝트 목록을 갱신하지 못했습니다" "Failed: could not update the project list" >&2; echo >&2
+  return 1
 }
 
 # 회고·정리 프롬프트에 넣을 "열린 프로젝트" 목록(`태그/슬러그 — 제목` 줄, 최대 50줄; 없으면 `(없음)`).

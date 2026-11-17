@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('maru', {
   // pty·작업 공간: 모든 채널이 작업 공간 id(문자열)를 싣는다. 경로는 받지 않는다(폴더 선택은 main 의 네이티브 창).
   ptyStart: (id, cols, rows) => ipcRenderer.invoke('pty:start', String(id), cols | 0, rows | 0),
   ptyRestart: (id, cols, rows) => ipcRenderer.invoke('pty:restart', String(id), cols | 0, rows | 0),
+  ptyEsc: (id) => ipcRenderer.send('pty:esc', String(id)),
   ptyWrite: (id, data) => ipcRenderer.send('pty:write', String(id), String(data)),
   ptyResize: (id, cols, rows) => ipcRenderer.send('pty:resize', String(id), cols | 0, rows | 0),
   onPtyData: (cb) => { ipcRenderer.on('pty:data', (_e, id, d) => cb(String(id), d)); },

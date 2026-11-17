@@ -84,9 +84,11 @@
     term.options.disableStdin = modalOpen();
     term.attachCustomKeyEventHandler((e) => {
       if (modalOpen()) return false;
-      const alt = term.buffer.active.type === 'alternate'; // vim 등 alternate screen 에서는 Cmd+←/→ 를 그대로 둔다
-      const seq = Lib.keyToSeq(e, alt);
-      if (seq === null) return !(Lib.isNewlineKey(e) || Lib.isLineNavKey(e, alt)); // Shift+Enter 의 keypress 가 Enter(전송)로 새지 않게, Cmd+←/→ 의 keypress·keyup 도 같이 삼킨다
+      const alt = term.buffer.active.type === 'alternate'; // vim 등 alternate screen 에서는 Cmd+←/→ 를 그대로 둔다. 단 Claude Code(fullscreen 렌더러도 alternate screen)는 예외
+      if (e.type === 'keydown' && e.key === 'Escape' && e.isTrusted && !e.isComposing && e.keyCode !== 229 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.repeat) window.maru.ptyEsc(id); // 중단 감지용 알림만(키는 그대로 pty 로 간다)
+      const cc = !!(wsList.find((x) => x.id === id) || {}).cc;
+      const seq = Lib.keyToSeq(e, alt, cc);
+      if (seq === null) return !(Lib.isNewlineKey(e) || Lib.isLineNavKey(e, alt, cc)); // Shift+Enter 의 keypress 가 Enter(전송)로 새지 않게, Cmd+←/→ 의 keypress·keyup 도 같이 삼킨다
       if (e.type === 'keydown') { e.preventDefault(); window.maru.ptyWrite(id, seq); }
       return false;
     });

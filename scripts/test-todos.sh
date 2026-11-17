@@ -725,6 +725,74 @@ for p in reflect consolidate; do check "$p 프롬프트에 최근 표시 자리�
 out=$(LIBRUN 'render_template "$1" MEMORY_DIR=/m STAGE_DIR=/s SKILLS_DIR=/k RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)"' "$REPO/prompts/reflect-prompt.md")
 checkall "렌더하면 자리표시자가 남지 않음" hasnt "$out" "{{RECENT_MARKS}}" '&&' has "$out" "<recent-marks>"
 
+echo "== maru project list | add"
+PD=$T/pdata; mkdir -p "$PD/state"
+MP() { run_env MARU_HOME="$REPO" MARU_DATA="$PD" MARU_STATE="$PD/state" "$@"; }
+MPA() { MP -- "$REPO/bin/maru" project "$@"; }
+PREG=$PD/projects.txt
+out=$(MPA list); check "list: 비어 있으면 (없음)" [ "$out" = "(없음)" ]
+out=$(MPA add maru desktop-app '데스크톱 앱'); rc=$?
+checkall "add 유효: 등록·rc 0·ko 문장" [ $rc = 0 ] '&&' has "$out" "프로젝트 등록: maru/desktop-app — 데스크톱 앱" '&&' [ "$(cat "$PREG")" = "maru|desktop-app|데스크톱 앱" ] '&&' [ "$(stat -f %Lp "$PREG")" = 600 ]
+out=$(MPA list); checkall "list: 등록한 줄이 보임" has "$out" "maru/desktop-app" '&&' has "$out" "데스크톱 앱"
+out=$(MPA add maru desktop-app '다른 제목'); rc=$?
+checkall "같은 키: rc 0·이미 있음·첫 제목 유지" [ $rc = 0 ] '&&' has "$out" "이미 있는 프로젝트입니다: maru/desktop-app" '&&' [ "$(cat "$PREG")" = "maru|desktop-app|데스크톱 앱" ]
+out=$(MP MARU_LANG=en -- "$REPO/bin/maru" project add maru blog 'Blog rewrite'); rc=$?
+checkall "en 메시지: 등록" [ $rc = 0 ] '&&' has "$out" "Project registered: maru/blog — Blog rewrite"
+out=$(MP MARU_LANG=en -- "$REPO/bin/maru" project add maru blog 'Other'); rc=$?
+checkall "en 메시지: 이미 있음" [ $rc = 0 ] '&&' has "$out" "Already registered: maru/blog"
+out=$(MP MARU_LANG=en -- "$REPO/bin/maru" project list); checkall "en list" has "$out" "maru/blog"
+cp "$PREG" "$T/preg.keep"
+bad_add() { local name=$1 want=$2; shift 2; local o rc; o=$(MPA add "$@"); rc=$?; checkall "$name" [ $rc = "$want" ] '&&' cmp -s "$PREG" "$T/preg.keep"; }
+bad_add "잘못된 태그(공백·너무 김·특수문자) rc 2" 2 'bad tag' x1 '제목'
+bad_add "태그 13자 rc 2" 2 aaaaaaaaaaaaa x1 '제목'
+bad_add "슬러그 대문자 rc 2" 2 maru Upper '제목'
+bad_add "슬러그 25자 rc 2" 2 maru "$(printf 'a%.0s' $(seq 1 25))" '제목'
+bad_add "슬러그 슬래시 rc 2" 2 maru a/b '제목'
+bad_add "제목 41자 rc 2" 2 maru long1 "$(printf '가%.0s' $(seq 1 41))"
+bad_add "제목 아주 김(400자 초과) rc 2" 2 maru long2 "$(printf '가%.0s' $(seq 1 500))"
+bad_add "제목 비밀값 모양 rc 2" 2 maru sec1 'sk-abcdefghijklmnopqrstuvwxyz0123'
+bad_add "제목에 제어문자(BEL) rc 2" 2 maru ctl1 "$(printf '제어\a문자')"
+bad_add "제목에 줄바꿈 rc 2(두 번째 줄이 새 항목이 되지 않음)" 2 maru nl1 "$(printf '가\nmaru|inj|주입')"
+bad_add "제목에 | rc 2" 2 maru pipe1 'a|b'
+bad_add "제목에 \$(...) rc 2" 2 maru sub1 '$(touch '"$T"'/pwned)'
+bad_add "제목에 백틱 rc 2" 2 maru bt1 '`touch '"$T"'/pwned`'
+check "명령 치환이 실행되지 않음" [ ! -e "$T/pwned" ]
+bad_add "빈 제목 rc 2" 2 maru e1 ''
+bad_add "인자 부족 rc 2" 2 maru only
+bad_add "인자 4개(제목을 이어붙이지 않음) rc 2" 2 maru extra1 두 개
+bad_add "옵션처럼 보이는 인자 --file rc 2" 2 --file x '제목'
+bad_add "옵션처럼 보이는 인자 -x rc 2" 2 maru -x '제목'
+bad_add "옵션처럼 보이는 제목 -x rc 2" 2 maru opt1 -x
+o=$(MPA add maru x2 '제목' --file "$T/evil.txt"); rc=$?
+checkall "추가 인자 --file 은 거부되고 파일을 만들지 않음" [ $rc = 2 ] '&&' [ ! -e "$T/evil.txt" ]
+o=$(MPA --file "$T/evil.txt" add maru x2 t); checkall "project 뒤 옵션은 사용법 오류" [ $? != 0 ] '&&' [ ! -e "$T/evil.txt" ]
+o=$(MPA add maru x2 'ok 제목' '' ); checkall "빈 추가 인자도 거부(인자 4개)" [ $? = 2 ]
+o=$(MPA bogus); checkall "알 수 없는 하위 명령 rc 2" [ $? = 2 ]
+o=$(MPA add 'bad tag' x1 '제목' 2>&1); checkall "거부 메시지(ko)" has "$o" "등록 거부"
+o=$(MP MARU_LANG=en -- "$REPO/bin/maru" project add 'bad tag' x1 t 2>&1); checkall "거부 메시지(en)" has "$o" "Rejected: invalid input"
+# 200개 상한
+{ i=0; while [ $i -lt 200 ]; do i=$((i+1)); printf 'cap|p%d|제목 %d\n' "$i" "$i"; done; } > "$PD/projects.txt"
+cp "$PD/projects.txt" "$T/preg.cap"
+o=$(MPA add cap new1 '새 일'); rc=$?
+checkall "열린 프로젝트 200개면 rc 3·파일 그대로" [ $rc = 3 ] '&&' cmp -s "$PD/projects.txt" "$T/preg.cap" '&&' has "$o" "상한"
+o=$(MP MARU_LANG=en -- "$REPO/bin/maru" project add cap new1 t); checkall "상한 en 메시지" has "$o" "limit"
+o=$(MPA add cap p7 '또'); rc=$?; checkall "상한이어도 이미 있는 키는 rc 0·이미 있음" [ $rc = 0 ] '&&' has "$o" "이미 있는 프로젝트"
+cp "$T/preg.keep" "$PD/projects.txt"
+# 회고와 같은 잠금(state/lock.d)
+mkdir "$PD/state/lock.d"; echo $$ > "$PD/state/lock.d/pid"
+o=$(MPA add maru locked1 '잠금'); rc=$?
+checkall "회고 잠금을 잡고 있으면 add 는 쓰지 않고 rc 4(대기 1회)" [ $rc = 4 ] '&&' cmp -s "$PREG" "$T/preg.keep" '&&' has "$o" "회고" '&&' [ -d "$PD/state/lock.d" ]
+o=$(MPA list); checkall "list 는 잠금과 무관" has "$o" "maru/blog"
+rm -rf "$PD/state/lock.d"
+o=$(MPA add maru unlocked1 '잠금 풀림'); rc=$?
+checkall "잠금이 풀리면 등록되고 add 가 잠금을 남기지 않음" [ $rc = 0 ] '&&' [ ! -e "$PD/state/lock.d" ] '&&' has "$(cat "$PREG")" "maru|unlocked1|잠금 풀림"
+# add 가 도는 동안 잠금을 잡고 있었는지: 잠금 디렉터리가 없을 때 시작해 병합 중에 존재해야 한다 → python3 래퍼가 그 순간을 기록
+mkdir -p "$T/spy"; printf '%s\n' '#!/bin/sh' "[ -d \"$PD/state/lock.d\" ] && echo held >> \"$T/spy/held\"" "exec \"$REAL_PY\" \"\$@\"" > "$T/spy/python3"; chmod +x "$T/spy/python3"
+rm -f "$T/spy/held"
+o=$(run_env MARU_HOME="$REPO" MARU_DATA="$PD" MARU_STATE="$PD/state" PATH="$T/spy:$BASEPATH" -- "$REPO/bin/maru" project add maru spy1 '감시'); rc=$?
+checkall "병합 중에는 회고와 같은 잠금을 쥐고 있음" [ $rc = 0 ] '&&' [ -s "$T/spy/held" ]
+# apply_projects 는 같은 본체를 쓰므로 동작이 그대로(위 섹션이 이미 검증)
+
 echo "== 가드"
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
 # 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
