@@ -1,6 +1,6 @@
 // All page strings. Keys are referenced from index.html via data-i18n.
 // Set the two links below when the download and the repository are public.
-window.MARU_LINKS = { download: "https://github.com/jamm0316/maru/releases/latest", github: "https://github.com/jamm0316/maru" };
+window.MARU_LINKS = { download: "https://github.com/jamm0316/maru/releases/latest/download/Maru-0.1.0-arm64.dmg", github: "https://github.com/jamm0316/maru" };
 
 window.MARU_COPY = {
   en: {
