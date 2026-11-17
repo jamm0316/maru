@@ -121,7 +121,7 @@ function readSubs(w) {
   const d = subsDir(w);
   if (!d || !w.term) return [];
   const st = wsState(w);
-  if (st !== 'busy' && st !== 'waiting') return []; // 세션이 쉬면 남은 것은 무시
+  if (!L.showSubs(readAgentState(w), st, Date.now(), SUBS_TTL_MS)) return []; // 세션이 쉬면 남은 것은 무시(단, 백그라운드 서브에이전트가 도는 중이면 idle 에도 보인다)
   const types = [];
   try {
     if (!fs.lstatSync(d).isDirectory()) return [];
@@ -277,7 +277,7 @@ function rememberMarks(entries) {
 // ---- 데이터 수집(고정 경로만) ----
 function run(file, args, opts = {}) {
   return new Promise((resolve) => {
-    execFile(file, args, { timeout: 10000, maxBuffer: 1 << 20, cwd: ROOT || os.homedir(), ...opts }, (err, stdout) => {
+    execFile(file, args, { timeout: 10000, maxBuffer: 1 << 20, cwd: ROOT || os.homedir(), env: L.sanitizeHostEnv(process.env), ...opts }, (err, stdout) => {
       resolve(err ? null : String(stdout));
     });
   });
@@ -420,7 +420,7 @@ function spawnPty(w, cols, rows) {
   if (w.unavailable) { if (dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } else return false; } // 디스크가 다시 연결됐으면 시작 가능
   if (!dirOk(w.cwd)) { w.unavailable = true; wsChanged(false); return false; }
   const shellBin = process.env.SHELL || '/bin/zsh';
-  const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+  const env = { ...L.sanitizeHostEnv(process.env), TERM: 'xterm-256color', COLORTERM: 'truecolor' }; // Claude Code 호스트 환경을 물려주지 않는다(로그인 셸이 프로필의 사용자 설정은 다시 읽는다)
   for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP')) delete env[k];
   const sid = L.newSessionId(() => crypto.randomUUID()); // 셸 env 에는 넣지 않고 claude 실행 명령에만 붙인다
   let self;
@@ -604,7 +604,7 @@ function claudeFound() {
   return claudeFoundVal;
 }
 // cc: 이 작업 공간 화면이 Claude Code 인지(렌더러가 Cmd+←/→ 를 alternate screen 에서도 보낼지 정한다). 시험용 가짜 작업 공간·스모크는 아님
-const wsView = () => wsOrder().map((w) => { const state = wsState(w); return { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, bp: w.bracketed, note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now: Date.now() }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }) }; });
+const wsView = () => wsOrder().map((w) => { const state = wsState(w); return { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, bp: w.bracketed, bg: L.bgCount(readAgentState(w), state, Date.now(), SUBS_TTL_MS), note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now: Date.now() }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }) }; });
 const attention = () => wsOrder().filter((w) => { const s = wsState(w); return s === 'busy' || s === 'waiting'; });
 function activate(id) { if (!wsOf(id) || id === activeId) return; activeId = id; wsChanged('active'); }
 function activateOffset(d) {
@@ -800,7 +800,7 @@ function buildMenu() {
 
 // ---- 자식 프로세스 (고정 argv, 셸 문자열 보간 없음) ----
 function childEnv() {
-  const env = { ...process.env };
+  const env = L.sanitizeHostEnv(process.env);
   for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP')) delete env[k];
   const home = os.homedir();
   const extra = [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];

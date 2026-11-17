@@ -2727,6 +2727,76 @@ t('parseTodoSrc: 깨진 바이트(U+FFFD)가 든 줄만 버리고 나머지는 �
   assert.deepStrictEqual(L.readTodoSrcFile(f, NOWS, process.getuid()).map((e) => e.tag), ['a', 'c']);
 });
 
+// ---- 백그라운드 서브에이전트 표시 ----
+t('parseAgentRecord: bg 는 1~99 정수만 받고 틀린 값은 버리되 기록은 받는다', () => {
+  const rec = (o) => L.parseAgentRecord(JSON.stringify({ state: 'idle', at: '2026-01-01T00:00:00Z', ...o }));
+  assert.strictEqual(rec({ bg: 1 }).bg, 1); assert.strictEqual(rec({ bg: 99 }).bg, 99);
+  for (const bad of [0, 100, -1, 1.5, '2', null, true, [1], {}, NaN]) { const r = rec({ bg: bad }); assert.ok(r && r.state === 'idle', String(bad)); assert.ok(!('bg' in r), String(bad)); }
+  assert.ok(!('bg' in rec({})));
+  assert.strictEqual(L.parseAgentRecord('{"state":"busy","bg":2}').bg, 2); // 값은 보존하고 해석은 bgCount 가 한다
+});
+t('bgCount·showSubs: idle 이고 bg>0 이며 기록이 TTL 안일 때만, busy 로 바꾸지 않는다', () => {
+  const now = Date.parse('2026-01-01T01:00:00Z'); const ttl = 30 * 60 * 1000;
+  const rec = (bg, ago) => ({ state: 'idle', atMs: now - ago, bg });
+  assert.strictEqual(L.bgCount(rec(2, 1000), 'idle', now, ttl), 2);
+  assert.strictEqual(L.bgCount(rec(2, ttl + 1), 'idle', now, ttl), 0); // 낡은 값(SubagentStop 이 안 왔다)
+  assert.strictEqual(L.bgCount(rec(2, ttl), 'idle', now, ttl), 2);
+  assert.strictEqual(L.bgCount(rec(2, 1000), 'busy', now, ttl), 0); assert.strictEqual(L.bgCount(rec(2, 1000), 'waiting', now, ttl), 0); // idle 일 때만
+  assert.strictEqual(L.bgCount({ state: 'idle', atMs: now }, 'idle', now, ttl), 0); // bg 없음 = 마지막 Stop
+  assert.strictEqual(L.bgCount({ state: 'idle', atMs: NaN, bg: 3 }, 'idle', now, ttl), 0); // 시각을 모르면 믿지 않는다
+  assert.strictEqual(L.bgCount({ state: 'idle', atMs: now + 2 * 86400e3, bg: 3 }, 'idle', now, ttl), 0); // 먼 미래
+  for (const bad of [null, undefined, {}, { bg: 0 }, { bg: 100, atMs: now }, { bg: '2', atMs: now }]) assert.strictEqual(L.bgCount(bad, 'idle', now, ttl), 0);
+  assert.strictEqual(L.showSubs(rec(2, 1000), 'idle', now, ttl), true); assert.strictEqual(L.showSubs(rec(2, 1000), 'idle', now, ttl) && L.effectiveAgent(rec(2, 1000), now, 0) === 'idle', true);
+  assert.strictEqual(L.showSubs({ state: 'idle', atMs: now }, 'idle', now, ttl), false); // 마지막 Stop 뒤에는 비어 있다
+  assert.strictEqual(L.showSubs(null, 'busy', now, ttl), true); assert.strictEqual(L.showSubs(null, 'waiting', now, ttl), true); // 일하는 중이면 예전처럼
+  for (const st of ['none', 'pending', 'exited', 'unavailable']) assert.strictEqual(L.showSubs(rec(2, 1000), st, now, ttl), false, st);
+});
+t('effectiveAgent: bg 가 있어도 idle 은 idle(사용자가 입력할 수 있다)', () => {
+  const now = Date.parse('2026-01-01T01:00:00Z');
+  assert.strictEqual(L.effectiveAgent({ state: 'idle', atMs: now - 1000, bg: 2 }, now, 0), 'idle');
+});
+t('agentStatusText: idle + bg 면 "입력 대기 · 백그라운드 작업 N", 아니면 예전 문구', () => {
+  const x = L.agentStatusText('idle', 3);
+  assert.deepStrictEqual(x, { key: 'agent.idle.bg', params: { n: 3 } });
+  assert.strictEqual(I.t('ko', x.key, x.params), '입력 대기 · 백그라운드 작업 3'); assert.strictEqual(I.t('en', x.key, x.params), 'Ready · 3 in background');
+  for (const [k, bg] of [['idle', 0], ['idle', undefined], ['idle', null], ['idle', 1.5], ['busy', 3], ['waiting', 2], ['none', 1]]) assert.deepStrictEqual(L.agentStatusText(k, bg), { key: 'agent.' + k, params: {} }, k + bg);
+  assert.strictEqual(I.t('ko', L.agentStatusText('idle', 0).key), '입력 대기'); // 예전 문구 그대로
+});
+t('실제 상태 파일 → 표시: 훅이 쓴 형식(bg 포함)을 읽어 서브 목록을 보일지 정한다', () => {
+  const now = Date.now();
+  const text = JSON.stringify({ state: 'idle', at: new Date(now - 5000).toISOString().replace(/\.\d+Z$/, 'Z'), bg: 1 });
+  const rec = L.parseAgentRecord(text);
+  assert.strictEqual(L.showSubs(rec, L.effectiveAgent(rec, now, 0), now, 30 * 60 * 1000), true);
+  const fin = L.parseAgentRecord(JSON.stringify({ state: 'idle', at: new Date(now).toISOString() })); // 마지막 Stop: bg 없음
+  assert.strictEqual(L.showSubs(fin, 'idle', now, 30 * 60 * 1000), false);
+});
+// ---- 호스트 환경 정리 ----
+t('sanitizeHostEnv: 호스트 세션에서 물려받은 환경은 모두 지우고 CLAUDE_CONFIG_DIR·MARU_* 와 나머지는 남긴다', () => {
+  const env = { PATH: '/bin', HOME: '/h', CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_SESSION_ID: 'x', CLAUDE_CODE_MESSAGING_SOCKET: '/s', CLAUDE_CODE_MESSAGING_TOKEN: 't', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SIMPLE: '1',
+    CLAUDE_AGENT_SDK_VERSION: '1', CLAUDE_AGENT_SDK_CLIENT_APP: 'x', CLAUDE_EFFORT: 'high', CLAUDE_PID: '9', CLAUDE_PREVIEW_ID: 'p', MCP_TIMEOUT: '1', MCP_SERVER_X: 'y', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', ANTHROPIC_API_KEY: 'k', ANTHROPIC_AUTH_TOKEN: 'a', ANTHROPIC_CUSTOM_HEADERS: 'h',
+    CLAUDE_CONFIG_DIR: '/cfg', MARU_HOME: '/m', MARU_APP_UI: 'x', EDITOR: 'vi', ANTHROPIC_MODEL: 'm' };
+  const frozen = JSON.stringify(env);
+  const out = L.sanitizeHostEnv(env);
+  assert.strictEqual(JSON.stringify(env), frozen); // 입력은 바뀌지 않는다
+  assert.deepStrictEqual(Object.keys(out).sort(), ['ANTHROPIC_MODEL', 'CLAUDE_CONFIG_DIR', 'EDITOR', 'HOME', 'MARU_APP_UI', 'MARU_HOME', 'PATH'].sort());
+  assert.notStrictEqual(out, env);
+});
+t('sanitizeHostEnv: 호스트가 아닌 사용자 환경은 ANTHROPIC_BASE_URL·MCP_* 등을 지우지 않는다(CLAUDE_CODE_* 표지류는 늘 뺌)', () => {
+  const clean = { PATH: '/bin', ANTHROPIC_BASE_URL: 'https://proxy.example', ANTHROPIC_API_KEY: 'k', ANTHROPIC_AUTH_TOKEN: 'a', ANTHROPIC_CUSTOM_HEADERS: 'h', MCP_TIMEOUT: '5', CLAUDE_CONFIG_DIR: '/cfg', MARU_DATA: '/d' };
+  assert.deepStrictEqual(L.sanitizeHostEnv(clean), clean);
+  const out = L.sanitizeHostEnv({ ...clean, CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_EFFORT: 'low', CLAUDE_PID: '1' }); // 표지 없이 CLAUDE_CODE_* 만 있어도 그것들은 뺀다
+  assert.deepStrictEqual(out, clean);
+  assert.strictEqual('ANTHROPIC_BASE_URL' in L.sanitizeHostEnv({ ...clean, CLAUDECODE: '1' }), false); // CLAUDECODE 만 있어도 호스트로 본다
+  assert.strictEqual('MCP_TIMEOUT' in L.sanitizeHostEnv({ ...clean, CLAUDE_CODE_CHILD_SESSION: '1' }), false);
+  for (const bad of [null, undefined, 5, 'x']) assert.deepStrictEqual(L.sanitizeHostEnv(bad), {});
+  const own = Object.create({ CLAUDECODE: '1' }); own.PATH = '/bin'; assert.deepStrictEqual(L.sanitizeHostEnv(own), { PATH: '/bin' }); // 상속 속성은 호스트 표지로 보지 않는다
+});
+t('main 의 자식 프로세스 환경은 모두 sanitizeHostEnv 를 거친다(pty·childEnv·run)', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(/\.\.\.L\.sanitizeHostEnv\(process\.env\), TERM/.test(main) && /const env = L\.sanitizeHostEnv\(process\.env\);\n  for \(const k of Object\.keys\(env\)\) if \(k\.startsWith\('ELECTRON_'\)/.test(main) && /env: L\.sanitizeHostEnv\(process\.env\), \.\.\.opts/.test(main));
+  assert.ok(!/\{ \.\.\.process\.env/.test(main.replace(/\/\/[^\n]*/g, '')), 'process.env 를 그대로 펼치는 곳이 없다');
+});
+
 (async () => {
   for (const f of pending) await f();
   fs.rmSync(tmp, { recursive: true, force: true });

@@ -294,6 +294,18 @@ check "MARU_NO_SQUADS=1 이면 스쿼드 없음" [ "$(cat "$T/claude.args" | tr 
 rm -f "$T/claude.args"
 run_env -- bash "$REPO/bin/maru" >/dev/null
 check "bin/maru 인자 없음 -> maru-claude.sh -> --agents" [ "$(sed -n 1p "$T/claude.args")" = "--agents" ]
+# bin/maru app: 설치된 앱은 open(LaunchServices)으로, 개발 실행은 Claude Code 호스트 표지를 지우고 npm start (스텁으로 확인; 진짜 앱은 띄우지 않는다)
+mkdir -p "$T/appstub" "$T/fake.app"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$@" > "$APPSTUB_OUT.args"' 'env > "$APPSTUB_OUT.env"' > "$T/appstub/npm"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$@" > "$APPSTUB_OUT.args"' 'env > "$APPSTUB_OUT.env"' > "$T/appstub/open"
+chmod +x "$T/appstub/npm" "$T/appstub/open"
+HOSTENV=(CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_CODE_SESSION_ID=x CLAUDE_AGENT_SDK_VERSION=1 CLAUDE_EFFORT=high CLAUDE_PID=1 CLAUDE_PREVIEW_X=1 KEEP_ME=yes CLAUDE_CONFIG_DIR=/keep/cfg)
+rm -f "$T/stub.out."*; run_env PATH="$T/appstub:$BASEPATH" APPSTUB_OUT="$T/stub.out" MARU_APP_BUNDLE="$T/fake.app" "${HOSTENV[@]}" -- bash "$REPO/bin/maru" app >/dev/null
+checkall "maru app(설치된 앱): open -a <앱> --env MARU_HOME=<홈> 으로 띄움" [ "$(sed -n 1,2p "$T/stub.out.args" | tr '\n' ' ')" = "-a $T/fake.app " ] '&&' grep -q '^--env$' "$T/stub.out.args" '&&' grep -q "^MARU_HOME=$REPO\$" "$T/stub.out.args"
+if [ -d "$REPO/app/node_modules" ]; then
+  rm -f "$T/stub.out."*; run_env PATH="$T/appstub:$BASEPATH" APPSTUB_OUT="$T/stub.out" MARU_APP_BUNDLE="$T/no-such.app" "${HOSTENV[@]}" -- bash "$REPO/bin/maru" app >/dev/null
+  checkall "maru app(개발 실행): npm start 로 띄우되 호스트 표지는 지우고 나머지 환경은 그대로" [ "$(cat "$T/stub.out.args")" = start ] '&&' sh -c '! grep -qE "^(CLAUDECODE|CLAUDE_CODE_[A-Z_]*|CLAUDE_AGENT_SDK_[A-Z_]*|CLAUDE_EFFORT|CLAUDE_PID|CLAUDE_PREVIEW_[A-Z_]*)=" "$1"' _ "$T/stub.out.env" '&&' grep -q '^KEEP_ME=yes$' "$T/stub.out.env" '&&' grep -q '^CLAUDE_CONFIG_DIR=/keep/cfg$' "$T/stub.out.env"
+fi
 out=$(run_env -- bash "$REPO/bin/maru" squad list); check "maru squad list" has "$out" "sq-q-lead"
 out=$(run_env -- bash "$REPO/bin/maru" squad check "$R/clean"); check "maru squad check" has "$out" "통과"
 out=$(run_env -- bash "$REPO/bin/maru" squad bogus); rc=$?; check "maru squad 잘못된 하위 명령은 rc 2" [ $rc -eq 2 ]

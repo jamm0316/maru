@@ -268,6 +268,30 @@ if [ -n "$HAVE_REAL" ]; then
   ln -s "$T/target/f" "$SD/$SID.subs/lnk2"; as_run '{}' idle >/dev/null
   check "idle: 링크는 따라가지 않음" [ "$(cat "$T/target/f")" = keep ] && [ ! -e "$SD/$SID.subs/d4" ]
   rm -f "$SD/$SID.subs/lnk2"
+  has() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
+  hasnt() { case "$1" in *"$2"*) return 1;; *) return 0;; esac; }
+  checkall() { local name=$1 a okk=1; shift; local cur=(); for a in "$@" "&&"; do if [ "$a" = "&&" ]; then if [ ${#cur[@]} -gt 0 ]; then "${cur[@]}" || okk=0; fi; cur=(); else cur+=("$a"); fi; done; if [ $okk = 1 ]; then ok "$name"; else bad "$name"; fi; }
+  # 백그라운드 서브에이전트: Stop 의 background_tasks 에 running 이 있으면 bg 를 적고 .subs 를 비우지 않는다
+  bgnum() { "$REAL_PY" -c 'import json,sys;o=json.load(open(sys.argv[1]));print(o.get("bg","-"))' "$SD/$SID.json"; }
+  as_run '{"agent_id":"bg1","agent_type":"worker"}' sub-start >/dev/null
+  as_run '{"hook_event_name":"Stop","transcript_path":"/h/.claude/projects/x/s.jsonl","background_tasks":[{"type":"subagent","status":"running","id":"bg1","secret":"x"},{"type":"shell","status":"completed"},"junk",7,null]}' idle >/dev/null
+  st=$(cat "$SD/$SID.json")
+  checkall "Stop + running 1개: bg=1·상태 idle·파일 유지·다른 내용은 저장 안 함" [ "$(bgnum)" = 1 ] '&&' [ -e "$SD/$SID.subs/bg1" ] '&&' has "$st" '"state":"idle"' '&&' has "$st" '"transcript_path"' '&&' hasnt "$st" secret
+  as_run '{"hook_event_name":"SubagentStop","agent_id":"bg1"}' sub-stop >/dev/null
+  as_run '{"hook_event_name":"Stop","background_tasks":[]}' idle >/dev/null
+  checkall "마지막 Stop(빈 목록): bg 없음·파일 비움" [ "$(bgnum)" = - ] '&&' [ -z "$(ls -A "$SD/$SID.subs")" ]
+  for bad in '"background_tasks":"running"' '"background_tasks":{"status":"running"}' '"background_tasks":[{"type":"x"},{"status":"done"},{"status":1}]' '"background_tasks":[{"status":"running"}'$(printf ',{"status":"running"}%.0s' $(seq 1001))']' '"background_tasks":null' '"x":1'; do
+    as_run '{"agent_id":"bg2","agent_type":"worker"}' sub-start >/dev/null
+    as_run '{"hook_event_name":"Stop",'"$bad"'}' idle >/dev/null
+    checkall "형식이 틀린 background_tasks(${bad:0:40}…)는 예전처럼: bg 없음·파일 비움" [ "$(bgnum)" = - ] '&&' [ -z "$(ls -A "$SD/$SID.subs")" ]
+  done
+  as_run '{"agent_id":"bg3","agent_type":"worker"}' sub-start >/dev/null
+  as_run '{"hook_event_name":"StopFailure","background_tasks":[{"status":"running"}]}' idle >/dev/null
+  checkall "StopFailure 는 예전과 같다(bg 없음·파일 비움)" [ "$(bgnum)" = - ] '&&' [ -z "$(ls -A "$SD/$SID.subs")" ]
+  as_run '{"hook_event_name":"Stop","background_tasks":['"$(printf '{"status":"running"},%.0s' $(seq 150))"'{"status":"running"}]}' idle >/dev/null
+  check "running 이 150개여도 bg 는 99 까지" [ "$(bgnum)" = 99 ]
+  as_run '{"hook_event_name":"Stop","background_tasks":[{"status":"running"},{"status":"running"}]}' busy >/dev/null
+  check "idle 이 아닌 상태(busy)에는 bg 를 쓰지 않음" [ "$(bgnum)" = - ]
   # 심볼릭 링크 폴더면 아무것도 안 함
   mkdir -p "$T/elsewhere"; ln -s "$T/elsewhere" "$SD/zzzz1234-aaaa.subs"
   ASENV=(MARU_APP_SESSION=zzzz1234-aaaa); as_run '{"agent_id":"x1","agent_type":"worker"}' sub-start >/dev/null

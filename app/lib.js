@@ -724,7 +724,36 @@ function parseAgentRecord(text) {
   const rec = { state, atMs };
   if (o && validTranscriptPath(o.transcript_path)) rec.transcript = o.transcript_path; // 앱 밖에서 쓴 값일 수 있어 다시 검증
   if (o && validModelId(o.model)) rec.model = o.model;
+  if (o && Number.isInteger(o.bg) && o.bg >= 1 && o.bg <= 99) rec.bg = o.bg; // 선택: 메인 턴은 끝났고(idle) 백그라운드 서브에이전트가 도는 수. 틀린 값은 버리고 기록은 받는다
   return rec;
+}
+
+// idle 이면서 백그라운드 서브에이전트가 도는 수(없으면 0). 기록의 at 이 ttlMs 보다 오래됐으면(SubagentStop 이 안 온 낡은 값) 0
+function bgCount(rec, state, now, ttlMs) {
+  if (!rec || state !== 'idle' || !Number.isInteger(rec.bg) || rec.bg < 1 || rec.bg > 99) return 0;
+  return Number.isFinite(rec.atMs) && Number.isFinite(now) && now - rec.atMs <= ttlMs && rec.atMs - now <= 86400000 ? rec.bg : 0;
+}
+// 서브에이전트 목록을 보여 줄까: 일하는 중(busy·waiting)이거나, idle 인데 백그라운드 작업이 남아 있을 때
+function showSubs(rec, state, now, ttlMs) { return state === 'busy' || state === 'waiting' || bgCount(rec, state, now, ttlMs) > 0; }
+// 상태 문구: [i18n 키, 매개변수]. idle + 백그라운드 작업이 있으면 "입력 대기 · 백그라운드 작업 N"
+function agentStatusText(k, bg) { return k === 'idle' && Number.isInteger(bg) && bg > 0 ? { key: 'agent.idle.bg', params: { n: bg } } : { key: 'agent.' + k, params: {} }; }
+
+// 앱을 띄운 프로세스가 Claude Code 세션 안이었을 때 물려받는 호스트 환경을 자식(작업 공간 pty·도구)에게 넘기지 않는다. 입력은 바꾸지 않고 복사본을 돌려준다.
+// 늘 뺀다: CLAUDECODE, CLAUDE_CODE_*, CLAUDE_AGENT_SDK_*, CLAUDE_EFFORT, CLAUDE_PID, CLAUDE_PREVIEW_*.
+// 입력에 CLAUDECODE 또는 CLAUDE_CODE_CHILD_SESSION 이 있었을 때(= 정말 호스트 세션에서 물려받았다)만 추가로: MCP_*, ANTHROPIC_BASE_URL·ANTHROPIC_API_KEY·ANTHROPIC_AUTH_TOKEN·ANTHROPIC_CUSTOM_HEADERS.
+// 늘 남긴다: CLAUDE_CONFIG_DIR, MARU_*. (사용자가 셸 프로필에 둔 CLAUDE_CODE_* 설정은 pty 가 로그인 셸이라 프로필을 다시 읽어 돌아온다 — 여기서는 "물려받은 것"만 정리한다.)
+const HOST_ENV_ALWAYS = (k) => k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_') || k.startsWith('CLAUDE_AGENT_SDK_') || k === 'CLAUDE_EFFORT' || k === 'CLAUDE_PID' || k.startsWith('CLAUDE_PREVIEW_');
+const HOST_ENV_INHERITED = (k) => k.startsWith('MCP_') || k === 'ANTHROPIC_BASE_URL' || k === 'ANTHROPIC_API_KEY' || k === 'ANTHROPIC_AUTH_TOKEN' || k === 'ANTHROPIC_CUSTOM_HEADERS';
+function sanitizeHostEnv(env) {
+  const src = env && typeof env === 'object' ? env : {};
+  const inherited = Object.prototype.hasOwnProperty.call(src, 'CLAUDECODE') || Object.prototype.hasOwnProperty.call(src, 'CLAUDE_CODE_CHILD_SESSION');
+  const out = {};
+  for (const k of Object.keys(src)) {
+    if (k === 'CLAUDE_CONFIG_DIR' || k.startsWith('MARU_')) { out[k] = src[k]; continue; }
+    if (HOST_ENV_ALWAYS(k) || (inherited && HOST_ENV_INHERITED(k))) continue;
+    out[k] = src[k];
+  }
+  return out;
 }
 
 // 상태 파일의 at 은 초 단위로 잘려 있다(date -u +%S). 파일 mtime 이 at 과 2초 안이면 그 값(ms)으로 다듬어 Esc 시각과 비교한다
@@ -2747,7 +2776,7 @@ const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,

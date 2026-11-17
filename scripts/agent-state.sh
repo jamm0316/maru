@@ -1,6 +1,8 @@
 #!/bin/bash
 # Claude Code 훅에서 호출: 마루 앱이 띄운 세션의 상태를 data/state/app 아래에 원자적으로 쓴다.
-#   busy|idle|waiting : <id>.json  {"state","at"[,"transcript_path"][,"model"]}
+#   busy|idle|waiting : <id>.json  {"state","at"[,"transcript_path"][,"model"][,"bg"]}
+#     bg: idle(Stop)일 때만, 훅 JSON 의 background_tasks 중 status 가 running 인 객체의 수(1~99). 있으면 메인 턴은 끝났지만 백그라운드 서브에이전트가 도는 중이라
+#         `.subs` 파일을 지우지 않는다. 목록이 없거나 형식이 틀리거나 0 이면 bg 없이 예전과 같다(파일을 비움). StopFailure 도 예전과 같다. background_tasks 의 다른 내용은 저장하지 않는다.
 #   sub-start|sub-stop: <id>.subs/<agent_id> 파일(내용: agent_type 한 줄)을 만들고 지운다(동시 실행 경쟁을 피하려고 파일 하나씩)
 # 표준입력(훅 JSON)에서는 위 필드(transcript_path, model, agent_id, agent_type)만 형식 검증 뒤에 뽑고 나머지는 저장하지 않는다.
 # MARU_APP_SESSION 이 없거나 형식이 틀리면 아무것도 하지 않는다(앱 밖 세션·cmux 영향 없음). 항상 exit 0.
@@ -93,6 +95,11 @@ if isinstance(o, dict):
         m = m.get("id")
     if isinstance(m, str) and re.fullmatch(r"[A-Za-z0-9._:\[\]-]{1,64}", m):
         rec["model"] = m
+    bt = o.get("background_tasks")
+    if state == "idle" and o.get("hook_event_name") != "StopFailure" and isinstance(bt, list) and len(bt) <= 1000:
+        n = sum(1 for x in bt if isinstance(x, dict) and x.get("status") == "running")
+        if n > 0:
+            rec["bg"] = min(n, 99)
 print(json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
 ' "$state" "$at" 2>/dev/null) || body=""
 fi
@@ -103,7 +110,8 @@ if printf '%s\n' "$body" >"$tmp" 2>/dev/null; then
 fi
 rm -f "$tmp" 2>/dev/null
 # Stop(idle) 이면 이 세션의 서브에이전트 표시를 비운다(끝나지 않은 채 남은 파일 방지). 폴더가 링크면 아무것도 안 하고 정규 파일만 지운다.
-if [ "$state" = idle ]; then
+# 단, 백그라운드 서브에이전트가 아직 도는 Stop(bg 필드가 있다)이면 비우지 않는다: SubagentStop 이 파일을 지운다(안 오면 앱이 TTL 로 거른다).
+if [ "$state" = idle ] && case "$body" in *',"bg":'*) false ;; *) true ;; esac; then
   sdir=$dir/$id.subs
   if [ -d "$sdir" ] && [ ! -L "$sdir" ]; then
     for _f in "$sdir"/*; do [ -f "$_f" ] && [ ! -L "$_f" ] && rm -f "$_f" 2>/dev/null; done

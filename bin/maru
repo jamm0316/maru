@@ -142,12 +142,21 @@ case "$cmd" in
     need_env
     exec python3 "$MARU_HOME/scripts/maru_ui.py" "$@" ;;
   app)
-    if [ -d /Applications/Maru.app ]; then exec open -a /Applications/Maru.app --env "MARU_HOME=$MARU_HOME"; fi
+    # 설치된 앱은 LaunchServices(open)로 띄운다: 호출한 프로세스의 환경(Claude Code 호스트 표지 등)을 물려받지 않고 --env 로 준 값만 받는다.
+    # 시험용: MARU_APP_BUNDLE 로 앱 위치를 바꿀 수 있다(기본 /Applications/Maru.app).
+    bundle=${MARU_APP_BUNDLE:-/Applications/Maru.app}
+    if [ -d "$bundle" ]; then exec open -a "$bundle" --env "MARU_HOME=$MARU_HOME"; fi
     if [ ! -d "$MARU_HOME/app/node_modules" ]; then
       echo "앱 의존성이 없습니다. 먼저 설치하세요: cd \"$MARU_HOME/app\" && DEVELOPER_DIR=/Library/Developer/CommandLineTools npm install" >&2
       exit 1
     fi
-    cd "$MARU_HOME/app" && exec npm start ;;
+    # 개발 실행(npm start)은 환경을 그대로 물려받으므로, Claude Code 호스트 세션의 표지는 지우고 띄운다(앱도 자식에게 넘기기 전에 한 번 더 거른다)
+    scrub=()
+    while IFS= read -r _line; do
+      _k=${_line%%=*}
+      case "$_k" in CLAUDECODE|CLAUDE_CODE_*|CLAUDE_AGENT_SDK_*|CLAUDE_EFFORT|CLAUDE_PID|CLAUDE_PREVIEW_*) scrub+=(-u "$_k") ;; esac
+    done < <(env)
+    cd "$MARU_HOME/app" && exec env ${scrub[@]+"${scrub[@]}"} npm start ;;
   suggest)
     need_env
     exec python3 "$MARU_HOME/scripts/maru_ui.py" --suggest "$@" ;;

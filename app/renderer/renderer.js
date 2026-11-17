@@ -238,7 +238,7 @@
     const a = wsList.find((w) => w.id === activeId);
     $('term-name').textContent = a ? a.title : T('app.title');
     $('term-cwd').textContent = a ? a.path : '';
-    renderBusy(a ? a.state : 'none');
+    renderBusy(a ? a.state : 'none', a ? a.bg : 0);
     if (projHintWs !== wsList.length) renderProjects(projView); // 작업 공간 수가 바뀌면 프로젝트 줄의 번호도 바뀐다
   }
   async function newWs() { try { await window.maru.newWorkspace(); } catch (x) { /* 무시 */ } syncWs(); }
@@ -1046,7 +1046,7 @@
   if (reducedMq && reducedMq.addEventListener) reducedMq.addEventListener('change', () => { if (!reduced()) ringSt = Lib.ringInit(); kickRing(); });
 
   let lastAgent = 'none';
-  function renderBusy(agent) {
+  function renderBusy(agent, bg) {
     lastAgent = agent; renderParty();
     const core = document.querySelector('.core');
     const k = stateKey(agent);
@@ -1054,9 +1054,10 @@
     core.classList.toggle('still', k === 'exited' || k === 'pending' || k === 'unavailable');
     ringMode = k; kickRing();
     core.classList.toggle('waiting', agent === 'waiting');
-    $('status-main').textContent = T('agent.' + k);
+    const sx = Lib.agentStatusText(k, bg);
+    $('status-main').textContent = T(sx.key, sx.params);
     $('status-sub').textContent = T('agent.' + k + '.sub');
-    $('core').setAttribute('aria-label', T('core.aria', { s: T('agent.' + k) }));
+    $('core').setAttribute('aria-label', T('core.aria', { s: T(sx.key, sx.params) }));
   }
 
   let lastKey = null;
