@@ -49,25 +49,46 @@ Every night at 03:30 a scheduled job tidies up: duplicates merge, what mattered 
 
 ## Install
 
-### Option A: the app (dmg)
+### Option A: one-line install (recommended)
+
+Open Terminal and run:
+
+```
+curl -fsSL https://jamm0316.github.io/maru/install.sh | bash
+```
+
+What it does:
+
+- Downloads the release dmg from GitHub Releases (the version is pinned in the script).
+- Checks its SHA-256 against the value in the script, and stops if it does not match.
+- Copies Maru to `/Applications` (or `~/Applications` if that is not writable). It never uses `sudo`, and it will not touch a running Maru. If Maru is already installed, it asks first and moves the old copy to the Trash.
+- Opens Maru. On first run Maru checks what it needs, shows what it will change, and asks you to confirm each step.
+
+The script skips macOS's download check (files fetched with `curl` are not quarantined), and the app is not signed or notarized. So you are trusting this repository. Read the script first: [site/install.sh](site/install.sh).
+
+### Option B: download the dmg
 
 1. Download the latest `.dmg` from [Releases](../../releases) and drag Maru to Applications.
 2. Open it. On first run Maru checks what it needs, shows what it will change, and asks you to confirm each step.
 
 #### First launch on macOS
 
-The dmg is **not signed or notarized**, so macOS will block it the first time. Either:
+The dmg is **not signed or notarized**, so macOS blocks a dmg downloaded in a browser the first time. On macOS 15:
 
-- open System Settings, then Privacy & Security, scroll to the message about Maru and click **Open Anyway**; or
-- remove the quarantine attribute in a terminal:
+1. macOS shows "Maru.app Not Opened". Click **Done**, not Move to Trash.
+2. Open System Settings, then Privacy & Security.
+3. Scroll to Security and click **Open Anyway** next to the Maru message.
+4. Confirm with your password or Touch ID.
 
-  ```
-  xattr -dr com.apple.quarantine /Applications/Maru.app
-  ```
+Or remove the quarantine attribute in a terminal:
+
+```
+xattr -dr com.apple.quarantine /Applications/Maru.app
+```
 
 Either way, you are choosing to trust an unsigned build. If you would rather not, build from source (below) and read the code first.
 
-### Option B: run from source
+### Option C: run from source
 
 ```
 git clone <this repository>
@@ -76,7 +97,7 @@ npm install      # also rebuilds node-pty; needs Node.js and Xcode Command Line 
 npm start
 ```
 
-### Option C: command line only (no app)
+### Option D: command line only (no app)
 
 From the repository folder, preview first, then install. Running it again is safe.
 

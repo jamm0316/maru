@@ -126,6 +126,34 @@
     })();
   }
 
+  // Install blocks: copy the command. Clipboard API first, a hidden textarea as fallback.
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:-100px;opacity:0';
+      document.body.appendChild(ta); ta.select();
+      var ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(ta);
+      ok ? resolve() : reject();
+    });
+  }
+  document.querySelectorAll('.copy-btn').forEach(function (b) {
+    var box = b.parentNode, code = box.querySelector('.cmd-text'), live = box.querySelector('[aria-live]'), timer = null;
+    b.addEventListener('click', function () {
+      copyText(code.textContent.trim()).then(function () {
+        b.textContent = t('install.copied'); live.textContent = t('install.copied');
+        clearTimeout(timer);
+        timer = setTimeout(function () { b.textContent = t('install.copy'); live.textContent = ''; }, 2000);
+      }, function () {
+        var r = document.createRange(); r.selectNodeContents(code);
+        var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      });
+    });
+  });
+
   apply();
   startTry();
 

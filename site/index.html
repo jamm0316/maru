@@ -13,7 +13,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://jamm0316.github.io/maru/assets/poster.png">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=2">
+<link rel="stylesheet" href="styles.css?v=3">
 <script>document.documentElement.classList.add('js');</script>
 </head>
 <body>
@@ -33,7 +33,7 @@
         <button type="button" data-lang="en" aria-pressed="true">EN</button>
         <button type="button" data-lang="ko" aria-pressed="false" lang="ko">한국어</button>
       </div>
-      <a class="btn btn-primary btn-sm" data-link="download" data-i18n="nav.download"></a>
+      <a class="btn btn-primary btn-sm" href="#install" data-i18n="nav.install"></a>
     </div>
   </div>
 </header>
@@ -44,8 +44,21 @@
     <p class="eyebrow mono" data-i18n="hero.eyebrow"></p>
     <h1 class="display"><span data-i18n="hero.h1a"></span> <span class="line2" data-i18n="hero.h1b"></span></h1>
     <p class="lede" data-i18n="hero.sub"></p>
+    <div class="install" id="install">
+      <p class="install-label mono" data-i18n="install.label"></p>
+      <div class="cmd">
+        <span class="cmd-pr mono" aria-hidden="true">$</span>
+        <code class="cmd-text" tabindex="0">curl -fsSL https://jamm0316.github.io/maru/install.sh | bash</code>
+        <button type="button" class="copy-btn" data-i18n="install.copy"></button>
+        <span class="sr-only" aria-live="polite" role="status"></span>
+      </div>
+      <p class="install-alt">
+        <a data-link="download" data-i18n="install.dmg"></a>
+        <a href="https://github.com/jamm0316/maru/blob/main/site/install.sh" data-i18n="install.what"></a>
+      </p>
+      <p class="small install-note" data-i18n="install.note"></p>
+    </div>
     <div class="actions">
-      <a class="btn btn-primary" data-link="download" data-i18n="hero.download"></a>
       <a class="btn btn-ghost" data-link="github" data-i18n="hero.github"></a>
     </div>
     <div class="try" aria-hidden="true"><span class="try-pr">&gt;</span><span class="try-line"><span class="try-name" data-i18n="try.name"></span> <span class="try-text" id="try-text"></span><span class="try-cur"></span></span></div>
@@ -261,10 +274,37 @@
     </ol>
     <p class="answer serif reveal" data-i18n="s6.close"></p>
     <p class="req mono" data-i18n="s6.req"></p>
+    <div class="install">
+      <p class="install-label mono" data-i18n="install.label"></p>
+      <div class="cmd">
+        <span class="cmd-pr mono" aria-hidden="true">$</span>
+        <code class="cmd-text" tabindex="0">curl -fsSL https://jamm0316.github.io/maru/install.sh | bash</code>
+        <button type="button" class="copy-btn" data-i18n="install.copy"></button>
+        <span class="sr-only" aria-live="polite" role="status"></span>
+      </div>
+      <p class="install-alt">
+        <a data-link="download" data-i18n="install.dmg"></a>
+        <a href="https://github.com/jamm0316/maru/blob/main/site/install.sh" data-i18n="install.what"></a>
+      </p>
+      <p class="small install-note" data-i18n="install.note"></p>
+    </div>
     <div class="actions">
-      <a class="btn btn-primary" data-link="download" data-i18n="hero.download"></a>
       <a class="btn btn-ghost" data-link="github" data-i18n="hero.github"></a>
     </div>
+    <details class="alt">
+      <summary data-i18n="s6.dmg.sum"></summary>
+      <div class="alt-body">
+        <p data-i18n="s6.dmg.0"></p>
+        <ol>
+          <li data-i18n="s6.dmg.1"></li>
+          <li data-i18n="s6.dmg.2"></li>
+          <li data-i18n="s6.dmg.3"></li>
+          <li data-i18n="s6.dmg.4"></li>
+        </ol>
+        <p data-i18n="s6.dmg.alt"></p>
+        <div class="cmd"><span class="cmd-pr mono" aria-hidden="true">$</span><code class="cmd-text" tabindex="0">xattr -dr com.apple.quarantine /Applications/Maru.app</code></div>
+      </div>
+    </details>
   </div>
 </section>
 
@@ -297,7 +337,7 @@
   </div>
 </footer>
 
-<script src="copy.js?v=2"></script>
-<script src="main.js?v=2"></script>
+<script src="copy.js?v=3"></script>
+<script src="main.js?v=3"></script>
 </body>
 </html>

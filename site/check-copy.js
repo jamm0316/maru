@@ -7,7 +7,7 @@ const used = new Set();
 for (const m of html.matchAll(/data-i18n="([^"]+)"/g)) used.add(m[1]);
 for (const m of html.matchAll(/data-i18n-attr="([^"]+)"/g)) m[1].split(';').forEach(p => used.add(p.slice(p.indexOf(':') + 1).trim()));
 for (const m of html.matchAll(/data-link="[^"]+"[^>]*data-i18n="([^"]+)"/g)) used.add(m[1] + '.soon');
-['try.p1', 'try.p2', 'try.p3', 'meta.title', 'meta.description', 'soon', 'video.play', 'video.pause'].forEach(k => used.add(k));
+['try.p1', 'try.p2', 'try.p3', 'meta.title', 'meta.description', 'soon', 'video.play', 'video.pause', 'install.copied'].forEach(k => used.add(k));
 let bad = 0;
 for (const l of ['en', 'ko']) {
   for (const k of used) if (!C[l][k]) { console.log('missing', l, k); bad++; }
