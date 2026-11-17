@@ -434,13 +434,14 @@ PY
 # 항상 0 을 반환한다(실패는 로그만). 일지·할 일 적용보다 먼저 불러야 같은 실행의 새 슬러그가 인정된다.
 # 병합 본체(apply_projects 와 maru project add 가 함께 쓴다 — 규칙은 한 곳). _PROJ_RES 에 결과 문장을 두고 0=병합함 / 1=거부·새 줄 없음 / 2=환경 실패.
 _projects_merge() {
-  local src=$1 dst=$MARU_DATA/projects.txt tmp res
+  local src=$1 dst=$MARU_DATA/projects.txt tmp res addf
   _PROJ_RES=""
   mkdir -p "$MARU_DATA" 2>/dev/null || { _PROJ_RES="data 폴더 없음 — 건너뜀"; return 2; }
   tmp=$(mktemp "$MARU_DATA/.projects.XXXXXX" 2>/dev/null) || { _PROJ_RES="임시 파일 실패 — 건너뜀"; return 2; }
-  res=$(python3 -I - "$src" "$tmp" "$dst" "$_maru_lib" "$MARU_DATA/project-state.json" <<'PY' 2>&1
+  addf=$tmp.added
+  res=$(python3 -I - "$src" "$tmp" "$dst" "$_maru_lib" "$MARU_DATA/project-state.json" "$addf" <<'PY' 2>&1
 import os, stat, sys
-src, tmp, dst, libdir, statepath = sys.argv[1:6]
+src, tmp, dst, libdir, statepath, addf = sys.argv[1:7]
 sys.path.insert(0, libdir)
 from textclean import (has_bad, looks_secret, valid_tag, valid_slug, clean_title, read_projects_checked, load_state, project_inactive,
                        PROJECT_ACTIVE_MAX, PROJECT_FILE_LINES, PROJECT_NEW_MAX)
@@ -475,13 +476,18 @@ for line in text.split("\n"):
     keys.add((tag, slug)); added.append((tag, slug, title))
 if not added: print("유효한 새 줄 없음(버린 줄 %d, 이미 있음 %d, 상한 초과 %d)" % (dropped, dup, over)); sys.exit(1)
 with open(tmp, "w", encoding="utf-8") as f: f.write("".join("%s|%s|%s\n" % x for x in cur + added))
+with open(addf, "w", encoding="utf-8") as f: f.write("".join("%s|%s|%s\n" % x for x in added))   # 새로 등록된 줄(설계 문서 골격을 만들 대상)
 print("ok 새 %d줄 → 전체 %d줄(버린 줄 %d, 이미 있음 %d, 상한 초과 %d)" % (len(added), len(cur) + len(added), dropped, dup, over))
 PY
   ) && [ -s "$tmp" ] && chmod 600 "$tmp" \
     && { [ ! -e "$dst" ] && [ ! -L "$dst" ] || { rm -f "$dst.bak" && cp -p "$dst" "$dst.bak"; }; } \
     && mv -f "$tmp" "$dst" 2>/dev/null
-  if [ $? -eq 0 ]; then _PROJ_RES=$res; return 0
-  else rm -f "$tmp"; _PROJ_RES=${res:-반영 실패}; return 1; fi
+  if [ $? -eq 0 ]; then
+    _PROJ_RES=$res
+    design_skeletons_from "$addf"   # 새 프로젝트마다 설계 문서 골격(실패해도 등록은 유지)
+    rm -f "$addf"
+    return 0
+  else rm -f "$tmp" "$addf"; _PROJ_RES=${res:-반영 실패}; return 1; fi
 }
 
 apply_projects() {
@@ -544,6 +550,66 @@ project_add() {
   esac
   T "등록 실패: 프로젝트 목록을 갱신하지 못했습니다" "Failed: could not update the project list" >&2; echo >&2
   return 1
+}
+
+# ---- 프로젝트 설계 문서($MARU_DATA/projects/<태그>/<슬러그>/design.md; scripts/designdoc.py)
+# MARU_DATA 는 이 파일의 셸 변수일 뿐 export 되지 않으므로(훅·launchd 환경에는 없다) python 에는 매번 명시적으로 넘긴다.
+# 변경 이력은 기억 이력(history.git, 작업 트리 = Claude 설정 폴더)과 작업 트리가 달라 같은 저장소에 못 넣는다:
+# $MARU_DATA/design-history.git(작업 트리 = $MARU_DATA/projects, design.md 만 추적)을 따로 둔다. 쓰기(커밋)는 designdoc.py 가 하고,
+# 조회는 `scripts/hist design log|show|diff|status|ls-files`(저장소가 없으면 만들지 않고 안내만 한다).
+# git 은 전역 설정의 훅·서명에 걸리지 않게 -c core.hooksPath=/dev/null -c commit.gpgsign=false -c tag.gpgsign=false 로 부른다(hist_git 은 그대로 둠).
+_design_py() { MARU_DATA="$MARU_DATA" python3 -I "$_maru_lib/designdoc.py" "$@"; }
+design_git() {
+  local gd="$MARU_DATA/design-history.git"
+  [ -d "$gd" ] || { T "(설계 문서 이력이 아직 없습니다)" "(no design-doc history yet)"; echo; return 0; }
+  git --git-dir="$gd" --work-tree="$MARU_DATA/projects" -c core.hooksPath=/dev/null -c commit.gpgsign=false -c tag.gpgsign=false "$@"
+}
+# design_commit <메시지> <tag/slug>: 그 문서의 현재 상태가 이력의 마지막 버전과 다르면 커밋한다. 실패해도 0.
+design_commit() { _design_py commit "$2" "$1" >/dev/null 2>&1; return 0; }
+# design_ensure <tag/slug>: 문서가 없으면 골격을 만들고 이력에 남긴다(designdoc.py ensure 가 커밋까지). 거부면 1.
+design_ensure() { local r; r=$(_design_py ensure "$1" 2>/dev/null) || return 1; return 0; }
+# design_skeletons_from <파일>: `태그|슬러그|제목` 줄마다 골격을 만든다(_projects_merge 가 새로 등록한 줄).
+design_skeletons_from() {
+  local f=$1 t s ti
+  [ -f "$f" ] || return 0
+  while IFS='|' read -r t s ti; do
+    [ -n "$t" ] && [ -n "$s" ] && design_ensure "$t/$s"
+  done < "$f"
+  return 0
+}
+# maru project doc <tag/slug> [--show] / maru project docs
+project_doc() {
+  local key=${1-} rc
+  case "$key" in ""|-*) T "사용법: maru project doc <태그/슬러그> [--show]" "Usage: maru project doc <tag/slug> [--show]" >&2; echo >&2; return 2 ;; esac
+  design_ensure "$key" >/dev/null 2>&1
+  _design_py doc "$@"; return $?
+}
+project_docs() { _design_py docs; }
+# 회고 프롬프트에 넣을 문서 발췌(PROJECT_DOCS)를 stdout 으로, 쓸 수 있는 키 목록은 $2 파일에. 실패하면 `(없음)`.
+design_prompt_docs() {
+  _design_py prompt-docs "$1" "$2" 2>/dev/null || { : > "$2"; printf '(없음)\n'; }
+}
+# stage 의 design/<태그>__<슬러그>.md 를 검증해 설치한다(회고만; 새벽 정리는 부르지 않는다). apply_design_docs <stage/design 폴더> <쓸 수 있는 키 파일> <짧은 세션 id>
+# 거부되면 기존 문서를 그대로 두고 한 줄만 로그. 설치 전에 현재 상태(사용자가 직접 고친 것 포함)를 먼저 이력에 남긴다. 한 번에 최대 3개. 항상 0.
+apply_design_docs() {
+  local dir=$1 keys=$2 short=$3 f n key res rc cnt=0
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    n=$(basename "$f" .md)
+    case "$n" in *__*) key="${n%%__*}/${n#*__}" ;; *) type log >/dev/null 2>&1 && log "[$short] 설계 문서 거부(파일 이름): $(printf '%s' "$n" | cut -c1-40 | tr -c 'A-Za-z0-9가-힣._-' '?')"; continue ;; esac
+    cnt=$((cnt+1)); [ $cnt -le 3 ] || { type log >/dev/null 2>&1 && log "[$short] 설계 문서 거부(한 실행에 3개까지)"; continue; }
+    if ! grep -qxF -- "$key" "$keys" 2>/dev/null; then type log >/dev/null 2>&1 && log "[$short] 설계 문서 $(printf '%s' "$key" | cut -c1-40 | tr -c 'A-Za-z0-9가-힣._/-' '?') 거부(이번 프롬프트에 없던 프로젝트)"; continue; fi
+    design_commit "design: $key — $(T "수정 전 상태" "state before update")" "$key"
+    res=$(_design_py install "$key" "$f" 2>/dev/null); rc=$?
+    res=$(printf '%s' "$res" | head -n 1 | cut -c1-120 | tr -d '\000-\037')
+    case $rc in
+      0) design_commit "reflect: $short — design $key" "$key"; type log >/dev/null 2>&1 && log "[$short] 설계 문서 갱신: $key${res:+ (버린 줄 ${res#dropped })}" ;;
+      10) type log >/dev/null 2>&1 && log "[$short] 설계 문서 변경 없음: $key${res:+ (버린 줄 ${res#dropped })}" ;;
+      *) type log >/dev/null 2>&1 && log "[$short] 설계 문서 거부($key): ${res:-검증 실패} — 기존 문서 유지" ;;
+    esac
+  done
+  return 0
 }
 
 # 회고·정리 프롬프트에 넣을 "열린 프로젝트" 목록(`태그/슬러그 — 제목` 줄, 최대 50줄; 없으면 `(없음)`).

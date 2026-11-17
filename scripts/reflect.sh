@@ -69,6 +69,7 @@ housekeeping() {
   find "$DIGESTS" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null
   find "$STATE" -maxdepth 1 -type f -mtime +60 -delete 2>/dev/null
   rotate_log "$LOG"
+  rm -f "${DKEYS:-}"   # 설계 문서 키 목록 임시 파일(어느 경로로 끝나도 지운다)
 }
 
 # 잠금(lib.sh): 다른 회고가 끝나길 최대 15분 기다리고, 못 얻으면 아무것도 건드리지 않고 종료
@@ -98,7 +99,11 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 build_skills_view
 # 프롬프트의 경로 자리표시자를 실제 경로로 치환한다(템플릿에는 사용자 경로가 없다)
 # OPEN_PROJECTS(열린 프로젝트 목록, 앱이 완료·합침으로 둔 것은 뺌)는 값 안의 {{키}} 가 다시 치환되지 않게 맨 뒤에 둔다
-prompt="$(render_template "$(maru_localized "$MARU_HOME/prompts/reflect-prompt.md")" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" SKILLS_DIR="$SKILLS_VIEW" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")
+# PROJECT_DOCS: 이 세션이 다룬 프로젝트(MARU_PROJECT + 다이제스트에 키가 나오는 열린 프로젝트, 최대 3개)의 설계 문서 발췌(12KB 이하). 모델이 고칠 수 있는 키 목록은 DKEYS 에 둔다(apply_design_docs 가 이 목록에 있는 것만 설치).
+# 값 안의 {{키}} 가 다시 치환되지 않게 맨 뒤에 둔다.
+DKEYS=$STATE/design-keys.$$
+PDOCS=$(design_prompt_docs "$dg" "$DKEYS")
+prompt="$(render_template "$(maru_localized "$MARU_HOME/prompts/reflect-prompt.md")" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" SKILLS_DIR="$SKILLS_VIEW" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)" PROJECT_DOCS="$PDOCS")
 
 ---
 다이제스트 파일: $dg"
@@ -140,7 +145,7 @@ elif comm -3 "$TXN.A" "$TXN.B" | grep -Eq ' \./journal(/|$)'; then reason="모�
 else reason=$(mem_validate "$MEM" "$before_n") || true
 fi
 if [ -n "$reason" ]; then
-  txn_restore "$MEM" "$TXN"; txn_end "$TXN"; rm -rf "$STAGE"
+  txn_restore "$MEM" "$TXN"; txn_end "$TXN"; rm -rf "$STAGE"; rm -f "$DKEYS"
   log "[$short] 되돌림(변경 폐기, 커밋 없음): $reason"
   fail_bump reflect   # 검증 거부도 실패로 센다
   exit 11
@@ -154,6 +159,7 @@ for d in "$STAGE"/*; do
   [ -d "$d" ] && [ ! -L "$d" ] || continue
   n=$(basename "$d")
   [ "$n" = squad-proposals ] && continue   # 스쿼드 제안 폴더는 아래에서 따로 처리
+  [ "$n" = design ] && continue            # 설계 문서(stage/design/)는 아래 apply_design_docs 가 따로 처리
   if ! [[ "$n" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || [ "$n" = synced ] || [ "$n" = recall ]; then
     log "[$short] 스킬 제안 '$(clean_log "$n" 40)' 거부(이름)"; continue
   fi
@@ -193,11 +199,12 @@ jcwd=$(sed -n '2s/^cwd: //p' "$dg" 2>/dev/null | head -1)   # 출처 세션 기�
 jlabel=$(basename "${jcwd:-/}" 2>/dev/null); [ "$jlabel" = / ] && jlabel=""
 journaled=""
 apply_projects "$STAGE/projects.txt"          # 새 프로젝트 등록: 아래 일지·할 일이 같은 실행의 새 슬러그를 참조할 수 있게 먼저 적용(lib.sh)
+apply_design_docs "$STAGE/design" "$DKEYS" "$short"   # 프로젝트 설계 문서: 검증을 통과한 것만 설치, 거부되면 기존 문서 유지(lib.sh). 새벽 정리(dream)는 문서를 고치지 않는다
 apply_journal "$STAGE/journal.txt" "$short" "$jlabel" && journaled=1
 apply_todo_marks && journaled=1             # 사용자가 앱에서 표시한 완료/안 함을 일지에 한 번만 반영(lib.sh)
 apply_suggestions "$STAGE/suggestions.txt"   # (옛 방식) 추천 목록: 기억 트랜잭션과 독립, 실패해도 로그만(lib.sh)
 apply_todos "$STAGE/todos.txt" merge "$sid" "$jcwd" "$tp"   # 오늘 할 일: 이 세션이 다룬 태그만 교체하고 나머지는 보존(검증 후 data/todos.txt + suggestions.txt 재생성, 위 옛 추천보다 우선)
-rm -rf "$STAGE"
+rm -rf "$STAGE"; rm -f "$DKEYS"
 
 [ $rc -eq 0 ] && echo "$total" > "$LINES_FILE"
 

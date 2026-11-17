@@ -10,6 +10,12 @@ SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || exit 0
 input=$(cat)
 MARU_LIB_SOFT=1 . "$SCRIPTS/lib.sh" >/dev/null || exit 0
 unset MARU_LIB_SOFT
+# 자식 세션(앱이 마루의 요청으로 연 작업 공간)이면 이 턴의 마지막 어시스턴트 텍스트를 부모(마루)용 보고 파일로 남긴다. 모델 호출 없음, 실패해도 훅은 계속된다.
+# 아래 간격 검사·sid 검사보다 앞에 둔다(보고는 30분 간격과 무관하게 매 Stop 마다). MARU_PARENT_WS·MARU_WS 가 형식에 맞을 때만 python 을 띄운다.
+# 키는 앱의 안정적인 작업 공간 id(MARU_PARENT_WS = 부모, MARU_WS = 자기 자신; 앱 세션 id 는 pty 재시작 때 바뀌므로 쓰지 않는다).
+if [[ "${MARU_PARENT_WS:-}" =~ ^[A-Za-z0-9_-]{4,64}$ ]] && [[ "${MARU_WS:-}" =~ ^[A-Za-z0-9_-]{4,64}$ ]]; then
+  printf '%s' "$input" | MARU_DATA="$MARU_DATA" python3 -I "$SCRIPTS/child.py" report-write "$PROJECTS" "$PWD" >/dev/null 2>&1 || true
+fi
 { IFS= read -r sid; IFS= read -r event; IFS= read -r tp; } < <(printf '%s' "$input" \
   | jq -r '(.session_id // ""), (.hook_event_name // ""), (.transcript_path // "") | tostring | gsub("[\n\r]"; " ")')
 [[ "$sid" =~ ^[A-Za-z0-9-]{8,64}$ ]] || exit 0   # 상태 파일 이름에 쓰므로 엄격히 검증

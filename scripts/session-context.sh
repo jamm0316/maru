@@ -9,10 +9,11 @@ input=$(cat)
 MARU_LIB_SOFT=1 . "$SCRIPTS/lib.sh" >/dev/null || exit 0
 unset MARU_LIB_SOFT
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty | tostring' 2>/dev/null)
-python3 -I - "$MEM" "$MARU_HOME" "$cwd" "$SCRIPTS" "${MARU_LANG:-ko}" <<'PY' || true
+python3 -I - "$MEM" "$MARU_HOME" "$cwd" "$SCRIPTS" "${MARU_LANG:-ko}" "$MARU_DATA" "${MARU_PROJECT:-}" <<'PY' || true
 import datetime, os, re, stat, sys
 mem, home, cwd, libdir = sys.argv[1:5]
 LANG_EN = len(sys.argv) > 5 and sys.argv[5] == "en"
+data_dir, env_project = (sys.argv[6], sys.argv[7]) if len(sys.argv) > 7 else ("", "")
 sys.path.insert(0, libdir)
 from textclean import strip_bad, neutralize_body, defang_angle, TAG_CHARS, SLUG_CHARS
 TOTAL_CAP, MEM_CAP, MAX_FILE = 6000, 3000, 262144
@@ -107,6 +108,18 @@ if sections:
         if stop: break
     if parts: out = HEAD + JO + "".join(parts) + JC
 if mem_text: out = (out + "\n" if out else "") + mem_text
+# ---- 프로젝트 설계 문서(단일 원천): 자식 세션(MARU_PROJECT)이면 그 문서, 마루 세션이면 문서가 채워진 열린 프로젝트 색인. 문서가 없으면 아무것도 더하지 않는다(출력 그대로).
+design_text = ""
+try:
+    if data_dir.startswith("/"):
+        import designdoc
+        if env_project:
+            design_text = designdoc.context_for_project(data_dir, env_project, "en" if LANG_EN else "ko")
+        elif cwd and os.path.realpath(cwd) == os.path.realpath(home):
+            design_text = designdoc.context_index(data_dir, jd, libdir, "en" if LANG_EN else "ko")
+except Exception:
+    design_text = ""
+if design_text: out = (out + "\n" if out else "") + design_text
 if LANG_EN: out = LANG_LINE + out   # en 은 내용이 없어도 언어 한 줄은 항상 낸다(ko 출력은 그대로)
 if out: sys.stdout.write(out)
 PY

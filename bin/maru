@@ -38,7 +38,9 @@ maru — 개인 에이전트 마루 런처
   maru status          maru-status.sh 출력 (--json 등 옵션 전달)
   maru log [reflect|dream]   로그 마지막 줄 보기(기본 reflect)
   maru project list    열린 프로젝트 목록 / maru project add <태그> <슬러그> <제목>: 프로젝트 등록(인자 정확히 3개)
-  maru hist ...        기억 변경 이력(읽기 전용: log show diff status ls-files)
+  maru project doc <태그/슬러그> [--show]   설계 문서 경로·상태(골격인지) / 내용 보기 / maru project docs: 열린 프로젝트의 문서 현황
+  maru open <폴더> [--project <태그/슬러그>] [--title <제목>]   앱에 하위 세션 열기를 요청(앱 작업 공간 안에서만; 브리핑은 표준입력)
+  maru hist ...        기억 변경 이력(읽기 전용: log show diff status ls-files). maru hist design ...: 설계 문서 이력
   maru doctor          읽기 전용 점검
   maru help            이 도움말
 USAGE
@@ -136,8 +138,21 @@ case "$cmd" in
     case "$sub" in
       list) [ $# -eq 0 ] || { echo "project list" >&2; exit 2; }; project_list; exit $? ;;
       add) project_add "$@"; exit $? ;;
-      *) echo "project: list | add <태그> <슬러그> <제목>" >&2; exit 2 ;;
+      doc) project_doc "$@"; exit $? ;;
+      docs) [ $# -eq 0 ] || { echo "project docs" >&2; exit 2; }; project_docs; exit $? ;;
+      *) echo "project: list | add <태그> <슬러그> <제목> | doc <태그/슬러그> [--show] | docs" >&2; exit 2 ;;
     esac ;;
+  open)
+    # 앱 작업 공간(MARU_APP_SESSION) 안에서만. 아무것도 직접 띄우지 않고 앱이 읽는 요청 파일만 쓴다(scripts/child.py).
+    if ! [[ "${MARU_APP_SESSION:-}" =~ ^[A-Za-z0-9-]{8,64}$ ]]; then
+      MARU_LIB_SOFT=1 . "$MARU_HOME/scripts/lib.sh" 2>/dev/null   # 안내 문구의 언어(MARU_LANG)만 얻는다
+      if [ "${MARU_LANG:-}" = en ]; then echo "maru open only works inside a Maru app workspace (MARU_APP_SESSION is not set)." >&2
+      else echo "maru open 은 마루 앱의 작업 공간 안에서만 쓸 수 있습니다(MARU_APP_SESSION 없음)." >&2; fi
+      exit 3
+    fi
+    need_env
+    export MARU_DATA
+    exec python3 -I "$MARU_HOME/scripts/child.py" open "$@" ;;
   ui)
     need_env
     exec python3 "$MARU_HOME/scripts/maru_ui.py" "$@" ;;

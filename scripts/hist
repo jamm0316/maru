@@ -5,6 +5,8 @@
 # 저장소·설정을 바꾸는 옵션(-c, -C, --git-dir, --work-tree, --exec-path)은 거부한다. `--` 뒤는 경로라 검사하지 않는다.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 unset GIT_EXTERNAL_DIFF GIT_PAGER GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+G=hist_git
+if [ "${1:-}" = design ]; then G=design_git; shift; fi   # 프로젝트 설계 문서 이력($MARU_DATA/design-history.git)
 sub="${1:-}"
 case "$sub" in
   log|show|diff|status|ls-files) shift ;;
@@ -27,6 +29,6 @@ for a in "$@"; do
   esac
 done
 case "$sub" in
-  log|show|diff) hist_git --no-pager -c core.pager=cat "$sub" --no-ext-diff --no-textconv "$@" ;;
-  *) hist_git --no-pager -c core.pager=cat "$sub" "$@" ;;
+  log|show|diff) $G --no-pager -c core.pager=cat "$sub" --no-ext-diff --no-textconv "$@" ;;
+  *) $G --no-pager -c core.pager=cat "$sub" "$@" ;;
 esac

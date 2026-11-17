@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code 훅에서 호출: 마루 앱이 띄운 세션의 상태를 data/state/app 아래에 원자적으로 쓴다.
-#   busy|idle|waiting : <id>.json  {"state","at"[,"transcript_path"][,"model"][,"bg"]}
+#   busy|idle|waiting : <id>.json  {"state","at"[,"transcript_path"][,"model"][,"cwd"][,"bg"]}   (cwd: 훅 JSON 의 현재 폴더, 형식 검증 통과 시만)
 #     bg: idle(Stop)일 때만, 훅 JSON 의 background_tasks 중 status 가 running 인 객체의 수(1~99). 있으면 메인 턴은 끝났지만 백그라운드 서브에이전트가 도는 중이라
 #         `.subs` 파일을 지우지 않는다. 목록이 없거나 형식이 틀리거나 0 이면 bg 없이 예전과 같다(파일을 비움). StopFailure 도 예전과 같다. background_tasks 의 다른 내용은 저장하지 않는다.
 #   sub-start|sub-stop: <id>.subs/<agent_id> 파일(내용: agent_type 한 줄)을 만들고 지운다(동시 실행 경쟁을 피하려고 파일 하나씩)
@@ -95,12 +95,19 @@ if isinstance(o, dict):
         m = m.get("id")
     if isinstance(m, str) and re.fullmatch(r"[A-Za-z0-9._:\[\]-]{1,64}", m):
         rec["model"] = m
+    c = o.get("cwd")   # 세션의 현재 폴더(앱이 표시): 절대 경로·1024자 이하·제어 문자 없음일 때만
+    if isinstance(c, str) and c.startswith("/") and len(c) <= 1024 and not re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", c):
+        rec["cwd"] = c
     bt = o.get("background_tasks")
     if state == "idle" and o.get("hook_event_name") != "StopFailure" and isinstance(bt, list) and len(bt) <= 1000:
         n = sum(1 for x in bt if isinstance(x, dict) and x.get("status") == "running")
         if n > 0:
             rec["bg"] = min(n, 99)
-print(json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
+out = json.dumps(rec, ensure_ascii=False, separators=(",", ":"))
+if len(out.encode("utf-8")) > 3800 and "cwd" in rec:   # 상태 파일이 커지면 cwd 부터 뺀다(앱이 읽는 크기 상한 대비)
+    del rec["cwd"]
+    out = json.dumps(rec, ensure_ascii=False, separators=(",", ":"))
+print(out)
 ' "$state" "$at" 2>/dev/null) || body=""
 fi
 [ -n "$body" ] || body=$(printf '{"state":"%s","at":"%s"}' "$state" "$at")

@@ -398,3 +398,72 @@ def merge_todo_src(old, new, live, now):
 
 def format_todo_src(rows):
     return "".join("%d|%s|%s|%s|%s\n" % r for r in rows)
+
+
+# ---- 확장 비밀값 탐지(보고 텍스트 가림·설계 문서 검증). looks_secret 은 그대로 두고(기존 흐름 유지) 여기서 더 넓게 본다.
+_REDACT = None
+
+
+def _redact_patterns():
+    global _REDACT
+    if _REDACT is None:
+        import re
+        _REDACT = [
+            re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S),
+            re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),
+            re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"),
+            re.compile(r"\bgithub_pat_[A-Za-z0-9_]{16,}"),
+            re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+            re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{8,}"),
+            re.compile(r"\b(?:password|passwd|secret|token|api[_-]?key)\b[\"']?\s*[:=]\s*[\"']?[^\s\"',;]+", re.I),
+            re.compile(r"\b[0-9A-Fa-f]{32,}\b"),
+        ]
+    return _REDACT
+
+
+def redact_secrets(s, marker):
+    """비밀값처럼 보이는 부분을 marker 로 바꾼다(sk-/ghp_/gho_/github_pat_/AKIA/xox*/PRIVATE KEY/password·token·api key = 값/긴 16진수)."""
+    for p in _redact_patterns():
+        s = p.sub(marker, s)
+    return s
+
+
+def has_secret_like(s):
+    """확장 패턴이나 기존 looks_secret 에 걸리면 True."""
+    return looks_secret(s) or any(p.search(s) for p in _redact_patterns())
+
+
+# ---- 명령·주소 모양 탐지(설계 문서 검증과 보고 화면 거름에서 같이 쓴다)
+_TOOLS = (r"bash|sh|zsh|python\d?(?:\.\d+)?|node|npx|npm|pnpm|yarn|osascript|open|git|make|brew|pip\d?|docker|kubectl|ssh|scp|rsync|chmod|chown|sudo|rm|mv|cp|curl|wget|eval|exec")
+_TOOL_RE = None
+_SCHEMELESS_RE = None
+
+
+def tool_command_re():
+    """도구·인터프리터 이름 뒤에 플래그·경로·따옴표·하위 명령이 오는 모양, 그리고 `$ ` 프롬프트·`| sh`·백틱·`$(`·rm -rf 같은 옛 패턴."""
+    global _TOOL_RE
+    if _TOOL_RE is None:
+        import re
+        _TOOL_RE = re.compile(
+            r"(?:^|[\s(;&|])(?:" + _TOOLS + r")\s+(?:-|/|~|\.|[\"'`$]|[\w@.-]+\.(?:sh|py|js|ts|command|app)\b)"
+            r"|(?:^|[\s(;&|])(?:npx|npm|pnpm|yarn|pip\d?|brew)\s+(?:install|i|init|add|exec|run|create|dlx|x|upgrade|remove|uninstall|publish|tap|cask)\b"
+            r"|(?:^|[\s(;&|])git\s+(?:push|reset|clean|rebase|checkout|rm|remote|config|commit|clone)\b"
+            r"|^\s*\$ |\|\s*(?:sh|bash|zsh)\b|\bcurl\s|\bwget\s|\brm\s+-[a-zA-Z]*[rf]|\bsudo\s|\bch(?:mod|own)\b|`|\$\(", re.I)
+    return _TOOL_RE
+
+
+def schemeless_url_re():
+    """http:// 같은 스킴이 없는 도메인/경로 모양(`example.com/x`), hxxp, `[:]`, `[.]` 우회 표기."""
+    global _SCHEMELESS_RE
+    if _SCHEMELESS_RE is None:
+        import re
+        _SCHEMELESS_RE = re.compile(r"\b[\w-]+(?:\.[\w-]+)+/\S*|\bhxxps?\b|\[:\]|\[\.\]|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|dev|xyz|ru|cn|top|sh|app)\b", re.I)
+    return _SCHEMELESS_RE
+
+
+def norm_for_check(s):
+    """검사용 정규화: NFKC 로 호환 문자를 풀고, 모든 종류의 유니코드 공백(NBSP·전각 공백 등)을 일반 공백 하나로 접는다."""
+    import re, unicodedata
+    s = unicodedata.normalize("NFKC", s)
+    s = "".join(" " if c.isspace() else c for c in s)
+    return re.sub(r" +", " ", s).strip()
