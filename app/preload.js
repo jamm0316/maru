@@ -65,6 +65,8 @@ contextBridge.exposeInMainWorld('maru', {
     return ipcRenderer.invoke('profile:set', p);
   },
   setCalendar: (on) => ipcRenderer.invoke('calendar:set', on === true),
+  resumePrevious: (id) => ipcRenderer.invoke('ws:resume-prev', String(id)),
+  setResume: (on) => ipcRenderer.invoke('resume:set', on === true),
   getSettings: (recheckCalendar) => ipcRenderer.invoke('settings:get', recheckCalendar === true),
   openPane: (key) => ipcRenderer.invoke('settings:open-pane', String(key)),
   copyLogin: () => ipcRenderer.invoke('settings:copy-login'),

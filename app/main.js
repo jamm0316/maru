@@ -430,8 +430,11 @@ function spawnPty(w, cols, rows) {
   removeStateFile(w);
   w.sessionId = sid; w.term = self; w.exited = false; w.bracketed = false; w.seqTail = ''; w.lastOutputAt = 0; w.escAt = 0; w.subsCutoff = 0;
   const resume = L.validSessionUuid(w.pendingResume) ? w.pendingResume : null; // 할 일 클릭이 정한 이어 열기 대상(검증된 uuid 만). 한 번만 쓴다(다시 시작은 새 세션)
-  w.resumeSid = resume; w.pendingResume = null;
-  w.awaitClaude = !!w.expectClaude; w.expectClaude = false; w.sawOff = false; w.claudeUp = false; w.typedN = 0;
+  w.resumeSid = resume; w.pendingResume = null; w.startedAt = Date.now(); w.cols = cols; w.rows = rows; w.launchResumed = !!resume;
+  const fresh = !resume && !w.fx && !SMOKE && resumeActive() ? crypto.randomUUID().toLowerCase() : null; // 새 세션의 uuid 는 앱이 정한다(--session-id): 그 uuid 가 이 작업 공간의 claudeSid
+  if (resume) { w.claudeSid = resume; w.claudeSidAt = Date.now(); } else if (fresh) { w.claudeSid = fresh; w.claudeSidAt = Date.now(); saveWsLater(); } else if (!w.fx) { w.claudeSid = null; w.claudeSidAt = null; }
+  if (w.startNote) { w.noteKind = w.startNote; w.noteShownAt = null; w.startNote = null; } // 이어 열었거나 새로 시작한 이유(탭 안내용): 처음 보일 때까지 남고, 보인 뒤 몇 초만 // 앱을 다시 켜며 이어 열었거나 새로 시작한 이유(탭 안내용, 몇 초만)
+  w.awaitClaude = !!w.expectClaude || !!resume; w.expectClaude = false; w.sawOff = false; w.claudeUp = false; w.typedN = 0;
   self.onData((d) => {
     if (w.term !== self) return;
     w.lastOutputAt = Date.now();
@@ -442,6 +445,15 @@ function spawnPty(w, cols, rows) {
   });
   self.onExit(({ exitCode }) => {
     if (w.term !== self) return;
+    const fb = L.resumeFailureDecision({ resumed: w.launchResumed === true, exitCode, ageMs: Date.now() - (w.startedAt || 0), ready: w.claudeUp === true, fellBack: w.fellBack === true });
+    if (fb === 'fallback' && w.fromTodo) w.resumeFailed = true; // 할 일 클릭으로 연 탭: 흐름이 알아서 "원래 세션을 열 수 없음" 경로로 간다
+    else if (fb === 'fallback') { // 이어 열기 실패(No conversation found 등): 저장된 세션을 지우고 한 번만 새 세션으로 다시 띄운다(되풀이 금지)
+      w.term = null; w.bracketed = false; w.resumeSid = null; w.claudeUp = false; removeStateFile(w);
+      w.fellBack = true; w.claudeSid = null; w.claudeSidAt = null; w.prevSid = null; w.startNote = 'failed';
+      sendToRenderer('pty:data', w.id, '\x1b[2J\x1b[3J\x1b[H');
+      spawnPty(w, w.cols || 80, w.rows || 24);
+      return;
+    }
     w.term = null; w.bracketed = false; w.exited = true; w.resumeSid = null; w.claudeUp = false; removeStateFile(w); // 실행에 실패한 이어 열기 표시를 남기지 않는다
     sendToRenderer('pty:exit', w.id, exitCode);
     wsChanged(false);
@@ -449,7 +461,7 @@ function spawnPty(w, cols, rows) {
   // 스모크·시험에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
   if (w.fx) { self.write('echo ' + SMOKE_LINE + '; echo fixture-' + w.fx.name + '\r'); writeFxState(w); }
   else if (SMOKE) self.write('echo ' + SMOKE_LINE + '\r');
-  else if (ROOT) { const cmd = L.claudeLaunchCommand(sid, claudeWrapper(), resume); if (cmd) self.write(cmd); } // 래퍼가 있으면 스쿼드를 실은 claude, 없으면 그냥 claude. 이어 열기면 --resume <uuid>
+  else if (ROOT) { const cmd = L.claudeLaunchCommand(sid, claudeWrapper(), resume, fresh); if (cmd) self.write(cmd); } // 래퍼가 있으면 스쿼드를 실은 claude, 없으면 그냥 claude. 이어 열기면 --resume <uuid>
   wsChanged(false);
   return true;
 }
@@ -480,12 +492,63 @@ function killAllSync() {
 function dirOk(p) { try { return L.workspaceDirOk(fs.statSync(fs.realpathSync(p)), process.getuid()); } catch { return false; } }
 const wsFile = () => path.join(ROOT, 'data', 'workspaces.json');
 let saveTimer = null;
-function saveWsNow() {
+// ---- 다시 켤 때 세션 이어 가기(설정 "다시 열 때 세션 이어 가기", 기본 켜짐) ----
+// 새로 여는 모든 작업 공간은 앱이 정한 uuid 로 `claude --session-id <uuid>` 를 실행하고 그 uuid 가 곧 claudeSid 다(파일 시스템으로 짐작하지 않는다).
+// 시험·스모크·가짜 작업 공간 모드에서는 아무것도 이어 열지 않고 새 필드를 쓰지도 않는다(PERSIST 가 이미 그 모드들을 거른다)
+const resumeActive = () => PERSIST && !!ROOT && !TEST_UI && L.resumeSessionsOn(profile);
+const aliveFile = () => path.join(ROOT, 'data', 'state', 'app-alive'); // 앱이 살아 있는 동안 30초마다 시각을 적는 작은 파일(workspaces.json 은 내용이 바뀔 때만 쓴다)
+function writeAlive() {
+  if (!PERSIST || !ROOT) return;
+  try { fs.mkdirSync(path.dirname(aliveFile()), { recursive: true, mode: 0o700 }); fs.writeFileSync(aliveFile(), String(Date.now()) + '\n', { mode: 0o600 }); } catch { /* 없어도 동작한다 */ }
+}
+function readAliveMs() {
+  try {
+    const st = fs.lstatSync(aliveFile());
+    if (!st.isFile() || st.size > 64 || st.uid !== process.getuid()) return NaN;
+    const n = Number(fs.readFileSync(aliveFile(), 'utf8').trim());
+    return Number.isFinite(n) && n > 1e11 ? n : st.mtimeMs;
+  } catch { return NaN; }
+}
+let startupInfo = { mode: 'normal' };
+function restoreDecisions(data) {
+  let wsMtime = NaN; try { wsMtime = fs.statSync(wsFile()).mtimeMs; } catch { /* 없음 */ }
+  const aliveAtMs = L.pickAliveAt(readAliveMs(), data.aliveAt, wsMtime); // 알려진 것 중 가장 새 시각(없으면 NaN → 시각 비교를 하지 않는다)
+  const mode = L.startupMode({ cleanExit: data.cleanExit === true, aliveAtMs, nowMs: Date.now() });
+  startupInfo = { mode };
+  return L.decideRestore(data.list, { enabled: resumeActive(), otherInstance: mode === 'other-instance', projectsDir: path.join(claudeDir(), 'projects'), nowMs: Date.now(), uid: process.getuid(), aliveAtMs, fs: { lstat: (p) => fs.lstatSync(p), stat: (p) => fs.statSync(p), realpath: (p) => fs.realpathSync(p) } });
+}
+// 훅(maru 폴더)이 알려 주는 transcript_path 가 앱이 아는 uuid 와 다르면(/clear·/resume 을 탭 안에서 썼다) 그것으로 바꾼다. 상태 파일 몇 개만 읽는다(폴더를 훑지 않는다). 바뀐 게 있으면 true
+function syncHookSids() {
+  if (!resumeActive()) return false;
+  let changed = false;
+  for (const w of wsOrder()) {
+    if (!w.term) continue;
+    const sid = hookSessionUuid(w);
+    if (!sid) continue;
+    if (sid !== w.claudeSid) { w.claudeSid = sid; w.claudeSidAt = Date.now(); changed = true; }
+    if (w.prevSid) { w.prevSid = null; changed = true; } // 훅이 보였다 = 새 세션에서 첫 프롬프트가 나갔다: 옛 세션 포인터를 버린다
+  }
+  return changed;
+}
+setInterval(() => { // 살아 있는 동안만(설정이 꺼져 있으면 아무것도 하지 않는다)
+  if (!resumeActive() || quitting || !wsOrder().some((w) => w.term)) return;
+  writeAlive();
+  if (syncHookSids()) saveWsLater();
+}, 30000).unref();
+let lastWsJson = null; // 마지막으로 쓴(또는 읽은) 본문: 같으면 다시 쓰지 않는다
+function saveWsNow(opts) {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (!PERSIST || !ROOT) return;
   const order = wsOrder();
-  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, transient: !!w.resumed })), activeId); // 이어 열기로 띄운 임시 작업 공간은 저장하지 않는다(다시 켜면 새 claude 로 쌓인다)
-  if (keep) L.saveWorkspaces(wsFile(), keep.list, keep.active); // 사용 불가 항목도 그대로 둔다
+  const on = resumeActive();
+  if (on) syncHookSids();
+  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, claudeSid: w.claudeSid, claudeSidAt: w.claudeSidAt, prevSid: w.prevSid, transient: !!w.fromTodo })), activeId, on);
+  if (!keep) return;
+  const clean = !!(opts && opts.clean);
+  const body = L.workspacesJson(keep.list, keep.active, { cleanExit: clean });
+  if (body === lastWsJson) return; // 내용이 그대로면 쓰지 않는다
+  if (L.saveWorkspaces(wsFile(), keep.list, keep.active, { cleanExit: clean })) lastWsJson = body; // 사용 불가 항목도 그대로 둔다
+  if (on) writeAlive();
 }
 function saveWsLater() { if (!saveTimer) saveTimer = setTimeout(saveWsNow, 1000); } // 활성 전환은 1초 모아서 저장
 const saveWs = saveWsNow;
@@ -514,8 +577,16 @@ function initWorkspaces() {
     const r = L.readWorkspacesFile(wsFile(), dirOk, { fallbackTitle: tr('ws.untitled') });
     if (r.status === 'corrupt') L.backupCorruptFile(wsFile()); // 망가진 파일은 .bak 으로 옮기고(예전 .bak 은 덮어씀) 새로 시작
     else if (r.status === 'ok' && r.data.list.length) {
-      for (const e of r.data.list) addWorkspace(e.cwd, e.title, null, e.unavailable); // 폴더가 없어도 버리지 않는다
+      const dec = restoreDecisions(r.data);
+      r.data.list.forEach((e, i) => { // 폴더가 없어도 버리지 않는다
+        const w = addWorkspace(e.cwd, e.title, null, e.unavailable);
+        const d = dec[i];
+        if (d && d.action === 'resume') { w.pendingResume = d.sid; w.claudeSid = d.sid; w.claudeSidAt = e.claudeSidAt; w.startNote = 'resumed'; } // 알림·입력 없이 실행만: spawnPty 가 --resume 을 붙인다
+        else if (d && d.prev) { w.prevSid = d.prev; if (d.note) w.startNote = d.note; } // 새로 시작하지만 "원래 세션 열기" 로 되돌릴 수 있게 포인터를 남긴다
+      });
       activeId = wsOrder()[r.data.active].id;
+      if (startupInfo.mode === 'other-instance') { for (const w of wsOrder()) if (w.startNote === 'other' && w.id !== activeId) w.startNote = null; } // 다른 앱 창 안내는 한 번만(활성 탭)
+      writeAlive(); saveWsLater(); // 정상 종료 표지를 지우고(내용이 바뀐다) 지금부터 살아 있음을 적는다
       return;
     }
   }
@@ -533,7 +604,7 @@ function claudeFound() {
   return claudeFoundVal;
 }
 // cc: 이 작업 공간 화면이 Claude Code 인지(렌더러가 Cmd+←/→ 를 alternate screen 에서도 보낼지 정한다). 시험용 가짜 작업 공간·스모크는 아님
-const wsView = () => wsOrder().map((w) => { const state = wsState(w); return { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, bp: w.bracketed, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }) }; });
+const wsView = () => wsOrder().map((w) => { const state = wsState(w); return { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, bp: w.bracketed, note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now: Date.now() }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }) }; });
 const attention = () => wsOrder().filter((w) => { const s = wsState(w); return s === 'busy' || s === 'waiting'; });
 function activate(id) { if (!wsOf(id) || id === activeId) return; activeId = id; wsChanged('active'); }
 function activateOffset(d) {
@@ -603,7 +674,7 @@ async function confirmQuit() {
     if (ans.response === 0) { quitting = true; app.quit(); }
   } finally { quitAsking = false; }
 }
-function cleanup() { saveWsNow(); killAllSync(); }
+function cleanup() { saveWsNow({ clean: true }); killAllSync(); } // 정상 종료 표지와 함께 마지막으로 저장
 let restarting = false;
 async function restartActive() {
   const w = wsOf(activeId);
@@ -827,6 +898,10 @@ function checkScreen() {
 }
 const checkAutomation = () => row('auto', 'unknown', 'auto.unknown', null, 'openAutomation');
 
+function checkResume() {
+  const on = L.resumeSessionsOn(profile);
+  return row('resume', on ? 'ok' : 'optional', on ? 'resume.on' : 'resume.off', null, null, { toggle: { on, available: !!profile, kind: 'resume' } });
+}
 function checkCalendar() {
   const on = !!(profile && profile.calendar);
   const toggle = { on, available: !!profile };
@@ -870,7 +945,7 @@ async function settingsRows(recheckCalendar) {
   return Promise.all([
     ...(MANAGED ? [guard('home', checkHome, 1000)] : []), guard('auth', checkAuth, 20000), guard('hooks', checkHooks, 5000), guard('dream', checkDream, 6000),
     guard('acc', checkAccessibility, 3000), guard('screen', checkScreen, 3000), guard('auto', checkAutomation, 1000),
-    guard('cal', checkCalendar, 1000), guard('tg', checkTelegram, 8000), guard('mem', checkMemory, 3000),
+    guard('cal', checkCalendar, 1000), guard('resume', checkResume, 1000), guard('tg', checkTelegram, 8000), guard('mem', checkMemory, 3000),
   ]);
 }
 
@@ -985,12 +1060,17 @@ ipcMain.handle('pty:restart', (e, id, cols, rows) => {
   const w = wsFrom(e, id);
   if (!w || !int(cols, 2, 1000) || !int(rows, 2, 1000)) return false;
   killPty(w);
+  const back = L.validSessionUuid(w.restartResume) ? w.restartResume : null; // "원래 세션 열기"(ws:resume-prev)가 정한 경우만 이어 연다. 보통의 다시 시작은 새 세션이다
+  w.restartResume = null; w.fellBack = false; w.resumeFailed = false; w.fromTodo = false;
+  w.claudeSid = null; w.claudeSidAt = null; w.resumeSid = null; w.pendingResume = back; w.prevSid = null; // 새 세션이면 새 uuid 는 spawnPty 가 만든다
+  saveWsLater();
   return spawnPty(w, cols, rows);
 });
 ipcMain.on('pty:write', (e, id, data) => {
   const w = wsFrom(e, id);
   if (!w || typeof data !== 'string' || data.length > 1 << 20 || !w.term) return;
   if (L.isUserInput(data)) w.typedN = (w.typedN || 0) + 1; // 터미널이 스스로 보내는 응답은 입력으로 세지 않는다
+  if (L.shouldDropPrev({ data, typedN: w.typedN || 0, hasPrev: !!w.prevSid })) { w.prevSid = null; saveWsLater(); } // 새 세션에서 첫 프롬프트를 보냈다
   w.term.write(data);
 });
 // 사용자가 이 작업 공간 터미널에서 Esc 를 눌렀다(렌더러가 신뢰된 keydown 만 보낸다). busy/waiting 일 때만 시각을 적는다. 상태 파일은 쓰지 않는다
@@ -1006,7 +1086,28 @@ ipcMain.on('pty:resize', (e, id, cols, rows) => {
   if (!w || !int(cols, 2, 1000) || !int(rows, 2, 1000) || !w.term) return;
   try { w.term.resize(cols, rows); } catch { /* 종료 직후 */ }
 });
-ipcMain.handle('ws:get', (e) => (fromMain(e) ? { list: wsView(), active: activeId } : null));
+ipcMain.handle('ws:get', (e) => {
+  if (!fromMain(e)) return null;
+  const list = wsView();
+  const cur = wsOf(activeId);
+  if (cur && cur.noteKind && !cur.noteShownAt) cur.noteShownAt = Date.now(); // 활성 탭에 처음 보여 준 시각(그때부터 몇 초)
+  return { list, active: activeId };
+});
+// 새로 시작한 탭의 안내에서 "원래 세션 열기": 남겨 둔 prevSid 를 main 이 다시 검증하고(폴더·기록·소유자·열려 있는 탭), 이 탭을 그 세션으로 다시 시작한다
+ipcMain.handle('ws:resume-prev', async (e, id) => {
+  const w = wsFrom(e, id);
+  if (!w || !L.validSessionUuid(w.prevSid) || !w.term || !ROOT || !resumeActive()) return { ok: false, reason: 'invalid' };
+  if (openingTodo || picking || closing || quitAsking || restarting) return { ok: false, reason: 'busy-ui' };
+  if (!claudeFound()) return { ok: false, reason: 'not-ready' };
+  const dec = L.decideTodoOpen({ sid: w.prevSid, cwd: w.cwd }, { projectsDir: projectsDirs()[0], nowMs: Date.now(), uid: process.getuid(), force: true, workspaces: openWorkspacesForDecision().filter((x) => x.id !== w.id), fs: decisionFs });
+  if (dec.action === 'switch') { activate(dec.wsId); return { ok: true, mode: 'switched' }; } // 이미 다른 탭에서 열려 있다
+  if (dec.action !== 'resume') return { ok: false, reason: dec.reason === 'no-transcript' ? 'no-transcript' : 'no-folder' };
+  if (dec.recent && !(await confirmBox(tr('dlg.resumeLive.title'), tr('dlg.resumeLive.detail'), tr('dlg.resumeLive.ok')))) return { ok: false, reason: 'cancel' };
+  if (wsOf(id) !== w || !w.term) return { ok: false, reason: 'invalid' };
+  w.restartResume = dec.sid; // 렌더러가 화면을 비우고 pty:restart 를 부르면 spawnPty 가 --resume 을 붙인다
+  sendToRenderer('pty:restart-request', w.id);
+  return { ok: true, mode: 'resuming' };
+});
 ipcMain.handle('ws:activate', (e, id) => { if (!wsFrom(e, id)) return false; activate(id); return true; });
 ipcMain.handle('ws:new', (e) => (fromMain(e) ? newWorkspaceFlow() : { ok: false, reason: 'invalid' })); // 경로는 렌더러가 주지 않는다(main 의 폴더 선택창)
 ipcMain.handle('ws:close', (e, id) => (wsFrom(e, id) ? closeWorkspace(id) : { ok: false, reason: 'invalid' }));
@@ -1032,16 +1133,18 @@ const projectsDirs = () => {
   try { const r = fs.realpathSync(base); if (r !== base) out.push(r); } catch { /* 없음 */ }
   return out;
 };
-// 열려 있는 작업 공간 -> Claude 세션 uuid(훅의 transcript_path 가 우선; --resume 으로 띄운 uuid 는 lib.js sessionUuidOf 의 조건 안에서만)
-function wsSessionUuid(w) {
+// 훅이 알려 주는(상태 파일의 transcript_path 또는 마지막으로 본 값) 세션 uuid
+function hookSessionUuid(w) {
   if (!w || !w.term) return null;
   const dirs = projectsDirs();
   const rec = readAgentState(w);
-  return L.sessionUuidOf({
-    hookSid: rec && rec.transcript ? L.transcriptSessionId(rec.transcript, dirs) : null,
-    lastSid: w.lastTranscript ? L.transcriptSessionId(w.lastTranscript, dirs) : null,
-    resumeSid: w.resumeSid, hasState: !!rec, typed: (w.typedN || 0) > 0,
-  });
+  return (rec && rec.transcript ? L.transcriptSessionId(rec.transcript, dirs) : null) || (w.lastTranscript ? L.transcriptSessionId(w.lastTranscript, dirs) : null);
+}
+// 열려 있는 작업 공간 -> Claude 세션 uuid: 훅 값 → (--resume 으로 띄웠고 훅 상태·입력이 없을 때) 그 uuid → 앱이 정해 준 claudeSid
+function wsSessionUuid(w) {
+  if (!w || !w.term) return null;
+  const rec = readAgentState(w);
+  return L.sessionUuidOf({ hookSid: hookSessionUuid(w), resumeSid: w.resumeSid, hasState: !!rec, typed: (w.typedN || 0) > 0, claudeSid: w.claudeSid });
 }
 function openWorkspacesForDecision() {
   return wsOrder().filter((w) => w.term).map((w) => {
@@ -1113,9 +1216,16 @@ async function openTodoFlow(item, text, choice) {
     if (wss.size >= L.WS_MAX) return { ok: false, reason: 'max' };
     let real = null; try { real = fs.realpathSync(dec.cwd); } catch { real = null; }
     if (!real || !dirOk(real)) return fillNewSession(text, 'no-folder', false);
-    const w = addWorkspace(real); w.pendingResume = dec.sid; w.expectClaude = true; w.resumed = true; // pty 는 렌더러가 화면에 올릴 때 시작된다(spawnPty 가 --resume 을 붙인다). resumed: 저장하지 않는 임시 작업 공간
+    const w = addWorkspace(real); w.pendingResume = dec.sid; w.expectClaude = true; w.fromTodo = true; // fromTodo: 설정이 꺼져 있으면 저장하지 않는 임시 작업 공간. pty 는 렌더러가 화면에 올릴 때 시작된다(spawnPty 가 --resume 을 붙인다)
     activeId = w.id; wsChanged(true);
-    return { mode: 'resumed', ...(await fillWhenReady(w, text, true)) };
+    const rr = await fillWhenReady(w, text, true);
+    if (!rr.ok && w.resumeFailed && wss.get(w.id) === w) { // 이어 열기 실패("No conversation found" 등): 이 탭은 닫고 "원래 세션을 열 수 없음" 경로로
+      killPty(w); removeStateFile(w); const idx = wsOrder().findIndex((x) => x.id === w.id); wss.delete(w.id);
+      if (activeId === w.id) { const rest = wsOrder(); activeId = rest.length ? rest[Math.min(idx, rest.length - 1)].id : null; }
+      wsChanged(true);
+      return fillNewSession(text, 'no-transcript', false);
+    }
+    return { mode: 'resumed', ...rr };
   }
   if (dec.reason === 'too-old') return { ok: true, filled: false, mode: 'choose', reason: 'too-old' }; // 어디에도 채우지 않고 사용자가 고르게 한다
   return fillNewSession(text, dec.reason, false);
@@ -1666,7 +1776,7 @@ ipcMain.handle('profile:set', (e, patch) => {
   if ('lang' in patch) { if (!I18N.isLang(patch.lang)) return { ok: false, reason: 'invalid' }; lang = patch.lang; }
   if (!name) return { ok: false, reason: 'name' };
   if (!ROOT) return { ok: false, reason: 'save' };
-  const next = { name, lang, calendar: profile ? profile.calendar : false, createdAt: profile ? profile.createdAt : new Date().toISOString() };
+  const next = { ...(profile && typeof profile.resumeSessions === 'boolean' ? { resumeSessions: profile.resumeSessions } : {}), name, lang, calendar: profile ? profile.calendar : false, createdAt: profile ? profile.createdAt : new Date().toISOString() };
   if (!L.saveProfile(profilePath(), next)) return { ok: false, reason: 'save' };
   const langChanged = !!profile && profile.lang !== lang;
   profile = next; buildMenu(); refreshTray(true);
@@ -1680,6 +1790,15 @@ ipcMain.handle('calendar:set', async (e, on) => {
   if (!L.saveProfile(profilePath(), next)) return { ok: false };
   profile = next;
   await readCalendar();
+  return { ok: true };
+});
+ipcMain.handle('resume:set', (e, on) => { // 다시 열 때 세션 이어 가기. profile.json 의 선택 항목 resumeSessions(없으면 켜짐)
+  if (!fromMain(e) || typeof on !== 'boolean' || !profile || !ROOT) return { ok: false };
+  const next = { ...profile, resumeSessions: on };
+  if (!L.saveProfile(profilePath(), next)) return { ok: false };
+  profile = next;
+  if (!on) for (const w of wsOrder()) { w.claudeSid = null; w.claudeSidAt = null; w.prevSid = null; } // 끄면 저장된 세션도 지운다(다음 저장에서 파일에서 빠진다)
+  saveWsLater();
   return { ok: true };
 });
 ipcMain.handle('settings:get', async (e, recheckCalendar) => (fromMain(e) ? { rows: await settingsRows(recheckCalendar === true) } : null));

@@ -171,7 +171,7 @@
   window.addEventListener('resize', doFit);
 
   // ---- 작업 공간 목록 ----
-  let wsSeq = 0; let wsKey = null;
+  let wsSeq = 0; let wsKey = null; const shownWsNotes = new Set();
   const stateKey = (s) => (['busy', 'idle', 'waiting', 'exited', 'pending', 'unavailable'].includes(s) ? s : 'none');
   async function syncWs() {
     const my = ++wsSeq;
@@ -180,6 +180,18 @@
     if (!r || !Array.isArray(r.list) || my !== wsSeq) return; // 더 새 요청이 있으면 버린다
     const prev = activeId;
     const ids = new Set(r.list.map((w) => w.id));
+    for (const w of r.list) { // 앱을 다시 켜며 이어 열었거나(또는 새로 시작한) 탭: 활성이 됐을 때 한 번만 알린다(백그라운드 탭은 처음 보일 때)
+      if (!['resumed', 'moved', 'old', 'other', 'failed'].includes(w.note) || w.id !== r.active || shownWsNotes.has(w.id + w.note)) continue;
+      shownWsNotes.add(w.id + w.note);
+      if (w.prev === true && w.note !== 'resumed') { // 옛 세션을 되돌릴 수 있다: 명시적 단추(main 이 다시 검증한다)
+        const box = $('quest-note');
+        openNote(box, [el('span', '', T('ws.note.' + w.note)), document.createTextNode(' · '), noteButton(T('ws.note.openPrev'), async () => {
+          let res = null; try { res = await window.maru.resumePrevious(w.id); } catch (x) { res = null; }
+          if (res && res.ok) box.replaceChildren();
+          else if (!res || res.reason !== 'cancel') openNote(box, [el('span', '', T(Lib.openNoticeKey(res && res.reason)))], 6000);
+        })], 15000);
+      } else flashNote(T('ws.note.' + w.note));
+    }
     const fresh = [];
     for (const w of r.list) if (!terms.has(w.id)) { const e = createTerm(w.id); fresh.push(e); if (w.bp) e.term.write('\x1b[?2004h'); } // 화면 복구로 다시 붙을 때 붙여넣기 모드를 되살린다
     for (const e of [...terms.values()]) if (!ids.has(e.id)) disposeTerm(e);
@@ -1281,10 +1293,10 @@
         const lab = el('label', 'tog'); const cb = el('input'); cb.type = 'checkbox'; cb.setAttribute('role', 'switch'); cb.checked = r.toggle.on; cb.disabled = !r.toggle.available || setLoading; cb.dataset.k = 'tog';
         cb.addEventListener('change', async () => {
           cb.disabled = true;
-          try { await window.maru.setCalendar(cb.checked); } catch (e) { /* 다시 읽기에서 반영 */ }
+          try { await (r.toggle.kind === 'resume' ? window.maru.setResume(cb.checked) : window.maru.setCalendar(cb.checked)); } catch (e) { /* 다시 읽기에서 반영 */ }
           setLoading = false; loadSettings(false);
         });
-        lab.append(cb, el('span', '', T('cal.toggle'))); right.append(lab);
+        lab.append(cb, el('span', '', T(r.toggle.kind === 'resume' ? 'resume.toggle' : 'cal.toggle'))); right.append(lab);
       }
       if (r.action) {
         const b = el('button', 'btn', T('act.' + r.action)); b.type = 'button'; b.dataset.k = r.id; b.disabled = setLoading;

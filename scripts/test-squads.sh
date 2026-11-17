@@ -275,6 +275,8 @@ check "뒤 인자를 그대로 전달" [ "$(tail -n 3 "$T/claude.args" | tr '\n'
 RID=aaaaaaaa-1111-4222-8333-444444444441
 rm -f "$T/claude.args"; run_env -- bash "$REPO/scripts/maru-claude.sh" --resume "$RID" >/dev/null
 checkall "이어 열기: 스쿼드가 있으면 claude --agents <JSON> --resume <uuid>" [ "$(sed -n 1p "$T/claude.args")" = "--agents" ] '&&' [ "$(tail -n 2 "$T/claude.args" | tr '\n' ' ')" = "--resume $RID " ] '&&' [ "$(grep -c -- '--fork-session' "$T/claude.args")" = 0 ]
+rm -f "$T/claude.args"; run_env -- bash "$REPO/scripts/maru-claude.sh" --session-id "$RID" >/dev/null
+checkall "새 세션: 스쿼드가 있으면 --agents <JSON> --session-id <uuid>" [ "$(sed -n 1p "$T/claude.args")" = "--agents" ] '&&' [ "$(tail -n 2 "$T/claude.args" | tr '\n' ' ')" = "--session-id $RID " ]
 rm -rf "$B"/*; rm -f "$T/claude.args"
 run_env -- bash "$REPO/scripts/maru-claude.sh" -p hello >/dev/null
 check "스쿼드가 없으면 --agents 없이 claude 실행" [ "$(cat "$T/claude.args" | tr '\n' ' ')" = "-p hello " ]

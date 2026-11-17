@@ -305,15 +305,20 @@ function decideTodoOpen(src, ctx) {
     if (!hit || (Number.isFinite(w.atMs) ? w.atMs : 0) >= (Number.isFinite(hit.atMs) ? hit.atMs : 0)) hit = w;
   }
   if (hit) return { action: 'switch', wsId: hit.id };
+  let real;
   try {
     const l = ctx.fs.lstat(src.cwd); // 마지막 조각이 링크이면 거부
     if (!l || !l.isDirectory() || (typeof l.isSymbolicLink === 'function' && l.isSymbolicLink())) return { action: 'new', reason: 'no-folder' };
-    if (!workspaceDirOk(ctx.fs.stat(ctx.fs.realpath(src.cwd)), ctx.uid)) return { action: 'new', reason: 'no-folder' };
+    real = ctx.fs.realpath(src.cwd); // Claude 는 실제 경로로 기록 폴더 이름을 만든다
+    if (!workspaceDirOk(ctx.fs.stat(real), ctx.uid)) return { action: 'new', reason: 'no-folder' };
   } catch { return { action: 'new', reason: 'no-folder' }; }
   let lastMs;
   try {
-    const t = ctx.fs.lstat(transcriptFileFor(ctx.projectsDir, src.cwd, src.sid));
+    const pb = ctx.projectsDir.replace(/\/+$/, '');
+    for (const dd of [pb, pb + '/' + projectSlug(real)]) { const d = ctx.fs.lstat(dd); if (!d || !d.isDirectory() || d.isSymbolicLink()) return { action: 'new', reason: 'no-transcript' }; } // 링크 폴더는 거부
+    const t = ctx.fs.lstat(transcriptFileFor(ctx.projectsDir, real, src.sid));
     if (!t || !t.isFile() || (typeof t.isSymbolicLink === 'function' && t.isSymbolicLink()) || !Number.isFinite(t.mtimeMs)) return { action: 'new', reason: 'no-transcript' };
+    if (t.uid !== ctx.uid) return { action: 'new', reason: 'no-transcript' }; // 다른 사용자 소유의 기록은 이어 열지 않는다
     lastMs = t.mtimeMs;
   } catch { return { action: 'new', reason: 'no-transcript' }; }
   if (ctx.force !== true && ctx.nowMs - lastMs > TODO_RESUME_STALE_SEC * 1000) return { action: 'new', reason: 'too-old', canForce: true };
@@ -375,18 +380,82 @@ function retryCheck(entry, cur, nowMs) {
 }
 // 열려 있는 작업 공간이 어느 세션인가: 훅이 적은 transcript(상태 파일·마지막으로 본 값)가 우선. 우리가 --resume 으로 띄운 uuid 는
 // 훅 상태가 아직 없고 사용자가 그 pty 에 입력을 넣기 전까지만 쓴다(그 뒤에는 /clear 등으로 다른 세션이 됐을 수 있다)
-function sessionUuidOf({ hookSid, lastSid, resumeSid, hasState, typed } = {}) {
+function sessionUuidOf({ hookSid, lastSid, resumeSid, hasState, typed, claudeSid } = {}) {
   if (validSessionUuid(hookSid)) return hookSid;
   if (validSessionUuid(lastSid)) return lastSid;
   if (validSessionUuid(resumeSid) && !hasState && !typed) return resumeSid;
-  return null;
+  return validSessionUuid(claudeSid) ? claudeSid : null; // 앱이 --session-id 로 정해 준(또는 이어 연) 세션: 훅 정보가 없을 때의 마지막 근거(/clear 뒤에는 낡을 수 있다)
 }
-// 저장할 작업 공간: 이어 열기로 띄운 임시 작업 공간(transient)은 빼고(앱을 다시 켜면 그 폴더의 새 claude 로 쌓이므로), 활성 위치를 그 안의 위치로 바꾼다. 남는 게 없으면 null(파일을 건드리지 않는다)
-function workspacesToSave(items, activeId) {
-  const keep = (Array.isArray(items) ? items : []).filter((x) => x && !x.transient);
+// 저장할 작업 공간. withSid(설정 켜짐)면 모두 저장하고 알려진 세션 uuid·prevSid 를 함께 적는다. 꺼져 있으면 uuid 는 적지 않고, 할 일 클릭의 이어 열기로 띄운 임시 작업 공간(transient)은 뺀다.
+// 활성 위치는 저장되는 목록 안의 위치. 남는 게 없으면 null(파일을 건드리지 않는다)
+function workspacesToSave(items, activeId, withSid = true) {
+  const keep = (Array.isArray(items) ? items : []).filter((x) => x && typeof x.cwd === 'string' && (withSid || !x.transient));
   if (!keep.length) return null;
   const a = keep.findIndex((x) => x.id === activeId);
-  return { list: keep.map((x) => ({ cwd: x.cwd, title: x.title })), active: a >= 0 ? a : 0 };
+  return { list: keep.map((x) => ({ cwd: x.cwd, title: x.title, ...(withSid && validSessionUuid(x.claudeSid) ? { claudeSid: x.claudeSid, claudeSidAt: x.claudeSidAt } : {}), ...(withSid && validSessionUuid(x.prevSid) ? { prevSid: x.prevSid } : {}) })), active: a >= 0 ? a : 0 };
+}
+
+// ---- 다시 켤 때 세션 이어 가기 ----
+// 새로 여는 모든 작업 공간은 앱이 정한 uuid 로 `claude --session-id <uuid>` 를 실행한다(그 uuid 가 곧 claudeSid). 파일 시스템으로 짐작하지 않는다.
+const RESTORE_ALIVE_SLACK_MS = 60 * 1000; // 기록이 "앱이 꺼진 시각" 보다 이만큼 넘게 새로우면 다른 곳에서 이어 쓴 것으로 본다
+const OTHER_INSTANCE_MS = 45 * 1000;
+const RESUME_FAIL_MS = 15 * 1000;
+// 앱이 마지막으로 살아 있던 시각: 알려진 값(alive 파일·workspaces.json 의 aliveAt·그 파일의 수정 시각) 중 가장 새 것. 모르면 NaN
+function pickAliveAt(...cands) {
+  const v = cands.filter((x) => Number.isFinite(x) && x > 0);
+  return v.length ? Math.max(...v) : NaN;
+}
+// 시작 방식: 지난번이 정상 종료(cleanExit)였으면 바로 다시 켰어도 normal. 아니면서 alive 시각이 45초 안이면 다른 앱 창이 살아 있다고 보고 아무것도 이어 열지 않는다
+function startupMode({ cleanExit, aliveAtMs, nowMs }) {
+  if (cleanExit === true) return 'normal';
+  if (Number.isFinite(aliveAtMs) && Number.isFinite(nowMs) && Math.abs(nowMs - aliveAtMs) <= OTHER_INSTANCE_MS) return 'other-instance';
+  return 'normal';
+}
+// 이어 열기가 실패했나(순수): --resume 으로 띄웠는데 0 이 아닌 코드로 끝났고, Claude 가 준비되기 전이거나 15초 안이면, 아직 한 번도 되돌리지 않았을 때만 새로 시작한다(되풀이 금지)
+function resumeFailureDecision({ resumed, exitCode, ageMs, ready, fellBack }) {
+  if (resumed !== true || fellBack === true) return 'none';
+  if (!Number.isInteger(exitCode) || exitCode === 0) return 'none';
+  return !ready || (Number.isFinite(ageMs) && ageMs < RESUME_FAIL_MS) ? 'fallback' : 'none';
+}
+// 안내가 지금 보여야 하나: 한 번도 안 보였으면(백그라운드 탭) 계속, 보인 뒤에는 8초
+function noteVisible({ kind, shownAt, now }) {
+  if (typeof kind !== 'string' || !kind) return false;
+  return !Number.isFinite(shownAt) || now - shownAt < 8000;
+}
+// 새 세션에서 사용자가 첫 프롬프트를 보냈으면(글자를 넣고 Enter) 이전 세션 포인터(prevSid)를 버린다
+function shouldDropPrev({ data, typedN, hasPrev }) {
+  if (!hasPrev || typeof data !== 'string' || !data.includes('\r')) return false;
+  return typedN >= 2 || /[^\r\n]/.test(data.replace(/\x1b\[[0-9;?<>=! ]*[@-~]/g, ''));
+}
+// 앱을 다시 켤 때 작업 공간마다 이어 열지 정한다(순수). entries: 저장된 목록 [{cwd, unavailable?, claudeSid?, claudeSidAt?, prevSid?}]
+// ctx: { enabled, otherInstance, projectsDir, nowMs, uid, aliveAtMs, fs }
+//  -> [{ action: 'resume', sid } | { action: 'fresh', prev: uuid|null, note?: 'moved'|'old'|'other', reason }] (entries 와 같은 길이·순서)
+// 새로 시작하면서도 prev 에 옛 세션을 남기는 경우(too-old·moved·unavailable·other-instance): 사용자가 "원래 세션 열기" 로 되돌릴 수 있게. 기록이 없거나(no-transcript)
+// 같은 sid 가 이미 쓰였거나(duplicate) 시계가 어긋났거나(future)·꺼짐(off)이면 포인터를 지운다. claudeSid 의 기록이 없으면(첫 프롬프트 전) prevSid 를 대신 판단한다
+function decideRestore(entries, ctx) {
+  const seen = new Set();
+  return (Array.isArray(entries) ? entries : []).map((e) => {
+    const cands = [];
+    for (const c of [e && e.claudeSid, e && e.prevSid]) if (validSessionUuid(c) && !cands.includes(c)) cands.push(c);
+    if (!cands.length) return { action: 'fresh', prev: null, reason: 'none' };
+    if (!ctx || ctx.enabled !== true) return { action: 'fresh', prev: null, reason: 'off' };
+    if (ctx.otherInstance === true) return { action: 'fresh', prev: cands[0], note: 'other', reason: 'other-instance' };
+    if (e.unavailable) return { action: 'fresh', prev: cands[0], reason: 'unavailable' }; // 폴더가 잠시 없을 수 있다: 포인터는 남기고 지금은 새로 시작
+    let last = { action: 'fresh', prev: null, reason: 'no-transcript' };
+    for (const sid of cands) {
+      if (seen.has(sid)) { last = { action: 'fresh', prev: null, reason: 'duplicate' }; continue; }
+      if (sid === e.claudeSid && Number.isFinite(e.claudeSidAt) && e.claudeSidAt > ctx.nowMs + RESTORE_ALIVE_SLACK_MS) { last = { action: 'fresh', prev: null, reason: 'future' }; continue; } // 시계가 되돌아갔다
+      const d = decideTodoOpen({ sid, cwd: e.cwd }, { projectsDir: ctx.projectsDir, nowMs: ctx.nowMs, uid: ctx.uid, force: false, workspaces: [], fs: ctx.fs });
+      if (d.action === 'resume') {
+        if (Number.isFinite(ctx.aliveAtMs) && d.lastMs > ctx.aliveAtMs + RESTORE_ALIVE_SLACK_MS) return { action: 'fresh', prev: sid, note: 'moved', reason: 'moved' };
+        seen.add(sid);
+        return { action: 'resume', sid };
+      }
+      if (d.reason === 'too-old') return { action: 'fresh', prev: sid, note: 'old', reason: 'too-old' };
+      last = { action: 'fresh', prev: null, reason: d.reason }; // no-transcript·no-folder·bad-source: 다음 후보를 본다
+    }
+    return last;
+  });
 }
 
 // 채우기 거부 사유 -> 문구 키(문구는 i18n.js 의 'fill.<사유>')
@@ -598,10 +667,12 @@ function matchSubs(subs, knownNames) {
 function squadOpen(userChoice, active) { return typeof userChoice === 'boolean' ? userChoice : !!active; }
 // 작업 공간에서 claude 를 띄우는 한 줄(셸에 쓴다). wrapper = 저장소의 maru-claude.sh 절대 경로(없거나 이상하면 null -> 그냥 claude)
 // resumeId(선택): 있으면 소문자 uuid 형식이어야 하고(아니면 null — 호출 쪽은 실행하지 않는다) `--resume <uuid>` 를 붙인다. 래퍼는 받은 인자를 그대로 claude 에 넘긴다.
-function claudeLaunchCommand(sid, wrapper, resumeId) {
+function claudeLaunchCommand(sid, wrapper, resumeId, freshId) {
   const ok = typeof wrapper === 'string' && wrapper.startsWith('/') && wrapper.length <= 1024 && !hasBadChars(wrapper) && !/[\r\n]/.test(wrapper);
-  if (resumeId !== undefined && resumeId !== null && !validSessionUuid(resumeId)) return null;
-  return 'command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + (resumeId ? ' --resume ' + resumeId : '') + ' ; exit 127\r'; // exec 가 안 되면(claude 없음·실패) 셸이 남지 않게 끝낸다(남은 셸에 문장을 채우는 사고 방지). 종료 코드 127 은 렌더러가 "claude 를 찾지 못함" 으로 알린다
+  const has = (v) => v !== undefined && v !== null;
+  if ((has(resumeId) && !validSessionUuid(resumeId)) || (has(freshId) && !validSessionUuid(freshId)) || (has(resumeId) && has(freshId))) return null; // 둘 다 주면 거부(--resume 과 --session-id 는 함께 쓰지 않는다)
+  const arg = resumeId ? ' --resume ' + resumeId : freshId ? ' --session-id ' + freshId : ''; // freshId: 새 세션에 앱이 정한 uuid(그 작업 공간의 claudeSid)
+  return 'command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + arg + ' ; exit 127\r'; // exec 가 안 되면(claude 없음·실패) 셸이 남지 않게 끝낸다(남은 셸에 문장을 채우는 사고 방지). 종료 코드 127 은 렌더러가 "claude 를 찾지 못함" 으로 알린다
 }
 
 // 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru -> ~/.maru(managed)
@@ -799,8 +870,11 @@ function validateProfile(o) {
   if (!PROFILE_LANGS.includes(o.lang)) return null;
   if (typeof o.calendar !== 'boolean') return null;
   if (typeof o.createdAt !== 'string' || o.createdAt.length > 40 || !/^\d{4}-\d{2}-\d{2}T/.test(o.createdAt) || !Number.isFinite(Date.parse(o.createdAt))) return null;
-  return { name: o.name, lang: o.lang, calendar: o.calendar, createdAt: o.createdAt };
+  const out = { name: o.name, lang: o.lang, calendar: o.calendar, createdAt: o.createdAt };
+  if (typeof o.resumeSessions === 'boolean') out.resumeSessions = o.resumeSessions; // 선택 항목(없으면 켜짐). 예전 앱은 모르는 필드를 무시한다
+  return out;
 }
+const resumeSessionsOn = (profile) => !(profile && profile.resumeSessions === false);
 
 // readRegular 결과({text, truncated}|null) -> 프로필|null (나쁜 파일은 없는 것으로 취급)
 function parseProfile(res) {
@@ -874,11 +948,18 @@ function normalizeWorkspaces(raw, { exists, max = WS_MAX, fallbackTitle } = {}) 
     const t = typeof e.title === 'string' ? [...cleanQuestText(e.title)].slice(0, WS_TITLE_MAX).join('').trim() : '';
     const entry = { cwd, title: uniqueTitle(t || workspaceTitle(cwd, fallbackTitle), out.list.map((x) => x.title)) };
     if (!ok) entry.unavailable = true; // 폴더가 잠시 없을 수 있다(연결 해제된 디스크): 버리지 않고 '사용 불가'로 남긴다
+    if (validSessionUuid(e.claudeSid)) { // 마지막으로 알려진 Claude 세션(선택). 틀린 값은 버리고 작업 공간은 남긴다
+      entry.claudeSid = e.claudeSid;
+      if (Number.isInteger(e.claudeSidAt) && e.claudeSidAt >= 1e11 && e.claudeSidAt <= 99999999999999) entry.claudeSidAt = e.claudeSidAt;
+    }
+    if (validSessionUuid(e.prevSid) && e.prevSid !== entry.claudeSid) entry.prevSid = e.prevSid; // 새로 시작하면서 남겨 둔 옛 세션("원래 세션 열기" 용, 하나뿐)
     out.list.push(entry);
     origIdx.push(i);
   });
   const a = origIdx.indexOf(raw.active);
   out.active = a >= 0 ? a : 0;
+  if (Number.isInteger(raw.aliveAt) && raw.aliveAt >= 1e11 && raw.aliveAt <= 99999999999999) out.aliveAt = raw.aliveAt; // (예전 파일) 앱이 마지막으로 살아 있던 시각(ms)
+  if (raw.cleanExit === true) out.cleanExit = true; // 정상 종료 표지(다음 시작 때 지워진다)
   return out;
 }
 // readRegular 결과 -> normalizeWorkspaces 결과|null (파일 없음·잘림·나쁜 JSON 은 null)
@@ -904,10 +985,12 @@ function backupCorruptFile(file) {
   try { fs.renameSync(file, file + '.bak'); return true; } catch { return false; }
 }
 // 저장: cwd·제목·활성 위치만(다른 필드는 쓰지 않는다)
-function saveWorkspaces(file, list, active) {
+// 파일에 쓸 JSON 본문(순수). 내용이 같으면 쓰지 않으려고 호출 쪽이 이전 본문과 비교한다. aliveAt 은 더 이상 여기에 쓰지 않는다(별도 alive 파일)
+function workspacesJson(list, active, { cleanExit } = {}) {
   const n = normalizeWorkspaces({ workspaces: list, active }, { exists: () => true });
-  return writeJsonAtomic(file, { version: 1, active: n.active, workspaces: n.list }, 'workspaces');
+  return JSON.stringify({ version: 1, active: n.active, ...(cleanExit === true ? { cleanExit: true } : {}), workspaces: n.list }, null, 2) + '\n';
 }
+function saveWorkspaces(file, list, active, opts) { return writeTextAtomic(file, workspacesJson(list, active, opts || {}), 'workspaces'); }
 // 폴더 stat -> 사용 가능한가(디렉터리이고 소유자가 현재 사용자)
 function workspaceDirOk(st, uid) { return !!st && typeof st.isDirectory === 'function' && st.isDirectory() && st.uid === uid; }
 // MARU_APP_SESSION 새 id (rand: () => uuid 문자열). 형식이 틀리면 null.
@@ -2596,7 +2679,7 @@ function deriveSetupState({ marker, profile }) { return marker && profile ? vali
 // 기존 프로필이 유효하면 createdAt·calendar 를 지키고 이름·언어만 바꾼다(덮어써 잃지 않게)
 function mergeProfile(existing, name, lang, nowIso) {
   const e = validateProfile(existing);
-  return e ? { name, lang, calendar: e.calendar, createdAt: e.createdAt } : { name, lang, calendar: false, createdAt: nowIso };
+  return e ? { ...e, name, lang } : { name, lang, calendar: false, createdAt: nowIso };
 }
 // 첫 설정 화면이 필요한가. found = resolveRoot 결과, state = 상태|null. -> { needed, stage: 'welcome'|'connect'|'done' }
 function setupStage({ found, state }) {
@@ -2664,7 +2747,7 @@ const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
