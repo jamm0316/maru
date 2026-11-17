@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maru — Many agents. One conversation.</title>
+<meta name="description" content="Maru is a chief of staff for your agents. It hands the work out, remembers who did what, and answers you as one.">
+<meta name="theme-color" content="#F6F1E8">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Maru — Many agents. One conversation.">
+<meta property="og:description" content="A chief of staff for your agents. It hands the work out, remembers who did what, and answers you as one.">
+<meta property="og:image" content="assets/poster.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="assets/poster.png">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+<a class="skip" href="#main" data-i18n="a11y.skip"></a>
+
+<header class="nav">
+  <div class="nav-in">
+    <a class="brand" href="#top" aria-label="Maru"><img src="assets/logo.svg" alt="" width="30" height="30"><span>Maru</span></a>
+    <nav class="nav-links" data-i18n-attr="aria-label:a11y.menu">
+      <a href="#how" data-i18n="nav.how"></a>
+      <a href="#get" data-i18n="nav.get"></a>
+      <a href="#trust" data-i18n="nav.trust"></a>
+      <a href="#faq" data-i18n="nav.faq"></a>
+    </nav>
+    <div class="nav-end">
+      <div class="lang" role="group" data-i18n-attr="aria-label:a11y.lang">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="ko" aria-pressed="false" lang="ko">한국어</button>
+      </div>
+      <a class="btn btn-primary btn-sm" data-link="download" data-i18n="nav.download"></a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" id="top">
+  <div class="wrap">
+    <p class="eyebrow mono" data-i18n="hero.eyebrow"></p>
+    <h1 class="display"><span data-i18n="hero.h1a"></span> <span class="line2" data-i18n="hero.h1b"></span></h1>
+    <p class="lede" data-i18n="hero.sub"></p>
+    <div class="actions">
+      <a class="btn btn-primary" data-link="download" data-i18n="hero.download"></a>
+      <a class="btn btn-ghost" data-link="github" data-i18n="hero.github"></a>
+    </div>
+    <div class="try" aria-hidden="true"><span class="try-pr">&gt;</span><span class="try-line"><span class="try-name" data-i18n="try.name"></span> <span class="try-text" id="try-text"></span><span class="try-cur"></span></span></div>
+    <p class="sr-only" data-i18n="try.sr"></p>
+    <p class="small" data-i18n="hero.small"></p>
+    <noscript><div class="noscript"><p><strong>Many agents. One conversation.</strong></p><p>Maru is a chief of staff for your agents. It hands the work out, remembers who did what, and answers you as one.</p><p class="mono">macOS 15 or later · Apple Silicon · Claude Code installed · a Claude subscription</p></div></noscript>
+  </div>
+  <div class="wrap wrap-wide">
+    <figure class="film">
+      <div class="film-frame" id="film">
+        <div class="film-ph" aria-hidden="true">
+          <img src="assets/logo.svg" alt="" width="72" height="72">
+          <span data-i18n="video.placeholder"></span>
+        </div>
+        <video id="promo" muted loop playsinline autoplay preload="metadata" data-i18n-attr="aria-label:video.label"></video>
+        <button type="button" class="film-btn" id="film-btn" aria-pressed="false" disabled>
+          <svg class="i-pause" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3" y="2" width="3.5" height="12" rx="1"/><rect x="9.5" y="2" width="3.5" height="12" rx="1"/></svg>
+          <svg class="i-play" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>
+          <span id="film-btn-t" data-i18n="video.pause"></span>
+        </button>
+      </div>
+    </figure>
+  </div>
+</section>
+
+<section class="sec" id="problem" aria-labelledby="h-problem">
+  <div class="wrap">
+    <p class="label mono" data-i18n="s1.label"></p>
+    <h2 id="h-problem" class="h2 reveal" data-i18n="s1.h2"></h2>
+    <ul class="echoes">
+      <li class="echo reveal" style="--d:0ms" data-i18n="s1.l1"></li>
+      <li class="echo reveal" style="--d:280ms" data-i18n="s1.l2"></li>
+      <li class="echo reveal" style="--d:560ms" data-i18n="s1.l3"></li>
+    </ul>
+    <p class="body reveal" data-i18n="s1.body"></p>
+    <p class="answer serif reveal" data-i18n="s1.close"></p>
+  </div>
+</section>
+
+<section class="sec" id="how" aria-labelledby="h-how">
+  <div class="wrap">
+    <p class="label mono" data-i18n="s2.label"></p>
+    <h2 id="h-how" class="h2 reveal" data-i18n="s2.h2"></h2>
+    <p class="body reveal" data-i18n="s2.intro"></p>
+  </div>
+  <div class="wrap">
+    <div class="mem reveal" role="img" data-i18n-attr="aria-label:s2.diagram">
+      <div class="mem-rail" aria-hidden="true"></div>
+      <div class="mem-row">
+        <span class="mem-node" aria-hidden="true"></span>
+        <div class="mem-card" aria-hidden="false">
+          <span class="mono tag" data-i18n="s2.now.tag"></span>
+          <h3 data-i18n="s2.now.name"></h3>
+          <p data-i18n="s2.now.body"></p>
+        </div>
+      </div>
+      <div class="mem-row">
+        <span class="mem-node" aria-hidden="true"></span>
+        <div class="mem-card">
+          <span class="mono tag" data-i18n="s2.today.tag"></span>
+          <h3 data-i18n="s2.today.name"></h3>
+          <p data-i18n="s2.today.body"></p>
+        </div>
+      </div>
+      <div class="mem-row mem-night">
+        <span class="mem-moon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" fill="currentColor"/></svg>
+          <span class="mono">03:30</span>
+        </span>
+        <p><strong data-i18n="s2.night.name"></strong> <span data-i18n="s2.night.body"></span></p>
+      </div>
+      <div class="mem-row">
+        <span class="mem-node mem-node-solid" aria-hidden="true"></span>
+        <div class="mem-card mem-card-good">
+          <span class="mono tag" data-i18n="s2.good.tag"></span>
+          <h3 data-i18n="s2.good.name"></h3>
+          <p data-i18n="s2.good.body"></p>
+        </div>
+      </div>
+    </div>
+    <div class="refdoc reveal">
+      <h3 data-i18n="s2.doc.t"></h3>
+      <p data-i18n="s2.doc.b"></p>
+    </div>
+    <p class="foot reveal" data-i18n="s2.foot"></p>
+  </div>
+</section>
+
+<section class="sec" id="get" aria-labelledby="h-get">
+  <div class="wrap">
+    <p class="label mono" data-i18n="s3.label"></p>
+    <h2 id="h-get" class="h2 reveal" data-i18n="s3.h2"></h2>
+  </div>
+  <div class="wrap wrap-wide feats">
+
+    <article class="feat reveal">
+      <div class="feat-text">
+        <h3 data-i18n="s3.a.t"></h3>
+        <p data-i18n="s3.a.b"></p>
+      </div>
+      <div class="mock" aria-hidden="true">
+        <div class="mock-bar"><i></i><i></i><i></i></div>
+        <div class="mock-body">
+          <p class="m-q"><span class="m-prompt">&gt;</span> <span class="m-name" data-i18n="try.name"></span> <span data-i18n="try.p1"></span></p>
+          <ul class="m-list m-tree">
+            <li class="on"><span class="m-dot m-dot-on"></span><span>Maru</span><span class="m-chip m-chip-or" data-i18n="s3.a.pill"></span></li>
+            <li class="m-child"><span class="m-dot"></span><span data-i18n="s3.a.child"></span><span class="m-st" data-i18n="s3.a.st"></span></li>
+          </ul>
+          <div class="m-card"><p class="m-ans" data-i18n="s3.a.reply"></p></div>
+        </div>
+      </div>
+    </article>
+
+    <article class="feat reveal">
+      <div class="feat-text">
+        <h3 data-i18n="s3.b.t"></h3>
+        <p data-i18n="s3.b.b"></p>
+      </div>
+      <div class="mock" aria-hidden="true">
+        <div class="mock-bar"><i></i><i></i><i></i></div>
+        <div class="mock-body">
+          <p class="m-q"><span class="m-prompt">&gt;</span> <span class="m-name" data-i18n="try.name"></span> <span data-i18n="try.p2"></span></p>
+          <div class="m-card">
+            <span class="m-chip m-chip-or" data-i18n="s3.b.chip"></span>
+            <p class="m-ans" data-i18n="s3.b.ans"></p>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <article class="feat reveal">
+      <div class="feat-text">
+        <h3 data-i18n="s3.c.t"></h3>
+        <p data-i18n="s3.c.b"></p>
+      </div>
+      <div class="mock" aria-hidden="true">
+        <div class="mock-bar"><i></i><i></i><i></i></div>
+        <div class="mock-body m-cols">
+          <div class="m-col">
+            <p class="m-h" data-i18n="s3.c.todos"></p>
+            <ul class="m-list">
+              <li><span class="m-box"></span><span data-i18n="s3.c.t1"></span></li>
+              <li><span class="m-box"></span><span data-i18n="s3.c.t2"></span></li>
+              <li><span class="m-box"></span><span data-i18n="s3.c.t3"></span></li>
+            </ul>
+            <p class="m-h m-gap" data-i18n="s3.c.yday"></p>
+            <p class="m-dim" data-i18n="s3.c.yd"></p>
+          </div>
+          <div class="m-col">
+            <p class="m-h" data-i18n="s3.c.projects"></p>
+            <ul class="m-list">
+              <li><span data-i18n="s3.c.p1"></span><span class="m-chip" data-i18n="s3.c.p1n"></span></li>
+              <li><span data-i18n="s3.c.p2"></span><span class="m-chip" data-i18n="s3.c.p2n"></span></li>
+              <li><span data-i18n="s3.c.p3"></span><span class="m-chip" data-i18n="s3.c.p3n"></span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <article class="feat reveal">
+      <div class="feat-text">
+        <h3 data-i18n="s3.d.t"></h3>
+        <p data-i18n="s3.d.b"></p>
+      </div>
+      <div class="mock" aria-hidden="true">
+        <div class="mock-bar"><i></i><i></i><i></i></div>
+        <div class="mock-body">
+          <p class="m-h" data-i18n="s3.d.inbox"></p>
+          <div class="m-card">
+            <span class="m-chip m-chip-or" data-i18n="s3.d.kind"></span>
+            <p class="m-ans m-mono"><span data-i18n="s3.d.name"></span></p>
+            <p class="m-dim" data-i18n="s3.d.why"></p>
+            <div class="m-btns"><span class="m-btn m-btn-or" data-i18n="s3.d.yes"></span><span class="m-btn" data-i18n="s3.d.no"></span></div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <p class="foot mock-note" data-i18n="mock.note"></p>
+  </div>
+</section>
+
+<section class="sec" id="trust" aria-labelledby="h-trust">
+  <div class="wrap">
+    <p class="label mono" data-i18n="s4.label"></p>
+    <h2 id="h-trust" class="h2 reveal" data-i18n="s4.h2"></h2>
+    <ul class="points">
+      <li class="reveal"><h3 data-i18n="s4.p1.t"></h3><p data-i18n="s4.p1.b"></p></li>
+      <li class="reveal"><h3 data-i18n="s4.p2.t"></h3><p data-i18n="s4.p2.b"></p></li>
+      <li class="reveal"><h3 data-i18n="s4.p3.t"></h3><p data-i18n="s4.p3.b"></p></li>
+      <li class="reveal"><h3 data-i18n="s4.p4.t"></h3><p data-i18n="s4.p4.b"></p></li>
+    </ul>
+    <p class="foot reveal" data-i18n="s4.note"></p>
+  </div>
+</section>
+
+<section class="sec" id="why" aria-labelledby="h-why">
+  <div class="wrap">
+    <p class="label mono" data-i18n="s5.label" id="h-why"></p>
+    <blockquote class="letter reveal"><p data-i18n="s5.p"></p></blockquote>
+  </div>
+</section>
+
+<section class="sec" id="start" aria-labelledby="h-start">
+  <div class="wrap">
+    <p class="label mono" data-i18n="s6.label"></p>
+    <h2 id="h-start" class="h2 reveal" data-i18n="s6.h2"></h2>
+    <ol class="steps">
+      <li class="reveal" data-i18n="s6.1"></li>
+      <li class="reveal" data-i18n="s6.2"></li>
+      <li class="reveal" data-i18n="s6.3"></li>
+    </ol>
+    <p class="answer serif reveal" data-i18n="s6.close"></p>
+    <p class="req mono" data-i18n="s6.req"></p>
+    <div class="actions">
+      <a class="btn btn-primary" data-link="download" data-i18n="hero.download"></a>
+      <a class="btn btn-ghost" data-link="github" data-i18n="hero.github"></a>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="faq" aria-labelledby="h-faq">
+  <div class="wrap">
+    <p class="label mono" data-i18n="faq.label"></p>
+    <h2 id="h-faq" class="h2 reveal" data-i18n="faq.h2"></h2>
+    <div class="faq">
+      <details><summary data-i18n="faq.q1"></summary><p data-i18n="faq.a1"></p></details>
+      <details><summary data-i18n="faq.q2"></summary><p data-i18n="faq.a2"></p></details>
+      <details><summary data-i18n="faq.q3"></summary><p data-i18n="faq.a3"></p></details>
+      <details><summary data-i18n="faq.q4"></summary><p data-i18n="faq.a4"></p></details>
+      <details><summary data-i18n="faq.q5"></summary><p data-i18n="faq.a5"></p></details>
+      <details><summary data-i18n="faq.q6"></summary><p data-i18n="faq.a6"></p></details>
+      <details><summary data-i18n="faq.q7"></summary><p data-i18n="faq.a7"></p></details>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="wrap wrap-wide foot-in">
+    <a class="brand" href="#top" aria-label="Maru"><img src="assets/logo.svg" alt="" width="30" height="30"><span>Maru</span></a>
+    <p class="foot-tag serif" data-i18n="foot.tag"></p>
+    <p class="foot-meta mono"><span data-i18n="foot.os"></span> · <span data-i18n="foot.mac"></span></p>
+    <div class="lang" role="group" data-i18n-attr="aria-label:a11y.lang">
+      <button type="button" data-lang="en" aria-pressed="true">EN</button>
+      <button type="button" data-lang="ko" aria-pressed="false" lang="ko">한국어</button>
+    </div>
+  </div>
+</footer>
+
+<script src="copy.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
