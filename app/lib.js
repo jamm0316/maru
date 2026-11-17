@@ -392,8 +392,19 @@ function workspacesToSave(items, activeId, withSid = true) {
   const keep = (Array.isArray(items) ? items : []).filter((x) => x && typeof x.cwd === 'string' && (withSid || !x.transient));
   if (!keep.length) return null;
   const a = keep.findIndex((x) => x.id === activeId);
-  return { list: keep.map((x) => ({ cwd: x.cwd, title: x.title, ...(withSid && validSessionUuid(x.claudeSid) ? { claudeSid: x.claudeSid, claudeSidAt: x.claudeSidAt } : {}), ...(withSid && validSessionUuid(x.prevSid) ? { prevSid: x.prevSid } : {}) })), active: a >= 0 ? a : 0 };
+  // 하위 세션: parentId 가 저장되는 목록 안의 최상위 작업 공간을 가리킬 때만 id·parentId 를 적는다(아니면 최상위로 내린다)
+  const byId = new Map(keep.filter((x) => validWsId(x.id)).map((x) => [x.id, x]));
+  const parentOf = (x) => { const p = validWsId(x.parentId) && x.parentId !== x.id ? byId.get(x.parentId) : null; return p && !(validWsId(p.parentId) && byId.has(p.parentId)) ? p : null; };
+  return { list: keep.map((x) => {
+    const p = parentOf(x);
+    return { cwd: x.cwd, title: x.title, ...(withSid && validSessionUuid(x.claudeSid) ? { claudeSid: x.claudeSid, claudeSidAt: x.claudeSidAt } : {}), ...(withSid && validSessionUuid(x.prevSid) ? { prevSid: x.prevSid } : {}),
+      ...(isProjectKey(x.project) ? { project: x.project } : {}), ...(x.origin === 'child' || p ? { origin: 'child' } : {}), ...(validWsId(x.id) ? { id: x.id } : {}), ...(p ? { parentId: p.id } : {}) };
+  }), active: a >= 0 ? a : 0 };
 }
+const WS_ID_RE = /^[0-9a-f]{16}$/;
+const STABLE_ID_RE = /^[A-Za-z0-9_-]{4,64}$/; // 스크립트와 맞춘 고정 작업 공간 id 형식(앱이 만드는 id 는 16 hex 로 이 안에 든다)
+const validStableId = (s) => typeof s === 'string' && STABLE_ID_RE.test(s);
+function validWsId(s) { return typeof s === 'string' && WS_ID_RE.test(s); }
 
 // ---- 다시 켤 때 세션 이어 가기 ----
 // 새로 여는 모든 작업 공간은 앱이 정한 uuid 로 `claude --session-id <uuid>` 를 실행한다(그 uuid 가 곧 claudeSid). 파일 시스템으로 짐작하지 않는다.
@@ -707,14 +718,17 @@ function resolveRoot({ env = {}, home, isPackaged, appDir, io, managedHome }) {
 
 // 에이전트 상태 파일(JSON {"state","at"}) -> 'busy'|'idle'|'waiting'|null
 const AGENT_STATES = ['busy', 'idle', 'waiting'];
+const AGENT_STATE_MAX = 8192; // 훅이 cwd(최대 1024자, 한글이면 바이트가 많다)까지 적어도 들어가는 크기. main 의 읽기 상한과 같다
 function parseAgentState(text) {
-  if (typeof text !== 'string' || text.length > 4096) return null;
+  if (typeof text !== 'string' || text.length > AGENT_STATE_MAX) return null;
   try {
     const o = JSON.parse(text);
     return o && typeof o === 'object' && AGENT_STATES.includes(o.state) ? o.state : null;
   } catch { return null; }
 }
 
+// 상태 기록의 cwd: 절대 경로, 1024자 이하, 제어·서식 문자 없음
+function validRecCwd(c) { return typeof c === 'string' && c.length >= 1 && c.length <= 1024 && c.startsWith('/') && !hasBadChars(c); }
 // 상태 파일 -> {state, atMs}|null
 function parseAgentRecord(text) {
   const state = parseAgentState(text);
@@ -724,6 +738,7 @@ function parseAgentRecord(text) {
   const rec = { state, atMs };
   if (o && validTranscriptPath(o.transcript_path)) rec.transcript = o.transcript_path; // 앱 밖에서 쓴 값일 수 있어 다시 검증
   if (o && validModelId(o.model)) rec.model = o.model;
+  if (o && validRecCwd(o.cwd)) rec.cwd = o.cwd; // 선택: 훅이 알려 주는 현재 위치(절대 경로). 틀린 값은 버린다
   if (o && Number.isInteger(o.bg) && o.bg >= 1 && o.bg <= 99) rec.bg = o.bg; // 선택: 메인 턴은 끝났고(idle) 백그라운드 서브에이전트가 도는 수. 틀린 값은 버리고 기록은 받는다
   return rec;
 }
@@ -961,11 +976,24 @@ function uniqueTitle(base, taken) {
     if (!used.has(cand)) return cand;
   }
 }
+// 저장된 parentId 검증: 같은 파일 안 항목을 가리키고, 자기 자신이 아니며, 부모 자신이 부모를 주장하지 않을 때만(깊이 1; 끊어진 참조·순환·손자는 최상위로). id 는 관계에 쓰이는 항목에만 남긴다
+function linkWorkspaceParents(list, rawIds, rawParents) {
+  const byId = new Map();
+  rawIds.forEach((id, i) => { if (id && !byId.has(id)) byId.set(id, i); });
+  const links = [];
+  rawParents.forEach((pid, i) => {
+    const j = pid ? byId.get(pid) : undefined;
+    if (j !== undefined && j !== i && !rawParents[j] && rawIds[i] && byId.get(rawIds[i]) === i) links.push([i, j]);
+  });
+  rawIds.forEach((id, i) => { if (id && byId.get(id) === i) list[i].id = id; }); // 모든 작업 공간의 고정 id(겹치면 먼저 나온 것만). 없는 옛 항목은 불러올 때 main 이 새로 정한다
+  for (const [i, j] of links) { list[i].parentId = rawIds[j]; list[i].origin = 'child'; }
+}
+
 // 저장된 목록 -> { list: [{cwd, title}], active }. 잘못된 항목·없는 폴더는 버리고 6개까지만 쓴다. exists(cwd): boolean
 function normalizeWorkspaces(raw, { exists, max = WS_MAX, fallbackTitle } = {}) {
   const out = { list: [], active: 0 };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.workspaces)) return out;
-  const origIdx = [];
+  const origIdx = []; const rawIds = []; const rawParents = [];
   raw.workspaces.forEach((e, i) => {
     if (out.list.length >= max || !e || typeof e !== 'object' || Array.isArray(e)) return;
     let cwd = e.cwd;
@@ -982,9 +1010,13 @@ function normalizeWorkspaces(raw, { exists, max = WS_MAX, fallbackTitle } = {}) 
       if (Number.isInteger(e.claudeSidAt) && e.claudeSidAt >= 1e11 && e.claudeSidAt <= 99999999999999) entry.claudeSidAt = e.claudeSidAt;
     }
     if (validSessionUuid(e.prevSid) && e.prevSid !== entry.claudeSid) entry.prevSid = e.prevSid; // 새로 시작하면서 남겨 둔 옛 세션("원래 세션 열기" 용, 하나뿐)
+    if (e.origin === 'child') entry.origin = 'child'; // 하위 세션이었던 적이 있다(부모가 닫혀도 마루 세션이 될 수 없다)
+    if (isProjectKey(e.project)) entry.project = e.project; // 하위 세션의 프로젝트 이름표(부모가 닫혀도 남는다)
+    rawIds.push(validWsId(e.id) ? e.id : null); rawParents.push(validWsId(e.parentId) ? e.parentId : null);
     out.list.push(entry);
     origIdx.push(i);
   });
+  linkWorkspaceParents(out.list, rawIds, rawParents);
   const a = origIdx.indexOf(raw.active);
   out.active = a >= 0 ? a : 0;
   if (Number.isInteger(raw.aliveAt) && raw.aliveAt >= 1e11 && raw.aliveAt <= 99999999999999) out.aliveAt = raw.aliveAt; // (예전 파일) 앱이 마지막으로 살아 있던 시각(ms)
@@ -1351,6 +1383,15 @@ function cleanTagList(a) { // 태그 배열 -> 형식 맞고 겹치지 않는 �
   for (const t of a) if (typeof t === 'string' && TODO_TAG_RE.test(t) && !seen.has(t)) { seen.add(t); out.push(t); }
   return out;
 }
+// 접어 둔 하위 세션 묶음: 부모 작업 공간의 고정 id(16 hex, 겹치지 않게, 최대 20개). 비어 있으면 필드를 쓰지 않는다
+const WS_COLLAPSED_MAX = 20;
+function cleanWsCollapsed(a) {
+  if (a === undefined) return [];
+  if (!Array.isArray(a) || a.length > 200) return null;
+  const seen = new Set(); const out = [];
+  for (const t of a) if (validWsId(t) && !seen.has(t)) { seen.add(t); out.push(t); }
+  return out.slice(-WS_COLLAPSED_MAX);
+}
 function validateProjectUi(o) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
   const catOrder = cleanTagList(o.catOrder); const collapsed = cleanTagList(o.collapsed);
@@ -1373,7 +1414,9 @@ function validateProjectUi(o) {
       projOrder[tag] = keys;
     }
   }
-  return { catOrder, projOrder, collapsed };
+  const ws = cleanWsCollapsed(o.wsCollapsed);
+  if (!ws) return null;
+  return { catOrder, projOrder, collapsed, ...(ws.length ? { wsCollapsed: ws } : {}) };
 }
 function parseProjectUi(res) {
   if (!res || res.truncated || typeof res.text !== 'string') return null;
@@ -1399,12 +1442,12 @@ function pruneProjectUi(ui, list) {
     const ks = v.projOrder[tag].filter((k) => keys.has(k));
     if (tags.has(tag) && ks.length) projOrder[tag] = ks;
   }
-  return { catOrder: v.catOrder.filter((t) => tags.has(t)), projOrder, collapsed: v.collapsed.filter((t) => tags.has(t)) };
+  return { catOrder: v.catOrder.filter((t) => tags.has(t)), projOrder, collapsed: v.collapsed.filter((t) => tags.has(t)), ...(v.wsCollapsed ? { wsCollapsed: v.wsCollapsed } : {}) };
 }
 // 검증을 통과한 값과 완전히 같을 때만 쓴다(고쳐진 값이 있으면 거부). data 폴더가 링크면 writeJsonAtomic 이 거부한다.
 function saveProjectUi(file, ui) {
   const v = validateProjectUi(ui);
-  if (!v || Object.keys(ui).length !== 3 || JSON.stringify(v) !== JSON.stringify({ catOrder: ui.catOrder, projOrder: ui.projOrder, collapsed: ui.collapsed })) return false;
+  if (!v || Object.keys(ui).length !== (v.wsCollapsed ? 4 : 3) || JSON.stringify(v) !== JSON.stringify({ catOrder: ui.catOrder, projOrder: ui.projOrder, collapsed: ui.collapsed, ...(v.wsCollapsed ? { wsCollapsed: ui.wsCollapsed } : {}) })) return false;
   if (!projectUiFits(v)) return false;
   return writeJsonAtomic(file, v, 'project-ui');
 }
@@ -1881,7 +1924,7 @@ function ringFrameInterval(st, mode) {
 }
 
 // ---- 트레이(메뉴 막대) ----
-const WS_STATES = ['busy', 'waiting', 'idle', 'none', 'pending', 'exited', 'unavailable'];
+const WS_STATES = ['busy', 'waiting', 'idle', 'none', 'pending', 'exited', 'unavailable', 'unknown', 'turnEnded'];
 const stateLabel = (t, s) => t('agent.' + (WS_STATES.includes(s) ? s : 'none'));
 // states: 작업 공간별 상태 배열 -> "작업 중 2 · 확인 필요 1"
 function traySummary(states, t) {
@@ -2768,7 +2811,434 @@ function firstMeetingBanner({ memories, probe, state, profile }) {
   return !st.metAt && !st.dismissedAt;
 }
 
+// ======== 하위 세션: 마루가 다른 폴더의 세션을 열어 일을 맡긴다 ========
+// 요청 파일(<ROOT>/data/state/app/requests/<epoch-ms>-<8hex>.json)은 신뢰하지 않는 입력이다. 인증(mac)·판정·동의·예산·프롬프트 전달·보고 표시를 순수 함수(+주입한 fs)로 둔다.
+const CHILD_MAX = 4; // 앱 전체에서 동시에 열려 있는 하위 세션(부모가 둘이어도 합쳐서)
+const CHILD_RATE_MAX = 3; const CHILD_RATE_MS = 60 * 1000; // 1분에 받아들이는 요청(동의 창 남발 방지)
+const CHILD_DAY_MAX = 20; const CHILD_DAY_MS = 24 * 3600 * 1000; // 24시간에 실제로 여는 하위 세션(재시작 뒤에도 유지)
+const REQ_MAX_BYTES = 16384; const REQ_STALE_MS = 60 * 1000; const REQ_FILES_PER_SCAN = 20; const REQ_FUTURE_MS = 2000;
+const REQ_TITLE_MAX = 40; const REQ_PROMPT_MAX = 4000; const REQ_CWD_MAX = 1024;
+const REQ_NAME_RE = /^(\d{13})-([0-9a-f]{8})\.json$/;
+const REQ_KEYS = ['v', 'from', 'cwd', 'title', 'project', 'prompt', 'at', 'mac'];
+const REQ_KEY_RE = /^[0-9a-f]{64}$/;
+
+// 프롬프트 정리: 줄바꿈(\n)·탭은 남기고(\r 은 \n 으로) 제어·서식·보이지 않는 문자는 지운다. ESC 도 지워지므로 붙여넣기 끝 표지를 만들 수 없다
+function cleanPromptText(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(/\r\n?/g, '\n').replace(BAD_CHARS_G, (c) => (c === '\n' || c === '\t' ? c : '')).replace(/[ \t]+$/gm, '').replace(/\n{4,}/g, '\n\n\n').trim(); // 줄 끝 공백을 지운 뒤 빈 줄이 3줄 넘게 이어지면 2줄로(보이는 것과 전달하는 것이 같도록 한 번만 정규화한다)
+}
+function validAbsDir(c) { // 정규화된 절대 경로(.·..·빈 조각 없음)
+  if (typeof c !== 'string' || c.length < 1 || c.length > REQ_CWD_MAX || !c.startsWith('/') || hasBadChars(c)) return false;
+  return c === '/' || c.slice(1).split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+}
+// 주의: 이 키는 같은 사용자(uid) 안에서는 비밀이 아니다(같은 사용자의 프로세스가 ps eww 로 환경을 읽을 수 있다). mac 은 실수·다른 작업 공간의 요청을 거르는 용도이고, 진짜 관문은 매번 뜨는 동의 창이다
+// ---- 인증: 마루 pty 마다 시작할 때 정한 무작위 키(MARU_REQ_KEY, 64 hex = 32바이트). 요청의 mac = HMAC-SHA256(키 바이트, 아래 7줄을 "\n" 으로 이은 UTF-8) ----
+// 줄: v, from, cwd, title, project(없으면 빈 문자열), at, 프롬프트 UTF-8 의 SHA-256(소문자 hex). 값은 파일에 적힌 그대로(정리 전)
+function childMacMessage(f) {
+  const sha = require('crypto').createHash('sha256').update(String(f.prompt), 'utf8').digest('hex');
+  return [String(f.v), f.from, f.cwd, f.title, f.project === null || f.project === undefined ? '' : f.project, String(f.at), sha].join('\n');
+}
+function childMac(keyHex, f) {
+  return require('crypto').createHmac('sha256', Buffer.from(keyHex, 'hex')).update(childMacMessage(f), 'utf8').digest('hex');
+}
+function childMacOk(keyHex, f) { // 상수 시간 비교. 키·mac 형식이 틀리면 false
+  if (typeof keyHex !== 'string' || !REQ_KEY_RE.test(keyHex) || !f || typeof f.mac !== 'string' || !REQ_KEY_RE.test(f.mac)) return false;
+  const a = Buffer.from(childMac(keyHex, f), 'hex'); const b = Buffer.from(f.mac, 'hex');
+  return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+}
+// 마루 세션이 될 수 있는 작업 공간인가(= 키를 받는다): 최상위, 폴더가 저장소 루트, 하위 세션이었던 적이 없다(origin 이 'child' 면 부모가 닫혀도 영구히 안 됨)
+function maruEligible({ isRoot, parentId, origin }) { return isRoot === true && !parentId && origin !== 'child'; }
+// 작업 공간 사실 목록에서 요청자를 찾는다. list = [{ id, sessionId, hasTerm, proc, isRoot, parentId, origin, key }]. 앱 세션 id(from)가 같고 pty 가 있는 것만
+// -> { id, running, maru, child, key } | null. running: 셸이 아닌 프로세스(Claude)가 전경에 있고 claude 실행 파일이 있다
+function requesterOf(list, from, claudeFound) {
+  if (typeof from !== 'string' || !Array.isArray(list)) return null;
+  const w = list.find((x) => x && x.sessionId === from && x.hasTerm === true);
+  if (!w) return null;
+  const proc = typeof w.proc === 'string' ? w.proc : '';
+  return { id: w.id, running: !!proc && !isShellProcessName(proc) && claudeFound === true, maru: maruEligible(w), child: !!w.parentId || w.origin === 'child', key: typeof w.key === 'string' ? w.key : null };
+}
+// 요청 본문 -> { ok: true, req, raw } | { ok: false, reason }. 계약에 없는 키·타입은 거부(프로토타입 키 포함). raw: mac 계산에 쓰는 파일 그대로의 값
+function parseChildRequest(text) {
+  const bad = (reason) => ({ ok: false, reason });
+  if (typeof text !== 'string' || text.length > REQ_MAX_BYTES) return bad('size');
+  let o; try { o = JSON.parse(text); } catch { return bad('json'); }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return bad('shape');
+  const keys = Object.keys(o);
+  if (keys.some((k) => !REQ_KEYS.includes(k)) || !['v', 'from', 'cwd', 'title', 'prompt', 'at', 'mac'].every((k) => hasOwn(o, k))) return bad('shape');
+  if (o.v !== 1) return bad('version');
+  if (!isSessionId(o.from)) return bad('shape');
+  if (typeof o.mac !== 'string' || !REQ_KEY_RE.test(o.mac)) return bad('auth');
+  if (!validAbsDir(o.cwd)) return bad('cwd');
+  const title = cleanQuestText(o.title);
+  if (typeof o.title !== 'string' || !title || cpLen(title) > REQ_TITLE_MAX) return bad('title');
+  const prompt = cleanPromptText(o.prompt);
+  if (typeof o.prompt !== 'string' || !prompt || cpLen(prompt) > REQ_PROMPT_MAX) return bad('prompt');
+  if (Buffer.byteLength(childPromptText('ko', prompt), 'utf8') > PROMPT_FILE_MAX || Buffer.byteLength(childPromptText('en', prompt), 'utf8') > PROMPT_FILE_MAX) return bad('prompt-size'); // 전달 파일(머리말 포함)이 16KB 를 넘으면 조용히 줄이지 않고 거부
+  const project = hasOwn(o, 'project') ? o.project : null;
+  if (project !== null && !isProjectKey(project)) return bad('project');
+  if (!Number.isSafeInteger(o.at) || o.at < 1e12 || o.at > 1e14) return bad('shape');
+  return { ok: true, req: { from: o.from, cwd: o.cwd, title, project, prompt, at: o.at }, raw: { v: o.v, from: o.from, cwd: o.cwd, title: o.title, project, at: o.at, prompt: o.prompt, mac: o.mac } };
+}
+// 예산(앱 전체, 재시작 뒤에도): 24시간에 20개. launches = 실제로 연 시각(ms) 배열
+function budgetOk(launches, nowMs) { // 미래 시각(시계를 되돌린 경우)은 '지금'으로 센다: 되돌려도 예산이 풀리지 않는다
+  const recent = (Array.isArray(launches) ? launches : []).filter((t) => Number.isFinite(t) && nowMs - Math.min(t, nowMs) < CHILD_DAY_MS);
+  return recent.length < CHILD_DAY_MAX;
+}
+function recordLaunch(launches, nowMs) { // 새 배열(하루 지난 것은 버리고 20개만)
+  return [...(Array.isArray(launches) ? launches : []).filter((t) => Number.isFinite(t) && nowMs - t < CHILD_DAY_MS), nowMs].slice(-CHILD_DAY_MAX);
+}
+function validateBudget(o) { // -> 시각 배열 | null(손상)
+  if (!o || typeof o !== 'object' || Array.isArray(o) || o.version !== 1 || !Array.isArray(o.launches) || o.launches.length > 200) return null;
+  return o.launches.filter((t) => Number.isSafeInteger(t) && t > 1e12 && t < 1e14).slice(-CHILD_DAY_MAX);
+}
+function readBudgetFile(file) { // -> { status, list }
+  const fs = require('fs');
+  let present = true; try { fs.lstatSync(file); } catch { present = false; }
+  if (!present) return { status: 'missing', list: [] };
+  const r = readRegular(file, 8192, false);
+  let list = null; try { list = r && !r.truncated ? validateBudget(JSON.parse(r.text)) : null; } catch { list = null; }
+  return list ? { status: 'ok', list } : { status: 'corrupt', list: [] };
+}
+function saveBudgetFile(file, launches) { return writeJsonAtomic(file, { version: 1, launches: (Array.isArray(launches) ? launches : []).filter((t) => Number.isSafeInteger(t)).slice(-CHILD_DAY_MAX) }, 'child-budget'); }
+// ---- 재전송 방지: 같은 mac 은 120초 안에 두 번 받지 않는다(파일 이름만 바꿔 복사해도). seen = [[mac, 시각]] ----
+// 키는 같은 사용자의 다른 프로세스가 읽을 수 있어(ps eww) 비밀이 아니다. mac 은 실수·다른 작업 공간의 요청을 거르는 용도이고, 진짜 관문은 매번 뜨는 동의 창이다
+const REPLAY_MS = 120 * 1000; const REPLAY_MAX = 200;
+function macSeen(seen, mac, nowMs) { return (Array.isArray(seen) ? seen : []).some((x) => x && x[0] === mac && nowMs - x[1] < REPLAY_MS && x[1] - nowMs < REPLAY_MS); }
+function rememberMac(seen, mac, nowMs) { // 새 배열(120초 지난 것은 버리고 200개까지)
+  return [...(Array.isArray(seen) ? seen : []).filter((x) => x && Math.abs(nowMs - x[1]) < REPLAY_MS), [mac, nowMs]].slice(-REPLAY_MAX);
+}
+// ---- 거절 소음 제한: 작업 공간마다 알림은 10초에 한 번, 기록은 1분에 20줄(넘는 것은 센 뒤 한 줄로 요약) ----
+const NOTICE_GAP_MS = 10 * 1000; const LOG_PER_MIN = 20;
+function noticeOk(lastAt, nowMs) { return !(Number.isFinite(lastAt) && nowMs - lastAt >= 0 && nowMs - lastAt < NOTICE_GAP_MS); }
+// st = { start, count, dropped } -> { st, action: 'log'|'skip', summary: 앞 창에서 못 적은 수(0 이면 없음) }
+function logGate(st, nowMs) {
+  const cur = st && Number.isFinite(st.start) ? st : { start: nowMs, count: 0, dropped: 0 };
+  if (nowMs - cur.start >= 60000 || nowMs < cur.start) return { st: { start: nowMs, count: 1, dropped: 0 }, action: 'log', summary: cur.dropped };
+  if (cur.count >= LOG_PER_MIN) return { st: { ...cur, dropped: cur.dropped + 1 }, action: 'skip', summary: 0 };
+  return { st: { ...cur, count: cur.count + 1 }, action: 'log', summary: 0 };
+}
+// 요청 하나를 받아들일지(순수). c = { name, size, mtimeMs, text, nowMs, requester(from) -> requesterOf 결과|null, wsCount, childCount() -> 앱 전체 하위 세션 수,
+//   accepted: [받아들인 시각 — 단조 시계 ms], monoMs: 지금의 단조 시계 ms, launches: [연 시각 ms(벽시계)], seen: 이미 본 mac 목록, realDir(cwd) -> 실제 경로|null, projectKnown(key) -> boolean }
+// -> { ok: true, req, real, parentId, mac } | { ok: false, reason, parentId? }. parentId 는 mac 인증을 통과한 뒤의 거절에만 붙는다(알림은 그 작업 공간에만).
+// 이유: name size stale json shape version auth replay cwd title prompt prompt-size project from child not-maru not-claude project-unknown children-max ws-max rate budget
+function decideChildRequest(c) {
+  const bad = (reason) => ({ ok: false, reason });
+  if (!c || typeof c.name !== 'string' || !REQ_NAME_RE.test(c.name)) return bad('name');
+  if (!Number.isFinite(c.size) || c.size < 1 || c.size > REQ_MAX_BYTES) return bad('size');
+  if (!Number.isFinite(c.nowMs)) return bad('stale');
+  if (!Number.isFinite(c.mtimeMs) || c.nowMs - c.mtimeMs > REQ_STALE_MS || c.mtimeMs - c.nowMs > REQ_FUTURE_MS) return bad('stale');
+  const p = parseChildRequest(c.text);
+  if (!p.ok) return bad(p.reason);
+  const req = p.req;
+  if (c.nowMs - req.at > REQ_STALE_MS || req.at - c.nowMs > REQ_FUTURE_MS) return bad('stale'); // 오래됐거나 미래의 요청
+  const who = typeof c.requester === 'function' ? c.requester(req.from) : null;
+  if (!who || typeof who.id !== 'string') return bad('from');
+  if (who.running !== true) return bad('not-claude'); // 셸만 떠 있다
+  if (who.child === true) return bad('child'); // 하위 세션(이었던 것 포함)은 하위 세션을 열 수 없다(깊이 1)
+  if (who.maru !== true) return bad('not-maru');
+  if (!childMacOk(who.key, p.raw)) return bad('auth'); // 그 세션의 키로 만든 mac 이어야 한다(같은 사용자 안에서는 비밀이 아님: 위 주석)
+  const bad2 = (reason) => ({ ok: false, reason, parentId: who.id }); // 인증된 요청의 거절
+  if (macSeen(c.seen, p.raw.mac, c.nowMs)) return bad2('replay');
+  const real = typeof c.realDir === 'function' ? c.realDir(req.cwd) : null;
+  if (typeof real !== 'string' || !validAbsDir(real)) return bad2('cwd');
+  if (req.project !== null && !(typeof c.projectKnown === 'function' && c.projectKnown(req.project) === true)) return bad2('project-unknown');
+  const kids = typeof c.childCount === 'function' ? c.childCount() : CHILD_MAX;
+  if (!Number.isInteger(kids) || kids >= CHILD_MAX) return bad2('children-max');
+  if (!Number.isInteger(c.wsCount) || c.wsCount >= WS_MAX) return bad2('ws-max');
+  const mono = Number.isFinite(c.monoMs) ? c.monoMs : c.nowMs; // 분당 한도는 단조 시계로(벽시계를 되돌려도 풀리지 않는다)
+  const recent = (Array.isArray(c.accepted) ? c.accepted : []).filter((t) => Number.isFinite(t) && mono - t >= 0 && mono - t < CHILD_RATE_MS);
+  if (recent.length >= CHILD_RATE_MAX) return bad2('rate');
+  if (!budgetOk(c.launches, c.nowMs)) return bad2('budget');
+  return { ok: true, req, real, parentId: who.id, mac: p.raw.mac };
+}
+// 동의를 기다리는 사이(또는 직후) 상황이 바뀌었을 수 있다: 앱이 끝나 가거나 창이 없으면 안 열고, 부모가 살아 있고 자리가 있고 폴더가 그대로(실제 경로가 승인한 것과 같음)여야 한다
+function childLaunchCheck({ quitting, windowOk, parentAlive, children, wsCount, realNow, approvedReal }) {
+  if (quitting === true || windowOk !== true) return 'busy';
+  if (parentAlive !== true) return 'from';
+  if (!Number.isInteger(children) || children >= CHILD_MAX || !Number.isInteger(wsCount) || wsCount >= WS_MAX) return children >= CHILD_MAX ? 'children-max' : 'ws-max';
+  if (typeof realNow !== 'string' || realNow !== approvedReal) return 'cwd'; // 동의 뒤에 링크가 바뀌었다
+  return null;
+}
+// 부모(마루 작업 공간)가 계속 쓸 수 있나: 작업 공간이 있고 자격이 있으면 된다(pty 가 그 사이 다시 시작됐어도 같은 작업 공간이다)
+function parentUsable({ exists, eligible }) { return exists === true && eligible === true; }
+// 창이 보여야만 요청을 받는다(숨은 채로 하위 세션을 열지 않는다; 요청은 60초 안에 보이면 처리, 아니면 만료)
+function childWindowReady({ destroyed, visible, minimized }) { return destroyed !== true && visible === true && minimized !== true; }
+// 하위 세션을 열면 부모를 펼친다: 접어 둔 부모 id 목록에서 뺀 새 배열
+function expandParent(collapsedIds, parentId) { return (Array.isArray(collapsedIds) ? collapsedIds : []).filter((x) => x !== parentId); }
+// 동의 창(main 이 상태를 가진다): 대기 중인 하나의 요청에 한 번만 쓰는 토큰. 응답 = 'open'|'cancel'. 토큰이 다르거나 이미 쓰였거나 만료면 invalid
+function consentAnswer(pending, token, answer, nowMs) {
+  if (!pending || typeof pending.token !== 'string' || typeof token !== 'string' || token.length !== pending.token.length) return { result: 'invalid' };
+  if (!require('crypto').timingSafeEqual(Buffer.from(token), Buffer.from(pending.token))) return { result: 'invalid' };
+  if (pending.used === true || (Number.isFinite(pending.expiresAt) && nowMs > pending.expiresAt)) return { result: 'invalid' };
+  if (answer !== 'open' && answer !== 'cancel') return { result: 'invalid' };
+  return { result: answer };
+}
+const CHILD_REASONS = ['name', 'size', 'stale', 'json', 'shape', 'version', 'auth', 'replay', 'cwd', 'title', 'prompt', 'prompt-size', 'project', 'from', 'child', 'not-maru', 'not-claude', 'project-unknown', 'children-max', 'ws-max', 'rate', 'budget', 'dir', 'file', 'trust-cancel', 'busy', 'start'];
+function childReasonCode(reason) { return CHILD_REASONS.includes(reason) ? reason : 'shape'; }
+function childReasonKey(reason) { return 'child.reject.' + childReasonCode(reason); }
+
+// ---- 요청 폴더 읽기: 한 번만 처리(이름을 바꿔 먼저 가져오고, 읽은 뒤 지운다). fsx = fs 와 같은 동기 API ----
+// 폴더가 진짜 폴더이고 내 소유이며 group/other 쓰기 권한이 없을 때만 쓴다(아니면 채널 전체를 무시)
+function reqDirOk(dir, fsx, uid) {
+  try { const st = fsx.lstatSync(dir); return st.isDirectory() && !st.isSymbolicLink() && st.uid === uid && (st.mode & 0o022) === 0; } catch { return false; }
+}
+function rmEntry(fsx, f) { // 링크·일반 파일은 지우고 폴더·특수 파일은 통째로(이름 규칙에 맞는 항목에만 쓴다)
+  try { const st = fsx.lstatSync(f); if (st.isDirectory() && !st.isSymbolicLink()) fsx.rmSync(f, { recursive: true, force: true }); else fsx.unlinkSync(f); return true; } catch { return false; }
+}
+// -> { dirOk, items: [{ name, text|null, size, mtimeMs, reason? }] }. 이름 규칙에 맞는 항목만 본다. 미래 mtime(> now+2초)·일반 파일이 아닌 것은 지우고 건너뛴다.
+// 쓰는 중(settleMs 안)인 것은 다음으로 미룬다. 20개 상한은 거른 뒤에 적용. handled: 이미 가져간 이름(메모리, 최대 500)
+function takeChildRequests({ dir, fsx, uid, rand, handled, nowMs, settleMs = 150, limit = REQ_FILES_PER_SCAN }) {
+  const path = require('path');
+  if (!reqDirOk(dir, fsx, uid)) return { dirOk: false, items: [] };
+  let names = [];
+  try { names = fsx.readdirSync(dir); } catch { return { dirOk: true, items: [] }; }
+  const ready = [];
+  for (const name of names.filter((n) => REQ_NAME_RE.test(n)).sort()) {
+    if (handled && handled.has(name)) continue;
+    const f = path.join(dir, name);
+    let st; try { st = fsx.lstatSync(f); } catch { continue; }
+    if (!st.isFile()) { rmEntry(fsx, f); continue; } // 폴더·링크·특수 파일: 읽지 않고 치운다
+    if (Number.isFinite(nowMs)) {
+      if (st.mtimeMs - nowMs > REQ_FUTURE_MS) { rmEntry(fsx, f); continue; } // 미래 시각: 무시하고 지운다
+      if (settleMs > 0 && nowMs - st.mtimeMs < settleMs) continue; // 쓰는 중일 수 있다: 다음 훑기에
+    }
+    ready.push(name);
+  }
+  const items = [];
+  for (const name of ready.slice(0, limit)) {
+    if (handled) { if (handled.size >= 500) handled.delete(handled.values().next().value); handled.add(name); }
+    const mine = path.join(dir, '.taken-' + rand() + '.tmp');
+    try { fsx.renameSync(path.join(dir, name), mine); } catch { continue; } // 이미 누가 가져갔다
+    const item = { name, text: null, size: 0, mtimeMs: 0, reason: 'file' };
+    try {
+      const st = fsx.lstatSync(mine);
+      item.size = st.size; item.mtimeMs = st.mtimeMs;
+      if (st.isFile() && st.uid === uid && st.size <= REQ_MAX_BYTES) {
+        const r = readRegular(mine, REQ_MAX_BYTES, false);
+        if (r && !r.truncated) { item.text = r.text; delete item.reason; }
+      } else if (st.size > REQ_MAX_BYTES) item.reason = 'size';
+    } catch { /* 위 기본값 */ }
+    rmEntry(fsx, mine); // 가져간 임시 파일은 쓰고 나면 반드시 지운다
+    items.push(item);
+  }
+  return { dirOk: true, items };
+}
+// 앱을 켤 때: 남아 있는 요청·가져간 임시 파일을 처리하지 않고 지운다(일반 파일·링크, 이름 규칙에 맞는 폴더 등 특수 항목). 지운 수
+function purgeChildRequests({ dir, fsx, uid }) {
+  const path = require('path');
+  if (!reqDirOk(dir, fsx, uid)) return 0;
+  let n = 0;
+  try {
+    for (const name of fsx.readdirSync(dir)) {
+      const f = path.join(dir, name);
+      try {
+        const st = fsx.lstatSync(f);
+        if (st.isFile() || st.isSymbolicLink()) { fsx.unlinkSync(f); n++; }
+        else if (REQ_NAME_RE.test(name) || /^\.taken-/.test(name)) { if (rmEntry(fsx, f)) n++; }
+      } catch { /* 건너뜀 */ }
+    }
+  } catch { /* 없음 */ }
+  return n;
+}
+
+// 동의 창에 보일 값(전체 경로·제목·프로젝트·전체 맡길 내용). 모두 요청에서 온 값이라 renderer 가 textContent 로만 쓴다
+function consentView({ token, folder, project, title, prompt, paste }) {
+  const brief = cleanPromptText(prompt); // 전달하는 것과 같은 문자열(이미 정규화돼 있다). 자르지 않는다
+  return { token, folder, project: project || null, title, brief, chars: cpLen(brief), lines: brief ? brief.split('\n').length : 0, paste: paste === true };
+}
+
+// ---- 프롬프트 전달: 셸에 글을 쓰지 않고 파일로 건넨다(래퍼가 읽고 지운다) ----
+const CHILD_HEADER = {
+  ko: '[마루가 맡긴 일] 이 세션은 총괄 에이전트 마루가 이 프로젝트의 일을 맡기려고 열었습니다. 아래가 맡긴 내용입니다. 설계 문서가 있으면 먼저 읽고, 끝나면 무엇을 했고 무엇이 남았는지 짧게 보고하세요.',
+  en: '[Task from Maru] This session was opened by Maru, the coordinating agent, to hand off work on this project. Below is what was handed over. If there is a design document, read it first, and when you finish, briefly report what you did and what remains.',
+};
+const PROMPT_FILE_MAX = 16384; const PROMPT_STALE_MS = 5 * 60 * 1000;
+const PROMPT_FILE_RE = /^[0-9a-f]{16}\.txt$/;
+function childPromptText(lang, prompt) { // 고정 머리말(코드가 만든다) + 빈 줄 + 정리된 프롬프트
+  const p = cleanPromptText(prompt);
+  return p ? (CHILD_HEADER[lang] || CHILD_HEADER.ko) + '\n\n' + p : '';
+}
+// 전달 파일은 정확히 한 번만 쓴다. 시작하려는 순간의 상황으로 무엇을 할지 정한다(순수): file = 아직 안 쓴 전달 파일 경로|null, wrapperOk = 래퍼를 지금 쓸 수 있나
+// -> { env: 파일 경로|null(환경변수로 건넬 것), deleteFile: 지울 파일|null, paste: 입력줄에 채우기로 내려가나 }
+function promptHandoff({ file, wrapperOk }) {
+  if (typeof file !== 'string' || !file) return { env: null, deleteFile: null, paste: false };
+  if (wrapperOk !== true) return { env: null, deleteFile: file, paste: true }; // 승인 뒤 래퍼를 못 쓰게 됐다: 파일은 지우고 같은 내용을 입력줄에(Enter 는 사용자가)
+  return { env: file, deleteFile: null, paste: false };
+}
+function promptDirOk(dir, fsx, uid, create) {
+  try {
+    let st = null; try { st = fsx.lstatSync(dir); } catch { /* 없음 */ }
+    if (!st) { if (!create) return false; fsx.mkdirSync(dir, { recursive: true, mode: 0o700 }); st = fsx.lstatSync(dir); }
+    if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== uid || (st.mode & 0o022) !== 0) return false;
+    if ((st.mode & 0o777) !== 0o700) fsx.chmodSync(dir, 0o700);
+    return true;
+  } catch { return false; }
+}
+// -> 파일 경로 | null. 폴더 700, 파일 600, 임시 파일에 쓴 뒤 이름을 바꾼다(반쯤 쓴 파일이 보이지 않는다). 16KB 넘으면 쓰지 않는다
+function writeChildPromptFile({ dir, text, rand, fsx, uid }) {
+  const path = require('path');
+  if (typeof text !== 'string' || !text || Buffer.byteLength(text, 'utf8') > PROMPT_FILE_MAX) return null;
+  if (!promptDirOk(dir, fsx, uid, true)) return null;
+  const name = rand();
+  if (typeof name !== 'string' || !/^[0-9a-f]{16}$/.test(name)) return null;
+  const fin = path.join(dir, name + '.txt'); const tmp = path.join(dir, '.' + name + '.tmp');
+  let fd = null;
+  try {
+    fd = fsx.openSync(tmp, fsx.constants.O_WRONLY | fsx.constants.O_CREAT | fsx.constants.O_EXCL | fsx.constants.O_NOFOLLOW, 0o600);
+    fsx.writeSync(fd, text); fsx.fsyncSync(fd); fsx.closeSync(fd); fd = null;
+    fsx.renameSync(tmp, fin);
+    return fin;
+  } catch {
+    if (fd !== null) try { fsx.closeSync(fd); } catch { /* 무시 */ }
+    try { fsx.unlinkSync(tmp); } catch { /* 없음 */ }
+    return null;
+  }
+}
+// 5분 넘은 전달 파일·임시 파일 삭제(일반 파일만). 지운 수
+function cleanStalePromptFiles({ dir, nowMs, fsx, uid, ttlMs = PROMPT_STALE_MS }) {
+  const path = require('path');
+  if (!promptDirOk(dir, fsx, uid, false)) return 0;
+  let n = 0;
+  try {
+    for (const name of fsx.readdirSync(dir)) {
+      if (!(PROMPT_FILE_RE.test(name) || /^\.[0-9a-f]{16}\.tmp$/.test(name))) continue;
+      try { const f = path.join(dir, name); const st = fsx.lstatSync(f); if (st.isFile() && nowMs - st.mtimeMs > ttlMs) { fsx.unlinkSync(f); n++; } } catch { /* 건너뜀 */ }
+    }
+  } catch { /* 없음 */ }
+  return n;
+}
+// 하위 세션 pty 환경변수(sanitizeHostEnv 를 거친 환경에 얹는다): 고정 작업 공간 id(모든 작업 공간)·부모의 고정 id·프로젝트·프롬프트 파일. 부모의 앱 세션 id·인증 키는 넣지 않는다
+function childEnvVars({ ws, parentWs, project, promptFile }) {
+  const out = {};
+  if (validStableId(ws)) out.MARU_WS = ws; // 모든 작업 공간: 재시작·재실행에도 변하지 않는 id(보고 폴더의 키)
+  if (validStableId(parentWs)) out.MARU_PARENT_WS = parentWs; // 하위 세션: 부모의 고정 id(저장된 parentId 에서; 부모 pty 가 아직 안 떠 있어도 된다)
+  if (isProjectKey(project)) out.MARU_PROJECT = project; // 설계 문서 폴더(--add-dir)는 넘기지 않는다: 하위 세션이 고치려면 Claude Code 의 보통 권한 확인을 거친다
+  if (typeof promptFile === 'string' && validAbsDir(promptFile) && promptFile.length <= 1024) out.MARU_CHILD_PROMPT_FILE = promptFile;
+  return out;
+}
+// 작업 공간 pty 의 환경(순수): 호스트 환경을 정리하고, 앱이 정한 값만 얹는다. 물려받은 MARU_APP*·MARU_WS·MARU_PARENT_*·MARU_PROJECT·MARU_CHILD_*·MARU_REQ_KEY 는 모두 지운다.
+// reqKey 는 마루가 될 수 있는 작업 공간(maruEligible)에만 넘긴다. 다른 작업 공간(하위 세션 포함)에는 어떤 경우에도 키가 없다
+function ptyEnv({ host, ws, parentWs, project, promptFile, reqKey }) {
+  const env = { ...sanitizeHostEnv(host), TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+  for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP') || k === 'MARU_WS' || k.startsWith('MARU_PARENT_') || k === 'MARU_PROJECT' || k.startsWith('MARU_CHILD_') || k.startsWith('MARU_REQ')) delete env[k];
+  Object.assign(env, childEnvVars({ ws, parentWs, project, promptFile }));
+  if (typeof reqKey === 'string' && REQ_KEY_RE.test(reqKey)) env.MARU_REQ_KEY = reqKey;
+  return env;
+}
+
+// ---- 목록 순서·접기 ----
+// items [{ id, parentId? }] -> 화면 순서의 [{ id, depth }]: 최상위는 원래 순서, 각 부모 바로 뒤에 자식(만든 순서). 부모가 없거나 부모가 자식이면 최상위로 본다(깊이는 1 까지)
+function hierarchyOrder(items) {
+  const list = Array.isArray(items) ? items.filter((x) => x && typeof x.id === 'string') : [];
+  const byId = new Map(list.map((x) => [x.id, x]));
+  const parentOf = (x) => { const p = typeof x.parentId === 'string' && x.parentId !== x.id ? byId.get(x.parentId) : null; return p && !(typeof p.parentId === 'string' && byId.has(p.parentId) && p.parentId !== p.id) ? p : null; };
+  const kids = new Map();
+  for (const x of list) { const p = parentOf(x); if (p) { if (!kids.has(p.id)) kids.set(p.id, []); kids.get(p.id).push(x); } }
+  const out = [];
+  for (const x of list) {
+    if (parentOf(x)) continue;
+    out.push({ ...x, depth: 0 });
+    for (const k of kids.get(x.id) || []) out.push({ ...k, depth: 1 });
+  }
+  return out;
+}
+// 화면에 보이는 작업 공간 id(⌘숫자 대상). 접힌 부모(고정 id)의 자식은 숨긴다(활성인 자식은 보인다). ordered = hierarchyOrder 결과
+function visibleWsIds(ordered, collapsedIds, activeId) {
+  const closed = new Set(Array.isArray(collapsedIds) ? collapsedIds : []);
+  let cur = null; const out = [];
+  for (const x of Array.isArray(ordered) ? ordered : []) {
+    if (x.depth === 0) { cur = x.id; out.push(x.id); continue; }
+    if (closed.has(cur) && x.id !== activeId) continue;
+    out.push(x.id);
+  }
+  return out;
+}
+
+// ---- 상태 표시 ----
+// 저장소(훅이 도는 곳) 밖 폴더의 작업 공간은 상태 훅이 없다: 바쁨도 입력 대기도 아닌 '알 수 없음'. 단, 읽지 않은 보고가 있고 그 뒤로 pty 출력이 거의 없으면(turnEnded) 턴이 끝났음이 증명된다
+const REPORT_PROOF_SLACK_MS = 5000;
+function stateDisplay({ state, hasTerm, outsideRoot, reportedAt, lastOutputAt }) {
+  if (state !== 'none' || hasTerm !== true || outsideRoot !== true) return state;
+  if (Number.isFinite(reportedAt) && reportedAt > 0 && !(Number.isFinite(lastOutputAt) && lastOutputAt > reportedAt + REPORT_PROOF_SLACK_MS)) return 'turnEnded';
+  return 'unknown';
+}
+// 훅 기록의 cwd 가 작업 공간을 연 폴더와 다르면 그 폴더 이름(마지막 조각), 아니면 null. 다른 출처로 짐작하지 않는다
+function currentLocation({ recCwd, cwd, cwdReal }) {
+  if (!validRecCwd(recCwd)) return null;
+  const norm = (p) => (typeof p === 'string' && p.length > 1 ? p.replace(/\/+$/, '') : p);
+  const c = norm(recCwd);
+  if (c === norm(cwd) || c === norm(cwdReal)) return null;
+  const base = c.split('/').filter(Boolean).pop();
+  return base ? [...base].slice(0, 40).join('') : null;
+}
+// 하위 세션 줄 아래에 보일 실행 중 서브에이전트 이름(상태가 알려졌을 때만; summarizeSubs 결과 [{type,count}] 에서 최대 3개)
+function childSubNames(subs) {
+  return (Array.isArray(subs) ? subs : []).filter((s) => s && typeof s.type === 'string' && SUB_TYPE_RE.test(s.type)).slice(0, 3).map((s) => s.type);
+}
+
+// ---- 보고(스크립트가 쓰는 <ROOT>/data/state/app/reports/<마루 작업 공간 고정 id>/<epoch-ms>-<자식 고정 id>.json): 표시만 한다 ----
+const REPORT_MAX_BYTES = 8192; const REPORT_TEXT_MAX = 2000; const REPORT_FILES_MAX = 50; const REPORT_SCAN_MAX = 200; const REPORT_FUTURE_MS = 60 * 1000; const REPORT_FLASH_GAP_MS = 60 * 1000;
+const REPORT_NAME_RE = /^(\d{13})-([A-Za-z0-9_-]{4,64})\.json$/;
+const REPORT_KEYS = ['v', 'from', 'project', 'cwd_name', 'at', 'bg', 'text'];
+// text 가 비어 있어도 유효하다(= "턴이 끝났다" 표지). nowMs 가 있으면 at 이 now+60초보다 미래인 보고는 버린다
+function parseReport(text, nowMs) { // -> { from, project, cwdName, at, bg, text } | null
+  if (typeof text !== 'string' || text.length > REPORT_MAX_BYTES) return null;
+  let o; try { o = JSON.parse(text); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o) || Object.keys(o).some((k) => !REPORT_KEYS.includes(k))) return null;
+  if (o.v !== 1 || !validStableId(o.from) || typeof o.text !== 'string' || !Number.isSafeInteger(o.at) || o.at < 1e12 || o.at > 1e14) return null;
+  if (Number.isFinite(nowMs) && o.at > nowMs + REPORT_FUTURE_MS) return null;
+  const body = [...cleanPromptText(o.text)].slice(0, REPORT_TEXT_MAX).join('');
+  const project = hasOwn(o, 'project') && isProjectKey(o.project) ? o.project : null;
+  const cwdName = hasOwn(o, 'cwd_name') && typeof o.cwd_name === 'string' && o.cwd_name && cpLen(o.cwd_name) <= 80 && !hasBadChars(o.cwd_name) ? o.cwd_name : null;
+  const bg = hasOwn(o, 'bg') ? (o.bg === true ? 1 : Number.isInteger(o.bg) && o.bg >= 0 && o.bg <= 99 ? o.bg : 0) : 0;
+  return { from: o.from, project, cwdName, at: o.at, bg, text: body };
+}
+// 보고 폴더 읽기(읽기 전용, 비동기): 진짜 폴더·내 소유·group/other 쓰기 없음, 파일은 일반 파일·내 소유·8KB 이하·이름 규칙. 이름 200개까지만 훑고 최신순 50개. fsp = fs.promises 와 같은 API
+async function readReportsDir({ dir, fsp, uid, nowMs }) {
+  const path = require('path'); const fsc = require('fs').constants;
+  try { const st = await fsp.lstat(dir); if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== uid || (st.mode & 0o022) !== 0) return []; } catch { return []; }
+  let names = []; try { names = await fsp.readdir(dir); } catch { return []; }
+  const out = [];
+  for (const name of names.filter((n) => REPORT_NAME_RE.test(n)).sort().reverse().slice(0, REPORT_SCAN_MAX)) {
+    if (out.length >= REPORT_FILES_MAX) break;
+    let fh = null;
+    try {
+      const f = path.join(dir, name); const ls = await fsp.lstat(f);
+      if (!ls.isFile() || ls.uid !== uid || ls.size > REPORT_MAX_BYTES) continue;
+      fh = await fsp.open(f, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > REPORT_MAX_BYTES) continue;
+      const buf = Buffer.alloc(st.size); const { bytesRead } = await fh.read(buf, 0, st.size, 0);
+      const rep = parseReport(buf.toString('utf8', 0, bytesRead), nowMs);
+      if (rep) out.push(rep);
+    } catch { /* 건너뜀 */ } finally { if (fh) try { await fh.close(); } catch { /* 무시 */ } }
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+// reports: parseReport 결과 배열, kids: [{ id(고정 작업 공간 id; 보고의 from 과 같다), title, project }]
+// -> { count(알려진 하위 세션의 보고만), items: [{ at, title|null, project, text, bg, known }], lastAt: { <하위 세션 id>: 시각 } }. 모르는 보낸이는 목록에는 보이지만 세지 않는다
+function summarizeReports(reports, kids) {
+  const byId = new Map((Array.isArray(kids) ? kids : []).filter((k) => k && validStableId(k.id)).map((k) => [k.id, k]));
+  const items = []; const lastAt = {}; let known = 0;
+  for (const r of Array.isArray(reports) ? reports : []) {
+    const k = byId.get(r.from) || null;
+    items.push({ at: r.at, title: k ? k.title : null, project: k ? k.project || null : null, text: r.text, bg: r.bg, known: !!k });
+    if (k) { known++; if (!(lastAt[k.id] >= r.at)) lastAt[k.id] = r.at; }
+  }
+  return { count: Math.min(known, 99), items: items.slice(0, REPORT_FILES_MAX), lastAt };
+}
+// 0 -> 1 이상으로 바뀌었고 마루 작업 공간이 활성이 아닐 때만, 같은 작업 공간에서 60초에 한 번까지
+function reportFlash({ prev, next, active, lastFlashAt, nowMs }) {
+  if (!(Number.isInteger(prev) && Number.isInteger(next) && prev === 0 && next > 0 && active !== true)) return false;
+  return !(Number.isFinite(lastFlashAt) && Number.isFinite(nowMs) && nowMs - lastFlashAt < REPORT_FLASH_GAP_MS);
+}
+// 한 줄 기록(개인 정보 없이: 이유 코드와 파일 이름뿐)
+function childLogLine(kind, reason, name) { return String(kind).replace(/[^a-z-]/g, '').slice(0, 12) + ' ' + String(reason).replace(/[^a-z-]/g, '').slice(0, 20) + ' ' + (typeof name === 'string' && REQ_NAME_RE.test(name) ? name : '-'); }
+
 const api = {
+  CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
+  macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, promptHandoff, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
+  hierarchyOrder, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
   MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
   defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
   PREREQ_IDS, findInPath, modelPrereqs, prereqsReady, firstMeetingBanner,

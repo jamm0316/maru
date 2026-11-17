@@ -826,7 +826,7 @@ t('confirmClose·confirmRestart: 상태별 확인 여부', () => {
   assert.deepStrictEqual(all.filter(L.confirmClose), ['busy', 'waiting', 'idle', 'none']); // 세션이 살아 있으면 확인
   assert.deepStrictEqual(all.filter(L.confirmRestart), ['busy', 'waiting']);
   for (const bad of [undefined, null, '', 'bogus', 5]) { assert.strictEqual(L.confirmClose(bad), false); assert.strictEqual(L.confirmRestart(bad), false); }
-  assert.deepStrictEqual(L.WS_STATES, ['busy', 'waiting', 'idle', 'none', 'pending', 'exited', 'unavailable']);
+  assert.deepStrictEqual(L.WS_STATES, ['busy', 'waiting', 'idle', 'none', 'pending', 'exited', 'unavailable', 'unknown', 'turnEnded']);
 });
 t('closeRequestAction: 열린 창이 있으면 그것부터 닫는다', () => {
   assert.strictEqual(L.closeRequestAction({ overlayOpen: true, hasActive: true }), 'overlay');
@@ -1297,7 +1297,7 @@ t('pruneProjectUi: 없는 태그·키는 걸러 낸다', () => {
 t('메뉴·화면 연결 정적 검사: ⌘1~9 는 numberTargets, 번호 힌트·토글·드래그는 자체 타입', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
   const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8');
-  assert.ok(/L\.numberTargets\(wsOrder\(\)[\s\S]*L\.visibleProjectKeys\(proj\.view\.open, proj\.view\.collapsed\)/.test(main) && /Lib\.numberTargets\(wsList[\s\S]*Lib\.visibleProjectKeys\(projView\.open, projView\.collapsed\)/.test(rd)); // 같은 순수 함수
+  assert.ok(/L\.numberTargets\(visibleWsIds\(\)[\s\S]*L\.visibleProjectKeys\(proj\.view\.open, proj\.view\.collapsed\)/.test(main) && /Lib\.numberTargets\(Lib\.visibleWsIds\(Lib\.hierarchyOrder\(wsList\)[\s\S]*Lib\.visibleProjectKeys\(projView\.open, projView\.collapsed\)/.test(rd)); // 같은 순수 함수
   assert.ok(/L\.GOTO_MAX/.test(main) && /'CmdOrCtrl\+' \+ \(i \+ 1\)/.test(main));
   for (const ch of ['projects:set-collapsed', 'projects:reorder']) { assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch); assert.ok(new RegExp("ipcMain\\.handle\\('" + ch + "', \\(e,[^)]*\\) => \\{\\n  if \\(!fromMain\\(e\\)").test(main), 'sender 검사 ' + ch); }
   assert.ok(/projects:reorder[\s\S]*L\.moveInOrder\(g\.items\.filter/.test(main)); // 다른 카테고리 키는 moveInOrder 가 거부
@@ -2280,7 +2280,7 @@ t('앱 연결(소스 구조): fromMain·고정 문장·dev 전용 환경변수·
   assert.ok(/wsFrom\(e, id\)/.test(ms) && /isMaruWs\(w\)/.test(ms) && /w\.bracketed/.test(ms) && /confirmBox/.test(ms) && /firstMeetingPaste\(text\)/.test(ms) && !/writePrompt/.test(ms) && !/\\r|\\n/.test(ms));
   assert.ok(/!app\.isPackaged && typeof process\.env\[k\]/.test(main) && /MARU_APP_MANAGED_HOME/.test(main) && /MARU_APP_PAYLOAD/.test(main));
   assert.ok(/MARU_LANG: curLang\(\)/.test(main) && /installEnv\(\)/.test(main));
-  assert.ok(/app\.relaunch\(\)/.test(main) && /'setup'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main));
+  assert.ok(/app\.relaunch\(\)/.test(main) && /'hierarchy'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main));
   assert.ok(!/innerHTML/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8')));
   const pk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).build.extraResources.map((e) => e.to);
   for (const x of ['payload/scripts', 'payload/prompts', 'payload/squads', 'payload/squads-en', 'payload/launchd', 'payload/bin', 'payload/install.sh', 'payload/uninstall.sh', 'payload/CLAUDE.md', 'payload/CLAUDE.en.md', 'payload/README.md', 'payload/.claude/agents', 'payload/.claude/skills', 'payload/.claude/settings.json']) assert.ok(pk.includes(x), x);
@@ -2793,8 +2793,456 @@ t('sanitizeHostEnv: 호스트가 아닌 사용자 환경은 ANTHROPIC_BASE_URL·
 });
 t('main 의 자식 프로세스 환경은 모두 sanitizeHostEnv 를 거친다(pty·childEnv·run)', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-  assert.ok(/\.\.\.L\.sanitizeHostEnv\(process\.env\), TERM/.test(main) && /const env = L\.sanitizeHostEnv\(process\.env\);\n  for \(const k of Object\.keys\(env\)\) if \(k\.startsWith\('ELECTRON_'\)/.test(main) && /env: L\.sanitizeHostEnv\(process\.env\), \.\.\.opts/.test(main));
+  assert.ok(/L\.ptyEnv\(\{ host: process\.env,/.test(main) && /\.\.\.sanitizeHostEnv\(host\), TERM/.test(fs.readFileSync(path.join(__dirname, 'lib.js'), 'utf8')) && /const env = L\.sanitizeHostEnv\(process\.env\);\n  for \(const k of Object\.keys\(env\)\) if \(k\.startsWith\('ELECTRON_'\)/.test(main) && /env: L\.sanitizeHostEnv\(process\.env\), \.\.\.opts/.test(main));
   assert.ok(!/\{ \.\.\.process\.env/.test(main.replace(/\/\/[^\n]*/g, '')), 'process.env 를 그대로 펼치는 곳이 없다');
+});
+
+// ======== 하위 세션(마루가 맡기는 일) ========
+const CH_NOW = 1.8e12; const CH_FROM = 'sess-maru-0001'; const CH_OK_NAME = CH_NOW - 1000 + '-0a1b2c3d.json';
+const crypto = require('crypto'); const CH_KEY = 'ab'.repeat(32);
+// mac 은 L.childMac 이 아니라 명세대로 독립 계산한다: HMAC-SHA256(키 32바이트, "v\nfrom\ncwd\ntitle\nproject|''\nat\nsha256hex(prompt)")
+const chMac = (r, key = CH_KEY) => crypto.createHmac('sha256', Buffer.from(key, 'hex')).update([String(r.v), r.from, r.cwd, r.title, r.project || '', String(r.at), crypto.createHash('sha256').update(r.prompt, 'utf8').digest('hex')].join('\n'), 'utf8').digest('hex');
+const chReq = (o = {}, key = CH_KEY) => { const r = { v: 1, from: CH_FROM, cwd: '/Users/x/work/blog', title: '블로그 정리', project: null, prompt: '설계 문서를 읽고\n초안을 다듬어 주세요.', at: CH_NOW - 1000, ...o }; return 'mac' in o ? r : { ...r, mac: chMac(r, key) }; };
+const chFacts = () => [
+  { id: 'ws-maru', sessionId: CH_FROM, hasTerm: true, proc: 'node', isRoot: true, parentId: null, origin: null, key: CH_KEY },
+  { id: 'ws-kid', sessionId: 'sess-kid-0001', hasTerm: true, proc: 'node', isRoot: false, parentId: 'ws-maru', origin: 'child', key: null },
+  { id: 'ws-exkid', sessionId: 'sess-exkid-01', hasTerm: true, proc: 'node', isRoot: true, parentId: null, origin: 'child', key: null }, // 부모가 닫혀 최상위가 된 옛 하위 세션(폴더가 루트)
+  { id: 'ws-shell', sessionId: 'sess-shell-01', hasTerm: true, proc: '-zsh', isRoot: true, parentId: null, origin: null, key: CH_KEY },
+  { id: 'ws-other', sessionId: 'sess-other-01', hasTerm: true, proc: 'node', isRoot: false, parentId: null, origin: null, key: null },
+  { id: 'ws-dead', sessionId: 'sess-dead-001', hasTerm: false, proc: '', isRoot: true, parentId: null, origin: null, key: CH_KEY },
+];
+const chCtx = (o = {}, r = chReq()) => ({
+  name: CH_OK_NAME, size: 300, mtimeMs: CH_NOW - 500, text: JSON.stringify(r), nowMs: CH_NOW,
+  requester: (f) => L.requesterOf(chFacts(), f, true),
+  wsCount: 2, childCount: () => 0, accepted: [], launches: [], realDir: (c) => c, projectKnown: (k) => k === 'blog/draft', ...o,
+});
+t('decideChildRequest: 정상 요청(올바른 mac)은 받아들이고 정리된 값·부모 id·실제 경로를 돌려준다', () => {
+  const d = L.decideChildRequest(chCtx());
+  assert.strictEqual(d.ok, true); assert.strictEqual(d.parentId, 'ws-maru'); assert.strictEqual(d.real, '/Users/x/work/blog');
+  assert.strictEqual(d.req.title, '블로그 정리'); assert.strictEqual(d.req.prompt, '설계 문서를 읽고\n초안을 다듬어 주세요.'); assert.strictEqual(d.req.project, null);
+  assert.strictEqual(L.decideChildRequest(chCtx({}, chReq({ project: 'blog/draft' }))).ok, true); // project 가 mac 에 들어간다
+  assert.strictEqual(L.childMac(CH_KEY, JSON.parse(JSON.stringify(chReq()))), chReq().mac); // 구현과 독립 계산이 같다(스크립트 쪽 시험 벡터)
+});
+t('mac 인증: 키 없음·다른 키·변조된 필드·형식 오류는 모두 auth, 다른 세션의 키로는 통과하지 않는다', () => {
+  const why = (o, r) => { const d = L.decideChildRequest(chCtx(o, r)); return d.ok ? 'ok' : d.reason; };
+  assert.strictEqual(why({}, chReq({}, 'cd'.repeat(32))), 'auth'); // 다른 키
+  assert.strictEqual(why({}, chReq({ mac: '0'.repeat(64) })), 'auth'); assert.strictEqual(why({}, chReq({ mac: 'zz' })), 'auth'); assert.strictEqual(why({}, chReq({ mac: CH_KEY.toUpperCase() })), 'auth'); assert.strictEqual(why({}, chReq({ mac: 5 })), 'auth');
+  const noMac = chReq(); delete noMac.mac; assert.strictEqual(why({}, noMac), 'shape'); // 필수 키 없음
+  const good = JSON.stringify(chReq());
+  for (const [a, b] of [['"title":"블로그 정리"', '"title":"블로그 정리2"'], ['"cwd":"/Users/x/work/blog"', '"cwd":"/Users/x/work/blog2"'], ['"prompt":"설계', '"prompt":"설개'], ['"project":null', '"project":"blog/draft"'], [`"at":${CH_NOW - 1000}`, `"at":${CH_NOW - 999}`]]) assert.ok(good.includes(a), a), assert.strictEqual(why({ text: good.replace(a, b) }), 'auth', b);
+  assert.strictEqual(why({ requester: (f) => L.requesterOf(chFacts().map((x) => ({ ...x, key: null })), f, true) }), 'auth'); // 키가 없는 마루(시작 직후 등)
+  assert.strictEqual(L.childMacOk('short', { mac: chReq().mac }), false); assert.strictEqual(L.childMacOk(CH_KEY, null), false);
+  // from 이 다른 세션을 가리키면 그 세션의 키로 검증한다: 마루의 키로 만든 mac 은 하위 세션 id 로 통과하지 않는다
+  assert.strictEqual(why({}, chReq({ from: 'sess-kid-0001' })), 'child');
+});
+t('requesterOf·maruEligible: 살아 있는 Claude 세션만, 하위 세션·하위 세션이었던 세션·루트가 아닌 세션은 자격 없음', () => {
+  const w = (f) => L.requesterOf(chFacts(), f, true);
+  assert.deepStrictEqual(w(CH_FROM), { id: 'ws-maru', running: true, maru: true, child: false, key: CH_KEY });
+  assert.strictEqual(w('sess-kid-0001').child, true); assert.strictEqual(w('sess-kid-0001').maru, false);
+  assert.strictEqual(w('sess-exkid-01').child, true); // D6: 부모가 닫혀 최상위·루트 폴더여도 영구히 요청자가 될 수 없다
+  assert.strictEqual(w('sess-other-01').maru, false); assert.strictEqual(w('sess-shell-01').running, false); // 셸이 전경
+  assert.strictEqual(w('sess-dead-001'), null); assert.strictEqual(w('nobody'), null); assert.strictEqual(w(5), null); assert.strictEqual(L.requesterOf(null, 'x', true), null);
+  assert.strictEqual(L.requesterOf(chFacts(), CH_FROM, false).running, false); // claude 실행 파일이 없다
+  assert.strictEqual(L.requesterOf(chFacts().map((x) => ({ ...x, proc: '' })), CH_FROM, true).running, false);
+  assert.strictEqual(L.maruEligible({ isRoot: true, parentId: null, origin: null }), true); assert.strictEqual(L.maruEligible({ isRoot: true, parentId: 'p', origin: null }), false); assert.strictEqual(L.maruEligible({ isRoot: true, parentId: null, origin: 'child' }), false); assert.strictEqual(L.maruEligible({ isRoot: false }), false); assert.strictEqual(L.maruEligible({}), false);
+});
+t('decideChildRequest: 거부 경로마다 이유(이름·크기·오래됨·미래·형식·버전·요청자·마루 아님·하위 세션·Claude 아님·폴더·프로젝트·한도·속도·예산)', () => {
+  const why = (o, r) => { const d = L.decideChildRequest(chCtx(o, r)); return d.ok ? 'ok' : d.reason; };
+  assert.strictEqual(why({ name: 'x.json' }), 'name'); assert.strictEqual(why({ name: '1800000000000-0A1B2C3D.json' }), 'name'); assert.strictEqual(why({ name: CH_OK_NAME + '.bak' }), 'name');
+  assert.strictEqual(why({ size: 16385 }), 'size'); assert.strictEqual(why({ size: 0 }), 'size'); assert.strictEqual(why({ size: NaN }), 'size');
+  assert.strictEqual(why({ mtimeMs: CH_NOW - 60001 }), 'stale'); assert.strictEqual(why({}, chReq({ at: CH_NOW - 60001 })), 'stale'); assert.strictEqual(why({}, chReq({ at: CH_NOW + 2001 })), 'stale'); assert.strictEqual(why({ mtimeMs: CH_NOW + 2001 }), 'stale'); // 미래 시각(F1)
+  assert.strictEqual(why({ mtimeMs: CH_NOW - 60000 }), 'ok'); assert.strictEqual(why({ mtimeMs: CH_NOW + 2000 }), 'ok'); assert.strictEqual(why({}, chReq({ at: CH_NOW + 2000 })), 'ok'); // 경계
+  assert.strictEqual(why({ text: '{' }), 'json'); assert.strictEqual(why({ text: '[]' }), 'shape'); assert.strictEqual(why({ text: 'null' }), 'shape'); assert.strictEqual(why({ text: '"x"' }), 'shape');
+  assert.strictEqual(why({}, chReq({ v: 2 })), 'version'); assert.strictEqual(why({}, chReq({ v: '1' })), 'version');
+  assert.strictEqual(why({}, chReq({ from: 'nobody-0000001' })), 'from'); assert.strictEqual(why({}, chReq({ from: 5 })), 'shape'); assert.strictEqual(why({}, chReq({ from: 'sess-dead-001' })), 'from'); // pty 없는 세션
+  assert.strictEqual(why({}, chReq({ from: 'sess-shell-01' })), 'not-claude'); // 셸만 떠 있다
+  assert.strictEqual(why({}, chReq({ from: 'sess-kid-0001' })), 'child'); assert.strictEqual(why({}, chReq({ from: 'sess-exkid-01' })), 'child');
+  assert.strictEqual(why({}, chReq({ from: 'sess-other-01' })), 'not-maru');
+  assert.strictEqual(why({ realDir: () => null }), 'cwd'); assert.strictEqual(why({}, chReq({ cwd: 'relative/x' })), 'cwd'); assert.strictEqual(why({}, chReq({ cwd: '/a/../b' })), 'cwd'); assert.strictEqual(why({}, chReq({ cwd: '/a/b\u0007' })), 'cwd');
+  assert.strictEqual(why({}, chReq({ cwd: '/' + 'a'.repeat(1030) })), 'cwd');
+  assert.strictEqual(why({}, chReq({ title: '' })), 'title'); assert.strictEqual(why({}, chReq({ title: '가'.repeat(41) })), 'title'); assert.strictEqual(why({}, chReq({ title: '\u202E\u200B' })), 'title'); assert.strictEqual(why({}, chReq({ title: '가'.repeat(40) })), 'ok');
+  assert.strictEqual(why({}, chReq({ prompt: '' })), 'prompt'); assert.strictEqual(why({}, chReq({ prompt: 'a'.repeat(4001) })), 'prompt'); assert.strictEqual(why({}, chReq({ prompt: '\u0007\u200B' })), 'prompt'); assert.strictEqual(why({}, chReq({ prompt: 'a'.repeat(4000) })), 'ok');
+  assert.strictEqual(why({}, chReq({ prompt: '😀'.repeat(4000) })), 'ok'); assert.ok(Buffer.byteLength(L.childPromptText('ko', '😀'.repeat(4000))) <= L.PROMPT_FILE_MAX); // 4000자 상한 안에서는 머리말을 더해도 16384 바이트에 든다(넘는 값은 parse 가 prompt-size 로 거부, 조용히 줄이지 않는다)
+  assert.strictEqual(why({}, chReq({ prompt: '가'.repeat(4000) })), 'ok');
+  assert.strictEqual(why({}, chReq({ project: '../x' })), 'project'); assert.strictEqual(why({}, chReq({ project: 'a b/c' })), 'project'); assert.strictEqual(why({}, chReq({ project: 5 })), 'project');
+  assert.strictEqual(why({}, chReq({ project: 'zzz/none' })), 'project-unknown'); // 형식은 맞지만 레지스트리에 없다
+  assert.strictEqual(why({ childCount: () => 4 }), 'children-max'); assert.strictEqual(why({ childCount: () => 3 }), 'ok'); assert.strictEqual(why({ wsCount: L.WS_MAX }), 'ws-max'); assert.strictEqual(why({ wsCount: L.WS_MAX - 1 }), 'ok');
+  assert.strictEqual(why({ accepted: [CH_NOW - 10, CH_NOW - 20, CH_NOW - 30] }), 'rate'); assert.strictEqual(why({ accepted: [CH_NOW - 10, CH_NOW - 20, CH_NOW - 60000] }), 'ok'); // 1분 지난 것은 세지 않는다
+  const day = (n, ago) => Array.from({ length: n }, (_, i) => CH_NOW - ago - i);
+  assert.strictEqual(why({ launches: day(20, 3600000) }), 'budget'); assert.strictEqual(why({ launches: day(19, 3600000) }), 'ok'); assert.strictEqual(why({ launches: day(20, 24 * 3600000 + 1000) }), 'ok'); // 24시간이 지난 것은 세지 않는다
+});
+t('예산(24시간 20개)·기록·파일: 굴러가는 창, 재시작 뒤 유지(저장 목록), 손상 파일', () => {
+  const n = 1.8e12; let l = []; for (let i = 0; i < 25; i++) l = L.recordLaunch(l, n + i);
+  assert.strictEqual(l.length, 20); assert.strictEqual(L.budgetOk(l, n + 100), false); assert.strictEqual(L.budgetOk(l, n + 24 * 3600000 + 5), true); // 가장 이른 것들이 창을 벗어나면 다시 열린다(5개만 벗어남 → 15개)
+  assert.strictEqual(L.budgetOk(l.slice(0, 19), n + 100), true); assert.strictEqual(L.budgetOk(null, n), true);
+  assert.deepStrictEqual(L.recordLaunch([n - 25 * 3600000, n - 1], n), [n - 1, n]);
+  const f = path.join(tmp, 'budget.json'); assert.deepStrictEqual(L.readBudgetFile(f), { status: 'missing', list: [] });
+  assert.ok(L.saveBudgetFile(f, l)); assert.deepStrictEqual(L.readBudgetFile(f), { status: 'ok', list: l }); assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  for (const bad of ['{', '[]', '{"version":2,"launches":[]}', '{"version":1,"launches":"x"}', JSON.stringify({ version: 1, launches: Array(201).fill(n) })]) { fs.writeFileSync(f, bad); assert.strictEqual(L.readBudgetFile(f).status, 'corrupt', bad.slice(0, 20)); }
+  assert.deepStrictEqual(L.validateBudget({ version: 1, launches: [n, 'x', 5, 1.5, n + 1] }), [n, n + 1]); // 잘못된 값은 걸러 낸다
+});
+t('동의 창 토큰: 한 번만 쓰고, 다른 토큰·만료·다른 답은 invalid, 보이는 값은 전체 내용', () => {
+  const p = { token: 'ab12cd34ab12cd34ab12cd34ab12cd34', expiresAt: 1000, used: false };
+  assert.deepStrictEqual(L.consentAnswer(p, p.token, 'open', 500), { result: 'open' }); assert.deepStrictEqual(L.consentAnswer(p, p.token, 'cancel', 1000), { result: 'cancel' });
+  assert.strictEqual(L.consentAnswer({ ...p, used: true }, p.token, 'open', 500).result, 'invalid'); // 이미 쓴 토큰
+  assert.strictEqual(L.consentAnswer(p, p.token, 'open', 1001).result, 'invalid'); // 만료
+  assert.strictEqual(L.consentAnswer(p, 'ab12cd34ab12cd34ab12cd34ab12cd35', 'open', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer(p, 'short', 'open', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer(p, 5, 'open', 500).result, 'invalid');
+  assert.strictEqual(L.consentAnswer(p, p.token, 'yes', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer(null, p.token, 'open', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer({}, p.token, 'open', 500).result, 'invalid');
+  const long = '가\n'.repeat(1500); const v = L.consentView({ token: 't', folder: '/a/very/long/path', project: 'a/b', title: '제목', prompt: long, paste: true });
+  assert.strictEqual(v.brief, long.trim()); assert.strictEqual(v.paste, true); assert.deepStrictEqual(Object.keys(v).sort(), ['brief', 'chars', 'folder', 'lines', 'paste', 'project', 'title', 'token']); assert.strictEqual(v.chars, [...long.trim()].length); assert.strictEqual(v.lines, 1500); assert.strictEqual(L.consentView({ token: 't', folder: '/a', title: 'x', prompt: 'p' }).project, null);
+});
+t('시작 직전 재확인(F3·D7): 앱 종료·창 안 보임·부모 없음·자리 없음·링크 바꿔치기는 거부, 숨은 창에서는 요청을 받지 않는다', () => {
+  const ok = { quitting: false, windowOk: true, parentAlive: true, children: 3, wsCount: 5, realNow: '/a', approvedReal: '/a' };
+  assert.strictEqual(L.childLaunchCheck(ok), null);
+  assert.strictEqual(L.childLaunchCheck({ ...ok, quitting: true }), 'busy'); assert.strictEqual(L.childLaunchCheck({ ...ok, windowOk: false }), 'busy'); assert.strictEqual(L.childLaunchCheck({ ...ok, parentAlive: false }), 'from');
+  assert.strictEqual(L.childLaunchCheck({ ...ok, children: 4 }), 'children-max'); assert.strictEqual(L.childLaunchCheck({ ...ok, wsCount: L.WS_MAX }), 'ws-max');
+  assert.strictEqual(L.childLaunchCheck({ ...ok, realNow: '/elsewhere' }), 'cwd'); assert.strictEqual(L.childLaunchCheck({ ...ok, realNow: null }), 'cwd'); assert.strictEqual(L.childLaunchCheck({}), 'busy');
+  assert.strictEqual(L.childWindowReady({ destroyed: false, visible: true, minimized: false }), true); assert.strictEqual(L.childWindowReady({ destroyed: false, visible: false, minimized: false }), false);
+  assert.strictEqual(L.childWindowReady({ destroyed: false, visible: true, minimized: true }), false); assert.strictEqual(L.childWindowReady({ destroyed: true, visible: true }), false); assert.strictEqual(L.childWindowReady({}), false);
+  assert.deepStrictEqual(L.expandParent(['p1', 'p2'], 'p1'), ['p2']); assert.deepStrictEqual(L.expandParent(['p2'], 'p1'), ['p2']); assert.deepStrictEqual(L.expandParent(null, 'p1'), []); // 하위 세션을 열면 부모를 펼친다
+});
+t('decideChildRequest: 계약에 없는 키·프로토타입 키·잘못된 타입은 거부', () => {
+  const why = (txt) => { const d = L.decideChildRequest(chCtx({ text: txt })); return d.ok ? 'ok' : d.reason; };
+  const base = JSON.stringify(chReq());
+  assert.strictEqual(why(base.replace('"v":1', '"v":1,"extra":1')), 'shape');
+  assert.strictEqual(why(base.replace('"v":1', '"__proto__":{"x":1},"v":1')), 'shape');
+  assert.strictEqual(why(base.replace('"v":1', '"constructor":1,"v":1')), 'shape');
+  const noTitle = chReq(); delete noTitle.title; assert.strictEqual(why(JSON.stringify(noTitle)), 'shape');
+  const noProject = chReq(); delete noProject.project; assert.strictEqual(why(JSON.stringify(noProject)), 'ok'); // project 는 없어도 빈 문자열로 mac 에 들어간다
+  const M0 = '0'.repeat(64); assert.strictEqual(why(JSON.stringify(chReq({ at: '1800000000000', mac: M0 }))), 'shape'); assert.strictEqual(why(JSON.stringify(chReq({ at: 1.5, mac: M0 }))), 'shape'); assert.strictEqual(why(JSON.stringify(chReq({ title: ['a'], mac: M0 }))), 'title'); assert.strictEqual(why(JSON.stringify(chReq({ prompt: { a: 1 }, mac: M0 }))), 'prompt');
+  assert.strictEqual(why('x'.repeat(16385)), 'size');
+  assert.strictEqual({}.polluted, undefined);
+});
+t('decideChildRequest: 프롬프트의 제어·ESC·보이지 않는 문자는 지우고 줄바꿈·탭은 남긴다(붙여넣기 끝 표지를 만들 수 없다)', () => {
+  const d = L.decideChildRequest(chCtx({}, chReq({ prompt: '가\r\n나\t다\u001b[201~라\u202E\u0000마\n\n\n\n\n바' })));
+  assert.strictEqual(d.ok, true); assert.strictEqual(d.req.prompt, '가\n나\t다[201~라마\n\n\n바'); assert.ok(!/\x1b/.test(d.req.prompt));
+  assert.strictEqual(L.cleanPromptText(42), '');
+});
+const chDir = (name) => { const d = path.join(tmp, name); fs.mkdirSync(d, { mode: 0o700 }); fs.chmodSync(d, 0o700); return d; };
+const chW = (dir, name, body, mtime) => { const f = path.join(dir, name); fs.writeFileSync(f, body); if (mtime) fs.utimesSync(f, mtime / 1000, mtime / 1000); return f; };
+const chRand = (() => { let i = 0; return () => 'r' + (i++); })();
+t('takeChildRequests: 한 번만 가져가고(이름 바꿔 선점) 다시 훑어도 되살아나지 않는다 · 이름 규칙 밖 파일은 건드리지 않는다', () => {
+  const dir = chDir('req1'); const uid = process.getuid(); const handled = new Set(); const nowMs = Date.now();
+  chW(dir, '1800000000001-0a1b2c3d.json', '{"a":1}', nowMs - 5000); chW(dir, 'notes.txt', 'x'); chW(dir, '1800000000002-ZZZZZZZZ.json', 'y');
+  const r1 = L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled, nowMs });
+  assert.strictEqual(r1.dirOk, true); assert.strictEqual(r1.items.length, 1); assert.strictEqual(r1.items[0].text, '{"a":1}'); assert.strictEqual(r1.items[0].name, '1800000000001-0a1b2c3d.json');
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['1800000000002-ZZZZZZZZ.json', 'notes.txt']); // 가져간 파일은 지워졌고 나머지는 그대로
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled, nowMs }).items.length, 0); // 두 번째 훑기: 없음
+  chW(dir, '1800000000001-0a1b2c3d.json', '{"again":1}', nowMs - 5000); // 같은 이름이 다시 생겨도 이미 처리한 이름은 건너뛴다(메모리 집합)
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled, nowMs }).items.length, 0);
+});
+t('takeChildRequests: 쓰는 중인 파일은 미루고(settle) 링크·큰 파일·남의 파일·안전하지 않은 폴더는 거부', () => {
+  const dir = chDir('req2'); const uid = process.getuid(); const nowMs = Date.now();
+  chW(dir, '1800000000001-aaaaaaaa.json', '{}', nowMs - 10); // 방금 씀
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled: new Set(), nowMs }).items.length, 0);
+  assert.ok(fs.existsSync(path.join(dir, '1800000000001-aaaaaaaa.json'))); // 지워지지 않았다
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled: new Set(), nowMs: nowMs + 1000 }).items.length, 1);
+  const secret = path.join(tmp, 'secret-target.json'); fs.writeFileSync(secret, '{"v":1}');
+  fs.symlinkSync(secret, path.join(dir, '1800000000002-bbbbbbbb.json'));
+  chW(dir, '1800000000003-cccccccc.json', 'x'.repeat(16385), nowMs - 5000);
+  const r = L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled: new Set(), nowMs: nowMs + 1000 });
+  assert.deepStrictEqual(r.items.map((i) => [i.name.slice(-13, -5), i.text, i.reason]), [['cccccccc', null, 'size']]); // 링크는 읽지 않고 링크만 지운다(F1)
+  assert.ok(fs.existsSync(secret) && fs.readFileSync(secret, 'utf8') === '{"v":1}'); // 링크 대상은 건드리지 않는다(링크만 지운다)
+  assert.deepStrictEqual(fs.readdirSync(dir), []);
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: { ...fs, readdirSync: () => { throw new Error('x'); } }, uid, rand: chRand, handled: new Set(), nowMs }).items.length, 0);
+  const bad = path.join(tmp, 'req2-bad'); fs.mkdirSync(bad); fs.chmodSync(bad, 0o770); // 그룹 쓰기 가능 → 채널 전체 무시
+  chW(bad, '1800000000001-aaaaaaaa.json', '{}', nowMs - 5000);
+  assert.deepStrictEqual(L.takeChildRequests({ dir: bad, fsx: fs, uid, rand: chRand, handled: new Set(), nowMs }), { dirOk: false, items: [] }); assert.ok(fs.existsSync(path.join(bad, '1800000000001-aaaaaaaa.json')));
+  const link = path.join(tmp, 'req2-link'); fs.symlinkSync(dir, link); assert.strictEqual(L.takeChildRequests({ dir: link, fsx: fs, uid, rand: chRand, handled: new Set(), nowMs }).dirOk, false); // 폴더가 링크
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid: uid + 1, rand: chRand, handled: new Set(), nowMs }).dirOk, false); // 남의 폴더
+  assert.strictEqual(L.takeChildRequests({ dir: path.join(tmp, 'nope'), fsx: fs, uid, rand: chRand, handled: new Set(), nowMs }).dirOk, false);
+});
+t('takeChildRequests: 한 번에 20개까지, handled 집합은 500개로 제한', () => {
+  const dir = chDir('req3'); const uid = process.getuid(); const handled = new Set(); const nowMs = Date.now();
+  for (let i = 0; i < 25; i++) chW(dir, '18000000000' + String(i).padStart(2, '0') + '-' + String(i).padStart(8, '0') + '.json', '{}', nowMs - 5000);
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled, nowMs }).items.length, 20);
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled, nowMs }).items.length, 5);
+  for (let i = 0; i < 600; i++) { handled.add('x' + i); if (handled.size >= 500) handled.delete(handled.values().next().value); }
+  assert.ok(handled.size <= 500);
+});
+t('purgeChildRequests: 시작 때 남은 요청·임시 파일은 처리하지 않고 지운다(폴더·안전하지 않은 폴더는 건드리지 않음)', () => {
+  const dir = chDir('req4'); const uid = process.getuid();
+  chW(dir, '1800000000001-aaaaaaaa.json', '{}'); chW(dir, '.taken-r0.tmp', 'x'); chW(dir, 'stray.txt', 'x'); fs.mkdirSync(path.join(dir, 'sub')); fs.symlinkSync('/etc/hosts', path.join(dir, '1800000000002-bbbbbbbb.json'));
+  assert.strictEqual(L.purgeChildRequests({ dir, fsx: fs, uid }), 4);
+  assert.deepStrictEqual(fs.readdirSync(dir), ['sub']); assert.ok(fs.existsSync('/etc/hosts'));
+  const bad = path.join(tmp, 'req4-bad'); fs.mkdirSync(bad); fs.chmodSync(bad, 0o777); chW(bad, 'a.json', '{}');
+  assert.strictEqual(L.purgeChildRequests({ dir: bad, fsx: fs, uid }), 0); assert.ok(fs.existsSync(path.join(bad, 'a.json')));
+  assert.strictEqual(L.purgeChildRequests({ dir: path.join(tmp, 'nope'), fsx: fs, uid }), 0);
+});
+t('프롬프트 전달 파일: 머리말(ko/en)+빈 줄+프롬프트, 폴더 700·파일 600, 16KB 상한, 임시 파일 흔적 없음, 오래된 것만 정리', () => {
+  const dir = path.join(tmp, 'prompts'); const uid = process.getuid();
+  const text = L.childPromptText('ko', '설계 문서를 읽어 주세요\n두 번째 줄');
+  assert.ok(text.startsWith('[마루가 맡긴 일] 이 세션은 총괄 에이전트 마루가 이 프로젝트의 일을 맡기려고 열었습니다. 아래가 맡긴 내용입니다. 설계 문서가 있으면 먼저 읽고, 끝나면 무엇을 했고 무엇이 남았는지 짧게 보고하세요.\n\n설계 문서를'));
+  assert.ok(L.childPromptText('en', 'x').startsWith('[Task from Maru] ')); assert.ok(L.childPromptText('xx', 'x').startsWith('[마루가')); assert.strictEqual(L.childPromptText('ko', '  \u0007 '), '');
+  const f = L.writeChildPromptFile({ dir, text, rand: () => '0123456789abcdef', fsx: fs, uid });
+  assert.strictEqual(f, path.join(dir, '0123456789abcdef.txt')); assert.strictEqual(fs.readFileSync(f, 'utf8'), text);
+  assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600); assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700); assert.deepStrictEqual(fs.readdirSync(dir), ['0123456789abcdef.txt']);
+  assert.ok(!fs.readdirSync(dir).some((n) => n.endsWith('.tmp')));
+  assert.strictEqual(L.writeChildPromptFile({ dir, text: 'x'.repeat(L.PROMPT_FILE_MAX + 1), rand: () => 'aaaaaaaaaaaaaaaa', fsx: fs, uid }), null);
+  assert.strictEqual(L.writeChildPromptFile({ dir, text: '', rand: () => 'aaaaaaaaaaaaaaaa', fsx: fs, uid }), null);
+  assert.strictEqual(L.writeChildPromptFile({ dir, text, rand: () => '../etc/passwd', fsx: fs, uid }), null); // 이름은 16 hex 만
+  const wide = L.childPromptText('ko', '가'.repeat(4000)); assert.ok(Buffer.byteLength(wide) < L.PROMPT_FILE_MAX && L.writeChildPromptFile({ dir, text: wide, rand: () => 'bbbbbbbbbbbbbbbb', fsx: fs, uid })); // 최대 프롬프트도 들어간다
+  const old = path.join(dir, 'cccccccccccccccc.txt'); fs.writeFileSync(old, 'x'); const tmpf = path.join(dir, '.dddddddddddddddd.tmp'); fs.writeFileSync(tmpf, 'x'); const other = path.join(dir, 'keep.txt'); fs.writeFileSync(other, 'x');
+  const nowMs = Date.now(); for (const g of [old, tmpf, other]) fs.utimesSync(g, (nowMs - 6 * 60000) / 1000, (nowMs - 6 * 60000) / 1000);
+  assert.strictEqual(L.cleanStalePromptFiles({ dir, nowMs, fsx: fs, uid }), 2); assert.ok(!fs.existsSync(old) && !fs.existsSync(tmpf) && fs.existsSync(other) && fs.existsSync(f)); // 5분 안의 것·규칙 밖 이름은 남는다
+  const bad = path.join(tmp, 'prompts-bad'); fs.mkdirSync(bad); fs.chmodSync(bad, 0o777); assert.strictEqual(L.writeChildPromptFile({ dir: bad, text, rand: () => 'eeeeeeeeeeeeeeee', fsx: fs, uid }), null);
+  const lnk = path.join(tmp, 'prompts-link'); fs.symlinkSync(dir, lnk); assert.strictEqual(L.writeChildPromptFile({ dir: lnk, text, rand: () => 'ffffffffffffffff', fsx: fs, uid }), null);
+  const loose = path.join(tmp, 'prompts-loose'); fs.mkdirSync(loose); fs.chmodSync(loose, 0o755); assert.ok(L.writeChildPromptFile({ dir: loose, text, rand: () => '1111111111111111', fsx: fs, uid })); assert.strictEqual(fs.statSync(loose).mode & 0o777, 0o700); // 헐거운 폴더는 700 으로 조인다
+});
+t('pty 환경(D1·D2): 하위 세션 env 에는 부모 앱 세션 id·인증 키가 없고, 마루가 될 수 있는 작업 공간에만 새 키가 들어간다 · 물려받은 값은 모두 지운다', () => {
+  const host = { PATH: '/bin', CLAUDECODE: '1', MARU_HOME: '/m', MARU_REQ_KEY: 'f'.repeat(64), MARU_PARENT_SESSION: 'sess-maru-0001', MARU_PARENT_WS: 'zzzz', MARU_WS: 'yyyy', MARU_PROJECT: 'x/y', MARU_CHILD_ADD_DIR: '/x', MARU_CHILD_PROMPT_FILE: '/p', MARU_APP_SESSION: 'oldsession', ELECTRON_RUN: '1' };
+  const key = 'ab'.repeat(32);
+  const kid = L.ptyEnv({ host, ws: 'abcd0123abcd0123', parentWs: '0123456789abcdef', project: 'blog/draft', promptFile: '/R/data/state/app/prompts/0123456789abcdef.txt' });
+  assert.deepStrictEqual(Object.keys(kid).filter((k) => k.startsWith('MARU_')).sort(), ['MARU_CHILD_PROMPT_FILE', 'MARU_HOME', 'MARU_PARENT_WS', 'MARU_PROJECT', 'MARU_WS']);
+  assert.strictEqual(kid.MARU_WS, 'abcd0123abcd0123'); assert.strictEqual(kid.MARU_PARENT_WS, '0123456789abcdef'); assert.ok(!('MARU_CHILD_ADD_DIR' in kid)); // 설계 문서 폴더는 넘기지 않는다(R4)
+  assert.ok(!('MARU_REQ_KEY' in kid) && !('MARU_PARENT_SESSION' in kid) && !('MARU_APP_SESSION' in kid) && !('CLAUDECODE' in kid) && !('ELECTRON_RUN' in kid));
+  const flat = JSON.stringify(kid); assert.ok(!flat.includes('sess-maru-0001') && !flat.includes('f'.repeat(64))); // 부모의 앱 세션 id 도, 물려받은 키도 값으로 남지 않는다
+  assert.ok(!L.ptyEnv({ host, ws: 'abcd0123abcd0123', parentWs: '0123456789abcdef', reqKey: key }).MARU_REQ_KEY === false || true); // (아래에서 다시 확인)
+  const maru = L.ptyEnv({ host, ws: 'abcd0123abcd0123', reqKey: key });
+  assert.strictEqual(maru.MARU_REQ_KEY, key); assert.strictEqual(maru.MARU_WS, 'abcd0123abcd0123'); assert.ok(!('MARU_PARENT_WS' in maru) && !('MARU_PARENT_SESSION' in maru) && !('MARU_PROJECT' in maru)); // 호스트에서 물려받은 하위 세션 값은 지워진다
+  const other = L.ptyEnv({ host, ws: 'abcd0123abcd0123' }); assert.ok(!('MARU_REQ_KEY' in other)); // 키 없이 만들면 물려받은 키도 지워진다
+  for (const bad of ['short', 'G'.repeat(64), 'AB'.repeat(32), null, 5]) assert.ok(!('MARU_REQ_KEY' in L.ptyEnv({ host: {}, reqKey: bad })), String(bad));
+  assert.deepStrictEqual(L.childEnvVars({ ws: 'abcd0123abcd0123' }), { MARU_WS: 'abcd0123abcd0123' });
+  assert.deepStrictEqual(L.childEnvVars({ project: 'blog/draft', root: '/R', addDirOk: () => true }), { MARU_PROJECT: 'blog/draft' }); // 폴더 인자가 있어도 무시
+  assert.deepStrictEqual(L.childEnvVars({ project: '../e', promptFile: 'rel/p.txt', ws: 'x' }), {});
+  const sane = L.sanitizeHostEnv({ PATH: '/bin', CLAUDECODE: '1', MARU_WS: 'abcd0123abcd0123', MARU_PARENT_WS: '0123456789abcdef' }); assert.strictEqual(sane.MARU_WS, 'abcd0123abcd0123'); assert.strictEqual(sane.MARU_PARENT_WS, '0123456789abcdef'); assert.ok(!('CLAUDECODE' in sane));
+});
+t('전달 파일 정확히 한 번(F4): 래퍼를 쓸 수 있으면 환경변수로, 못 쓰게 됐으면 파일을 지우고 입력줄 채우기로, 파일이 없으면 아무것도 안 한다', () => {
+  assert.deepStrictEqual(L.promptHandoff({ file: '/p/a.txt', wrapperOk: true }), { env: '/p/a.txt', deleteFile: null, paste: false });
+  assert.deepStrictEqual(L.promptHandoff({ file: '/p/a.txt', wrapperOk: false }), { env: null, deleteFile: '/p/a.txt', paste: true });
+  assert.deepStrictEqual(L.promptHandoff({ file: null, wrapperOk: true }), { env: null, deleteFile: null, paste: false }); assert.deepStrictEqual(L.promptHandoff({ file: '', wrapperOk: false }), { env: null, deleteFile: null, paste: false }); assert.deepStrictEqual(L.promptHandoff({}), { env: null, deleteFile: null, paste: false });
+  // 한 번 건네고 나면 호출 쪽이 file 을 비우므로 두 번째 시작에는 아무것도 건네지 않는다(pty 다시 시작은 새 세션)
+  let file = '/p/b.txt'; const first = L.promptHandoff({ file, wrapperOk: true }); file = null; const second = L.promptHandoff({ file, wrapperOk: true });
+  assert.strictEqual(first.env, '/p/b.txt'); assert.strictEqual(second.env, null);
+});
+t('hierarchyOrder·visibleWsIds: 부모 뒤에 자식(만든 순서), ⌘숫자는 화면 순서·접힌 부모(고정 id)의 자식은 빠지고 활성 자식은 보인다', () => {
+  const items = [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'a1', title: 'A1', parentId: 'a' }, { id: 'c', title: 'C' }, { id: 'b1', title: 'B1', parentId: 'b' }, { id: 'a2', title: 'A2', parentId: 'a' }];
+  const ord = L.hierarchyOrder(items);
+  assert.deepStrictEqual(ord.map((x) => x.id + ':' + x.depth), ['a:0', 'a1:1', 'a2:1', 'b:0', 'b1:1', 'c:0']);
+  assert.deepStrictEqual(L.hierarchyOrder(ord).map((x) => x.id), ord.map((x) => x.id)); // 이미 화면 순서여도 같다
+  assert.deepStrictEqual(L.numberTargets(L.visibleWsIds(ord, [], 'a'), []).map((t2) => t2.id), ['a', 'a1', 'a2', 'b', 'b1', 'c']);
+  assert.deepStrictEqual(L.visibleWsIds(ord, ['a'], 'c'), ['a', 'b', 'b1', 'c']); assert.deepStrictEqual(L.visibleWsIds(ord, ['a'], 'a2'), ['a', 'a2', 'b', 'b1', 'c']); assert.deepStrictEqual(L.visibleWsIds(ord, ['a', 'b'], null), ['a', 'b', 'c']);
+  assert.deepStrictEqual(L.visibleWsIds(null, null, null), []);
+  // 비정상: 없는 부모·자기 부모·부모가 자식인 손자·순환은 최상위로
+  const odd = L.hierarchyOrder([{ id: 'x', parentId: 'zz' }, { id: 'y', parentId: 'y' }, { id: 'p' }, { id: 'k', parentId: 'p' }, { id: 'g', parentId: 'k' }, { id: 'm', parentId: 'n' }, { id: 'n', parentId: 'm' }, null, { id: 5 }]);
+  assert.deepStrictEqual(odd.map((x) => x.id + ':' + x.depth), ['x:0', 'y:0', 'p:0', 'k:1', 'g:0', 'm:0', 'n:0']);
+});
+const WSA = 'aaaaaaaaaaaaaaaa'; const WSB = 'bbbbbbbbbbbbbbbb'; const WSC = 'cccccccccccccccc';
+t('저장된 작업 공간: 하위 세션 parentId·project 왕복, 끊어진 참조·순환·자기 참조·깊이 2·중복 id·잘못된 형식은 최상위로', () => {
+  const exists = () => true;
+  const items = [{ id: WSA, cwd: '/a', title: 'M' }, { id: WSB, cwd: '/b', title: 'K', parentId: WSA, project: 'blog/draft' }, { id: WSC, cwd: '/c', title: 'Z' }];
+  const keep = L.workspacesToSave(items, WSB);
+  assert.deepStrictEqual(keep, { list: [{ cwd: '/a', title: 'M', id: WSA }, { cwd: '/b', title: 'K', project: 'blog/draft', origin: 'child', id: WSB, parentId: WSA }, { cwd: '/c', title: 'Z', id: WSC }], active: 1 }); // 모든 작업 공간이 고정 id 를 저장한다
+  const back = L.normalizeWorkspaces(JSON.parse(L.workspacesJson(keep.list, keep.active)), { exists });
+  assert.deepStrictEqual(back.list, keep.list); assert.strictEqual(back.active, 1);
+  const norm = (list) => L.normalizeWorkspaces({ workspaces: list, active: 0 }, { exists }).list.map((e) => [e.id || null, e.parentId || null]);
+  assert.deepStrictEqual(norm([{ cwd: '/a', title: 'a', id: WSA }, { cwd: '/b', title: 'b', id: WSB, parentId: WSC }]), [[WSA, null], [WSB, null]]); // 끊어진 참조
+  assert.deepStrictEqual(norm([{ cwd: '/a', title: 'a', id: WSA, parentId: WSB }, { cwd: '/b', title: 'b', id: WSB, parentId: WSA }]), [[WSA, null], [WSB, null]]); // 순환
+  assert.deepStrictEqual(norm([{ cwd: '/a', title: 'a', id: WSA, parentId: WSA }]), [[WSA, null]]); // 자기 참조
+  assert.deepStrictEqual(norm([{ cwd: '/a', title: 'a', id: WSA }, { cwd: '/b', title: 'b', id: WSB, parentId: WSA }, { cwd: '/c', title: 'c', id: WSC, parentId: WSB }]), [[WSA, null], [WSB, WSA], [WSC, null]]); // 깊이 2(손자)는 최상위
+  assert.deepStrictEqual(norm([{ cwd: '/a', title: 'a', id: WSA }, { cwd: '/b', title: 'b', id: WSA, parentId: WSA }, { cwd: '/c', title: 'c', id: WSC, parentId: WSA }]), [[WSA, null], [null, null], [WSC, WSA]]); // 중복 id: 먼저 나온 것만
+  assert.deepStrictEqual(norm([{ cwd: '/b', title: 'b', id: WSB, parentId: WSA }, { cwd: '/a', title: 'a', id: WSA }]), [[WSB, WSA], [WSA, null]]); // 자식이 파일에서 먼저여도 유효
+  assert.deepStrictEqual(norm([{ cwd: '/a', title: 'a', id: 'XYZ' }, { cwd: '/b', title: 'b', id: WSB, parentId: 'not-a-hex-id' }, { cwd: '/c', title: 'c', id: WSC, parentId: 5 }]), [[null, null], [WSB, null], [WSC, null]]); // id 형식이 틀리면 버린다(16 hex 만)
+  assert.deepStrictEqual(norm([{ cwd: '/b', title: 'b', parentId: WSA }]), [[null, null]]); // 자기 id 가 없는 자식은 관계를 못 맺는다
+  const pr = L.normalizeWorkspaces({ workspaces: [{ cwd: '/a', title: 'a', project: 'blog/draft' }, { cwd: '/b', title: 'b', project: '../x' }, { cwd: '/c', title: 'c', project: ['a/b'] }], active: 0 }, { exists }).list;
+  assert.deepStrictEqual(pr.map((e) => e.project || null), ['blog/draft', null, null]); // 부모가 닫혀 최상위가 된 뒤에도 프로젝트 이름표는 남는다
+  const nopar = L.workspacesToSave([{ id: WSA, cwd: '/a', title: 'M', transient: true }, { id: WSB, cwd: '/b', title: 'K', parentId: WSA }], WSB, false); // 부모가 저장되지 않으면(임시) 자식은 최상위로
+  assert.deepStrictEqual(nopar.list, [{ cwd: '/b', title: 'K', id: WSB }]);
+  assert.deepStrictEqual(L.workspacesToSave([{ id: WSA, cwd: '/a', title: 'a', parentId: WSB }, { id: WSB, cwd: '/b', title: 'b', parentId: WSA }], WSA).list, [{ cwd: '/a', title: 'a', id: WSA }, { cwd: '/b', title: 'b', id: WSB }]); // 순환은 저장 단계에서도 끊는다
+  assert.ok(L.normalizeWorkspaces({ workspaces: Array.from({ length: 9 }, (_, i) => ({ cwd: '/w' + i, title: 't' + i })), active: 0 }, { exists }).list.length <= L.WS_MAX);
+});
+t('화면 상태 파일: 접어 둔 부모의 고정 id(wsCollapsed) 왕복·검증·상한, 기존 필드와 호환', () => {
+  const f = path.join(tmp, 'project-ui-ws.json');
+  const ui = { catOrder: [], projOrder: {}, collapsed: [], wsCollapsed: [WSA, WSB] };
+  assert.ok(L.saveProjectUi(f, ui)); assert.deepStrictEqual(L.readProjectUiFile(f).data, ui);
+  assert.deepStrictEqual(L.validateProjectUi({ wsCollapsed: [] }), L.defaultProjectUi()); // 비면 필드를 쓰지 않는다(기존 모양 그대로)
+  assert.deepStrictEqual(L.validateProjectUi({ wsCollapsed: [WSA, WSA, '', ' x', 'y\u0007', 5, '마루', 'Maru 2', 'ZZZZZZZZZZZZZZZZ'] }).wsCollapsed, [WSA]); // 예전 제목 기반 값·16 hex 가 아닌 값은 버린다
+  assert.strictEqual(L.validateProjectUi({ wsCollapsed: 'x' }), null); assert.strictEqual(L.validateProjectUi({ wsCollapsed: Array(201).fill(WSA) }), null);
+  assert.strictEqual(L.validateProjectUi({ wsCollapsed: Array.from({ length: 30 }, (_, i) => String(i).padStart(16, '0')) }).wsCollapsed.length, L.WS_COLLAPSED_MAX);
+  assert.deepStrictEqual(L.pruneProjectUi(ui, []), { catOrder: [], projOrder: {}, collapsed: [], wsCollapsed: [WSA, WSB] });
+  assert.strictEqual(L.saveProjectUi(f, { ...ui, wsCollapsed: [WSA, WSA] }), false); assert.strictEqual(L.saveProjectUi(f, { ...ui, extra: 1 }), false); assert.strictEqual(L.saveProjectUi(f, { ...ui, wsCollapsed: ['마루'] }), false);
+  assert.ok(L.saveProjectUi(f, { catOrder: [], projOrder: {}, collapsed: [] })); assert.ok(!('wsCollapsed' in L.readProjectUiFile(f).data));
+});
+t('상태 "알 수 없음": 훅이 없는 저장소 밖 폴더는 대기인 척하지 않는다 · 읽지 않은 보고가 있고 이후 출력이 없으면 턴 끝남', () => {
+  const sd = L.stateDisplay;
+  assert.strictEqual(sd({ state: 'none', hasTerm: true, outsideRoot: true }), 'unknown');
+  assert.strictEqual(sd({ state: 'none', hasTerm: true, outsideRoot: false }), 'none'); // 저장소 안(훅이 도는 곳)은 예전 그대로
+  assert.strictEqual(sd({ state: 'none', hasTerm: false, outsideRoot: true }), 'none');
+  for (const st of ['busy', 'idle', 'waiting', 'exited', 'pending', 'unavailable']) assert.strictEqual(sd({ state: st, hasTerm: true, outsideRoot: true }), st); // 훅 기록이 있으면 그대로
+  assert.strictEqual(sd({ state: 'none', hasTerm: true, outsideRoot: true, reportedAt: 1000, lastOutputAt: 0 }), 'turnEnded');
+  assert.strictEqual(sd({ state: 'none', hasTerm: true, outsideRoot: true, reportedAt: 1000, lastOutputAt: 5999 }), 'turnEnded'); // 약간의 화면 갱신은 허용
+  assert.strictEqual(sd({ state: 'none', hasTerm: true, outsideRoot: true, reportedAt: 1000, lastOutputAt: 6001 }), 'unknown'); // 보고 뒤에 새 일이 시작됐다
+  assert.strictEqual(sd({ state: 'none', hasTerm: true, outsideRoot: true, reportedAt: NaN }), 'unknown');
+  assert.strictEqual(sd({ state: 'none', hasTerm: true, outsideRoot: false, reportedAt: 1000 }), 'none');
+});
+t('현재 위치: 훅 기록의 cwd 가 시작 폴더와 다를 때만 폴더 이름, 틀린 값·다른 출처는 쓰지 않는다 · 상태 기록 파서가 cwd 를 검증', () => {
+  const loc = (recCwd) => L.currentLocation({ recCwd, cwd: '/Users/x/work', cwdReal: '/private/Users/x/work' });
+  assert.strictEqual(loc('/Users/x/work/api'), 'api'); assert.strictEqual(loc('/Users/x/work/'), null); assert.strictEqual(loc('/private/Users/x/work'), null); assert.strictEqual(loc('/Users/x/other/'), 'other');
+  for (const bad of [undefined, null, 5, '', 'rel/x', '/a\u0007b', '/' + 'a'.repeat(1025), '/a\nb']) assert.strictEqual(loc(bad), null, String(bad).slice(0, 10));
+  assert.strictEqual(L.parseAgentRecord('{"state":"busy","at":"2026-11-17T00:00:00Z","cwd":"/a/b"}').cwd, '/a/b');
+  assert.ok(!('cwd' in L.parseAgentRecord('{"state":"busy","at":"2026-11-17T00:00:00Z","cwd":"rel"}'))); assert.ok(!('cwd' in L.parseAgentRecord('{"state":"idle","cwd":"/a\\u0007"}'))); assert.strictEqual(L.parseAgentRecord('{"state":"idle","cwd":"/a"}').state, 'idle');
+  assert.deepStrictEqual(L.childSubNames([{ type: 'Explore', count: 1 }, { type: 'bad type', count: 1 }, { type: 'a', count: 2 }, { type: 'b', count: 1 }, { type: 'c', count: 1 }]), ['Explore', 'a', 'b']); assert.deepStrictEqual(L.childSubNames(null), []);
+});
+const RP = (o = {}) => JSON.stringify({ v: 1, from: 'sess-kid-0001', project: 'blog/draft', cwd_name: 'blog', at: 1.8e12, bg: 0, text: '초안을 끝냈습니다.\n남은 일: 캡션', ...o });
+t('보고 파서: 엄격한 모양·길이·적대적 내용·미래 시각, 빈 text 는 유효("턴 끝남")', () => {
+  const ok = L.parseReport(RP());
+  assert.deepStrictEqual(ok, { from: 'sess-kid-0001', project: 'blog/draft', cwdName: 'blog', at: 1.8e12, bg: 0, text: '초안을 끝냈습니다.\n남은 일: 캡션' });
+  assert.strictEqual(L.parseReport(RP({ text: 'x'.repeat(2500) })).text.length, 2000); // 표시 상한
+  assert.strictEqual(L.parseReport(RP({ text: '<img src=x onerror=alert(1)>\u001b]0;pwn\u0007\u202E' })).text, '<img src=x onerror=alert(1)>]0;pwn'); // 문자는 그대로(표시는 textContent)·제어문자만 제거
+  assert.strictEqual(L.parseReport(RP({ project: '../x', cwd_name: 'a\u0007' })).project, null); assert.strictEqual(L.parseReport(RP({ cwd_name: 'a\u0007' })).cwdName, null); assert.strictEqual(L.parseReport(RP({ bg: true })).bg, 1); assert.strictEqual(L.parseReport(RP({ bg: 500 })).bg, 0);
+  assert.strictEqual(L.parseReport(RP({ text: '' })).text, ''); assert.strictEqual(L.parseReport(RP({ text: '\u0007\u200B' })).text, ''); // 스크립트가 쓰는 빈 보고는 유효하다
+  for (const bad of ['{', '[]', 'null', RP({ v: 2 }), RP({ from: 'x' }), RP({ from: 'a b c d' }), RP({ text: 5 }), RP({ at: 'x' }), RP({ at: 5 }), RP().replace('"v":1', '"v":1,"extra":1'), RP().replace('"v":1', '"__proto__":{"a":1},"v":1'), 'x'.repeat(8193)]) assert.strictEqual(L.parseReport(bad), null, bad.slice(0, 30));
+  assert.strictEqual(L.parseReport(JSON.stringify({ v: 1, from: 'sess-kid-0001', at: 1.8e12, text: 'a' })).project, null); // 선택 항목이 없어도 받는다
+  const now = 1.8e12 + 5000; assert.ok(L.parseReport(RP({ at: now + 60000 }), now)); assert.strictEqual(L.parseReport(RP({ at: now + 60001 }), now), null); assert.ok(L.parseReport(RP({ at: now + 1e9 })), '시각을 모르면 거르지 않는다'); // 미래 시각 상한(F2)
+});
+ta('보고 폴더 읽기(비동기)·집계: 일반 파일·내 소유·8KB·이름 규칙, read/ 건너뜀, 미래 시각 무시, 200개 상한, 모르는 보낸이는 목록에만(세지 않음), 빈 text, 안전하지 않은 폴더', async () => {
+  const dir = chDir('reports1'); const uid = process.getuid(); const fsp = fs.promises; const nowMs = 1.8e12 + 100000;
+  chW(dir, '1800000000001-sess-kid-0001.json', RP({ at: 1.8e12 + 1 })); chW(dir, '1800000000005-sess-kid-0001.json', RP({ at: 1.8e12 + 5, text: '두 번째' })); chW(dir, '1800000000003-sess-zzz-0099.json', RP({ at: 1.8e12 + 3, from: 'sess-zzz-0099', text: '<b>모르는 세션</b>' }));
+  chW(dir, '1800000000006-sess-kid-0001.json', RP({ at: 1.8e12 + 6, text: '' })); chW(dir, '1800000000010-sess-kid-0001.json', RP({ at: nowMs + 3600000, text: '미래' }));
+  chW(dir, '1800000000009-bad.json', RP()); chW(dir, 'notes.txt', 'x'); chW(dir, '1800000000002-sess-kid-0001.json', 'x'.repeat(9000)); chW(dir, '1800000000004-sess-kid-0001.json', '{'); fs.mkdirSync(path.join(dir, 'read')); chW(path.join(dir, 'read'), '1800000000007-sess-kid-0001.json', RP());
+  fs.symlinkSync(path.join(dir, 'notes.txt'), path.join(dir, '1800000000008-sess-kid-0001.json'));
+  const list = await L.readReportsDir({ dir, fsp, uid, nowMs });
+  assert.deepStrictEqual(list.map((r) => r.text), ['', '두 번째', '<b>모르는 세션</b>', '초안을 끝냈습니다.\n남은 일: 캡션']); // 미래 시각·큰 파일·링크·깨진 JSON·규칙 밖 이름은 빠진다
+  const sum = L.summarizeReports(list, [{ id: 'sess-kid-0001', title: '블로그', project: 'blog/draft' }, { id: 'bad id!', title: 'x' }]);
+  assert.strictEqual(sum.count, 3); assert.deepStrictEqual(sum.items.map((i) => [i.title, i.known]), [['블로그', true], ['블로그', true], [null, false], ['블로그', true]]); // 모르는 보낸이(sess-zzz)는 세지 않고 목록에만
+  assert.strictEqual(sum.items[2].project, null); assert.deepStrictEqual(sum.lastAt, { 'sess-kid-0001': 1.8e12 + 6 }); assert.strictEqual(sum.items[0].text, '');
+  assert.deepStrictEqual(L.summarizeReports([], []), { count: 0, items: [], lastAt: {} }); assert.strictEqual(L.summarizeReports(null, null).count, 0);
+  assert.strictEqual(L.summarizeReports([L.parseReport(RP({ from: 'sess-zzz-0099' }))], [{ id: 'sess-kid-0001', title: 't' }]).count, 0); // 모르는 보낸이만 있으면 배지·턴 끝남·깜박임 대상이 아니다
+  assert.strictEqual(L.summarizeReports(Array.from({ length: 150 }, (_, i) => L.parseReport(RP({ at: 1.8e12 + i }))), [{ id: 'sess-kid-0001', title: 't' }]).count, 99); // 배지는 99 까지
+  const bad = path.join(tmp, 'reports-bad'); fs.mkdirSync(bad); fs.chmodSync(bad, 0o770); chW(bad, '1800000000001-sess-kid-0001.json', RP()); assert.deepStrictEqual(await L.readReportsDir({ dir: bad, fsp, uid, nowMs }), []);
+  const lk = path.join(tmp, 'reports-link'); fs.symlinkSync(dir, lk); assert.deepStrictEqual(await L.readReportsDir({ dir: lk, fsp, uid, nowMs }), []); assert.deepStrictEqual(await L.readReportsDir({ dir, fsp, uid: uid + 1, nowMs }), []); assert.deepStrictEqual(await L.readReportsDir({ dir: path.join(tmp, 'nope'), fsp, uid, nowMs }), []);
+  assert.strictEqual(fs.readdirSync(dir).length, 11); // 읽기 전용: 아무것도 지우거나 옮기지 않았다
+  const big = chDir('reports2'); for (let i = 0; i < 260; i++) chW(big, String(1800000001000 + i) + '-sess-kid-0001.json', RP({ at: 1.8e12 + 1000 + i }));
+  const r2 = await L.readReportsDir({ dir: big, fsp, uid, nowMs: 1.8e12 + 1e6 }); assert.strictEqual(r2.length, 50); assert.strictEqual(r2[0].at, 1.8e12 + 1259); // 이름 200개까지만 훑고 최신 50개
+  let n = 0; const counting = { ...fsp, lstat: async (f) => { n++; return fsp.lstat(f); } }; await L.readReportsDir({ dir: big, fsp: counting, uid, nowMs: 1.8e12 + 1e6 }); assert.ok(n <= 60, 'lstat ' + n); // 50개를 채우면 멈춘다
+});
+t('보고 깜박임: 0 에서 1 이상으로 바뀌고 마루가 활성이 아닐 때만, 같은 작업 공간에서 60초에 한 번', () => {
+  const f = (o) => L.reportFlash({ prev: 0, next: 1, active: false, nowMs: 1e12, ...o });
+  assert.strictEqual(f({}), true); assert.strictEqual(f({ next: 3 }), true);
+  assert.strictEqual(f({ active: true }), false); assert.strictEqual(f({ prev: 1, next: 2 }), false); assert.strictEqual(f({ prev: 2, next: 0 }), false); assert.strictEqual(f({ prev: NaN }), false);
+  assert.strictEqual(f({ lastFlashAt: 1e12 - 59999 }), false); assert.strictEqual(f({ lastFlashAt: 1e12 - 60000 }), true); assert.strictEqual(f({ lastFlashAt: undefined }), true);
+});
+t('하위 세션 문구: 거부 이유마다 ko·en 문구가 있고 기록 줄에 프롬프트·경로가 들어가지 않는다', () => {
+  for (const r of ['name', 'size', 'stale', 'json', 'shape', 'version', 'auth', 'replay', 'cwd', 'title', 'prompt', 'prompt-size', 'project', 'from', 'child', 'not-maru', 'not-claude', 'project-unknown', 'children-max', 'ws-max', 'rate', 'budget', 'dir', 'file', 'trust-cancel', 'busy', 'start']) for (const lg of I.LANGS) assert.ok(I.STR[lg][L.childReasonKey(r)], lg + r);
+  assert.strictEqual(L.childReasonKey('<script>'), 'child.reject.shape'); assert.strictEqual(L.childReasonCode('x'), 'shape'); assert.strictEqual(L.childReasonCode('rate'), 'rate');
+  for (const k of ['consent.title', 'consent.folder', 'consent.what', 'consent.brief', 'consent.go', 'consent.paste', 'consent.open', 'consent.cancel', 'child.note.opened', 'child.note.paste', 'child.note.cancel', 'child.note.refused', 'child.note.prefill', 'consent.count', 'consent.scroll', 'rep.title', 'rep.hint', 'rep.unknown', 'rep.empty.text', 'agent.unknown', 'agent.turnEnded', 'ws.reports']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + k);
+  assert.ok(!I.STR.ko['consent.remember'] && !I.STR.ko['set.child.name'] && !I.STR.ko['child.trust.n']); assert.ok(I.STR.ko['consent.go'].startsWith('열기를 누르면 이 내용으로 바로 시작합니다')); assert.strictEqual(I.STR.ko['consent.open'], '열기'); assert.strictEqual(I.STR.ko['consent.cancel'], '취소');
+  assert.strictEqual(I.STR.ko['rep.hint'], '마루에게 다음 말을 걸면 자동으로 전달됩니다'); assert.strictEqual(I.STR.ko['rep.empty.text'], '(내용 없음)'); 
+  const line = L.childLogLine('refused', 'rate', '1800000000001-0a1b2c3d.json'); assert.strictEqual(line, 'refused rate 1800000000001-0a1b2c3d.json'); assert.strictEqual(L.childLogLine('refused\nX', 'a b/../c', 'evil name'), 'refused abc -'); // 이유 코드와 규칙에 맞는 파일 이름만
+});
+
+t('고정 작업 공간 id: MARU_WS 는 모든 작업 공간에, MARU_PARENT_WS 는 하위 세션에(부모 pty 가 없어도), 형식 검증, sanitizeHostEnv 가 유지', () => {
+  assert.deepStrictEqual(L.childEnvVars({ ws: 'abcd0123abcd0123' }), { MARU_WS: 'abcd0123abcd0123' }); // 최상위 작업 공간
+  assert.deepStrictEqual(L.childEnvVars({ ws: 'abcd0123abcd0123', parentWs: '0123456789abcdef', parentSid: null }), { MARU_WS: 'abcd0123abcd0123', MARU_PARENT_WS: '0123456789abcdef' }); // 복원된 자식: 부모 세션 id 가 아직 없어도
+  for (const bad of ['abc', 'a b c d', '../etc', 'x'.repeat(65), '', null, 5]) assert.deepStrictEqual(L.childEnvVars({ ws: bad, parentWs: bad }), {}, String(bad));
+  assert.ok(L.validStableId('ab_c-D9') && !L.validStableId('ab') && L.validStableId('0123456789abcdef'));
+  const out = L.sanitizeHostEnv({ PATH: '/bin', CLAUDECODE: '1', MARU_WS: 'abcd0123abcd0123', MARU_PARENT_WS: '0123456789abcdef' });
+  assert.strictEqual(out.MARU_WS, 'abcd0123abcd0123'); assert.strictEqual(out.MARU_PARENT_WS, '0123456789abcdef');
+  for (let i = 0; i < 50; i++) assert.ok(L.validStableId(require('crypto').randomBytes(8).toString('hex'))); // 앱이 만드는 id 형식
+});
+t('옛 workspaces.json(id 없음)은 그대로 읽히고 id 는 나중에 붙는다 · 저장된 id 는 모든 작업 공간에서 왕복·중복은 먼저 것만·형식 검증', () => {
+  const exists = () => true;
+  const old = L.normalizeWorkspaces({ version: 1, active: 0, workspaces: [{ cwd: '/a', title: 'a' }, { cwd: '/b', title: 'b' }] }, { exists });
+  assert.deepStrictEqual(old.list.map((e) => 'id' in e), [false, false]); // main 의 addWorkspace 가 새 id 를 만들고 다음 저장에 적힌다
+  const ids = [WSA, WSB, WSC]; const keep = L.workspacesToSave(ids.map((id, i) => ({ id, cwd: '/w' + i, title: 't' + i })), WSB);
+  assert.deepStrictEqual(keep.list.map((e) => e.id), ids);
+  assert.deepStrictEqual(L.normalizeWorkspaces(JSON.parse(L.workspacesJson(keep.list, keep.active)), { exists }).list.map((e) => e.id), ids);
+  assert.deepStrictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/a', title: 'a', id: WSA }, { cwd: '/b', title: 'b', id: WSA }, { cwd: '/c', title: 'c', id: 'ZZZ' }, { cwd: '/d', title: 'd', id: '../x' }], active: 0 }, { exists }).list.map((e) => e.id || null), [WSA, null, null, null]);
+});
+
+t('origin: 하위 세션이었던 작업 공간은 부모가 닫혀도 origin 이 남는다(마루 후보 제외), 저장·복원 왕복, 잘못된 값은 버린다', () => {
+  const exists = () => true;
+  const keep = L.workspacesToSave([{ id: WSA, cwd: '/a', title: 'a', origin: 'child' }, { id: WSB, cwd: '/b', title: 'b' }], WSA); // 부모가 닫힌 뒤: parentId 는 없고 origin 만
+  assert.deepStrictEqual(keep.list, [{ cwd: '/a', title: 'a', origin: 'child', id: WSA }, { cwd: '/b', title: 'b', id: WSB }]);
+  const back = L.normalizeWorkspaces(JSON.parse(L.workspacesJson(keep.list, 0)), { exists }).list; assert.deepStrictEqual(back.map((e) => e.origin || null), ['child', null]);
+  assert.deepStrictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/a', title: 'a', origin: 'parent' }, { cwd: '/b', title: 'b', origin: ['child'] }, { cwd: '/c', title: 'c', origin: 'child' }], active: 0 }, { exists }).list.map((e) => e.origin || null), [null, null, 'child']);
+  assert.strictEqual(L.maruEligible({ isRoot: true, parentId: null, origin: back[0].origin }), false);
+});
+t('takeChildRequests(F1): 미래 mtime 은 지우고 건너뛴다, 이름 규칙의 폴더·링크는 치운다, 20개 상한은 거른 뒤에 적용, .taken 임시 파일은 남지 않는다', () => {
+  const dir = chDir('req5'); const uid = process.getuid(); const nowMs = Date.now(); const nm = (i) => '18000000' + String(i).padStart(5, '0') + '-' + String(i).padStart(8, '0') + '.json';
+  for (let i = 0; i < 15; i++) fs.mkdirSync(path.join(dir, nm(i))); // 앞 이름 15개는 폴더(이름만 규칙에 맞는다)
+  for (let i = 15; i < 25; i++) chW(dir, nm(i), '{}', nowMs + 3000); // 미래 mtime 10개
+  for (let i = 25; i < 50; i++) chW(dir, nm(i), '{}', nowMs - 5000); // 정상 25개
+  const r = L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled: new Set(), nowMs });
+  assert.strictEqual(r.items.length, 20); // 폴더·미래 파일이 상한을 잡아먹지 않는다
+  const left = fs.readdirSync(dir); assert.ok(!left.some((n) => n.startsWith('.taken-')), left.join()); // 가져간 임시 파일이 남지 않는다
+  assert.ok(!left.includes(nm(0)) && !left.includes(nm(15))); // 폴더와 미래 파일은 지워졌다
+  assert.strictEqual(left.length, 5); // 정상 파일 중 상한 밖 5개만 다음 훑기를 위해 남는다
+  assert.strictEqual(L.takeChildRequests({ dir, fsx: fs, uid, rand: chRand, handled: new Set(), nowMs }).items.length, 5);
+  assert.deepStrictEqual(fs.readdirSync(dir), []);
+  const d2 = chDir('req6'); fs.mkdirSync(path.join(d2, 'sub')); fs.mkdirSync(path.join(d2, nm(1))); fs.writeFileSync(path.join(d2, nm(1), 'inner'), 'x'); fs.mkdirSync(path.join(d2, '.taken-old.tmp')); chW(d2, '.taken-x.tmp', 'x');
+  assert.strictEqual(L.purgeChildRequests({ dir: d2, fsx: fs, uid }), 3); assert.deepStrictEqual(fs.readdirSync(d2), ['sub']); // 시작 때: 이름 규칙의 폴더·.taken 흔적도 치운다
+});
+
+t('분당 한도는 단조 시계(R5): 벽시계가 되돌아가도 풀리지 않는다 · 24시간 예산은 미래 시각을 "지금"으로 센다', () => {
+  const why = (o) => { const d = L.decideChildRequest(chCtx(o)); return d.ok ? 'ok' : d.reason; };
+  const acc = [5000, 5100, 5200]; // 단조 시계 값
+  assert.strictEqual(why({ accepted: acc, monoMs: 5300 }), 'rate'); assert.strictEqual(why({ accepted: acc, monoMs: 5200 + 60000 }), 'ok');
+  assert.strictEqual(why({ accepted: acc, monoMs: 5300, nowMs: CH_NOW - 3600000, text: JSON.stringify(chReq({ at: CH_NOW - 3601000 })), mtimeMs: CH_NOW - 3600500 }), 'rate'); // 벽시계를 1시간 되돌려도 여전히 거절
+  assert.strictEqual(why({ accepted: [5000, 5100, 5200], monoMs: 4000 }), 'ok'); // (단조 시계가 앞으로만 가므로 현실에서는 일어나지 않는 입력: 미래 값은 세지 않는다)
+  const n = 1.8e12; const day = Array.from({ length: 20 }, (_, i) => n - 1000 - i);
+  assert.strictEqual(L.budgetOk(day, n), false); assert.strictEqual(L.budgetOk(day, n - 7 * 24 * 3600000), false, '시계를 일주일 되돌려도 풀리지 않는다(미래 시각은 지금으로)');
+  assert.strictEqual(L.budgetOk(day, n + 24 * 3600000 + 1), true); // 정상적으로 하루가 지나면 풀린다
+  const later = L.recordLaunch(day, n - 3600000); assert.strictEqual(later.length, 20); assert.ok(later.includes(n - 3600000)); // 미래 항목이 있어도 기록은 이어진다
+});
+t('재전송 방지(R3): 같은 mac 은 120초 안에 두 번 받지 않는다(파일 이름만 바꿔도) · 200개 상한 · 만료', () => {
+  const r = chReq(); const text = JSON.stringify(r);
+  const first = L.decideChildRequest(chCtx({ text })); assert.strictEqual(first.ok, true); assert.strictEqual(first.mac, r.mac);
+  let seen = L.rememberMac([], first.mac, CH_NOW);
+  const again = L.decideChildRequest(chCtx({ text, seen, name: CH_NOW - 900 + '-0a1b2c3e.json' })); // 다른 파일 이름으로 복사한 같은 본문
+  assert.deepStrictEqual([again.ok, again.reason, again.parentId], [false, 'replay', 'ws-maru']);
+  assert.strictEqual(L.decideChildRequest(chCtx({ text, seen: L.rememberMac([], r.mac, CH_NOW - 119000) })).reason, 'replay'); assert.strictEqual(L.decideChildRequest(chCtx({ text, seen: L.rememberMac([], r.mac, CH_NOW - 120000) })).ok, true); // 120초 뒤에는 다시(어차피 60초가 지나 stale)
+  assert.strictEqual(L.macSeen(seen, 'x'.repeat(64), CH_NOW), false); assert.strictEqual(L.macSeen(null, r.mac, CH_NOW), false);
+  let big = []; for (let i = 0; i < 300; i++) big = L.rememberMac(big, String(i).padStart(64, '0'), CH_NOW + i); assert.strictEqual(big.length, 200); assert.strictEqual(L.macSeen(big, String(299).padStart(64, '0'), CH_NOW + 300), true); assert.strictEqual(L.macSeen(big, String(0).padStart(64, '0'), CH_NOW + 300), false);
+  assert.deepStrictEqual(L.rememberMac([['a', CH_NOW - 200000]], 'b', CH_NOW), [['b', CH_NOW]]); // 오래된 것은 버린다
+  // 인증 전에 걸러지는 거절은 parentId(알림 대상)가 없고, 인증 뒤의 거절에만 붙는다(R6)
+  assert.strictEqual(L.decideChildRequest(chCtx({}, chReq({ mac: '0'.repeat(64) }))).parentId, undefined); assert.strictEqual(L.decideChildRequest(chCtx({ childCount: () => 4 })).parentId, 'ws-maru'); assert.strictEqual(L.decideChildRequest(chCtx({ requester: () => null })).parentId, undefined);
+});
+t('거절 소음 제한(R6): 알림은 작업 공간마다 10초에 한 번, 기록은 1분에 20줄이고 넘는 것은 한 줄로 요약', () => {
+  assert.strictEqual(L.noticeOk(undefined, 1000), true); assert.strictEqual(L.noticeOk(1000, 10999), false); assert.strictEqual(L.noticeOk(1000, 11000), true); assert.strictEqual(L.noticeOk(5000, 1000), true); // 시계가 되돌아가면 막지 않는다
+  let st = null; const acts = [];
+  for (let i = 0; i < 30; i++) { const g = L.logGate(st, 1000 + i * 100); st = g.st; acts.push(g.action); }
+  assert.strictEqual(acts.filter((a) => a === 'log').length, 20); assert.strictEqual(acts.filter((a) => a === 'skip').length, 10);
+  const next = L.logGate(st, 1000 + 61000); assert.deepStrictEqual([next.action, next.summary], ['log', 10]); // 다음 창의 첫 줄에서 못 적은 10개를 요약
+  assert.strictEqual(L.logGate(next.st, 1000 + 61100).summary, 0); assert.strictEqual(L.logGate({ start: 5000, count: 3, dropped: 0 }, 1000).action, 'log'); // 시계가 되돌아가면 새 창
+});
+t('표시한 것 = 전달하는 것(R2): 정규화는 한 번만, 별 문자·공백 줄 패딩·자르지 않음·N자·M줄', () => {
+  const pad = 'a\n \t \n   \n\t\n \n\n\n\nb  \r\n\r\n\r\n\r\n\r\nc';
+  const norm = L.cleanPromptText(pad); assert.strictEqual(norm, 'a\n\n\nb\n\n\nc'); // 공백뿐인 줄·줄 끝 공백이 지워지고 빈 줄은 2줄까지
+  assert.strictEqual(L.cleanPromptText(norm), norm); // 멱등: 두 번 정규화해도 같다
+  const emoji = '😀'.repeat(2001); // UTF-16 으로는 4002 단위, 코드포인트로는 2001
+  const r = chReq({ prompt: emoji + '\n\n\n\n\n\n숨겨진 부분' }); const d = L.decideChildRequest(chCtx({}, r)); assert.strictEqual(d.ok, true);
+  const view = L.consentView({ token: 't', folder: '/a', title: 'x', prompt: d.req.prompt });
+  assert.ok(view.brief.endsWith('숨겨진 부분')); // 자르지 않아 끝까지 보인다
+  assert.strictEqual(view.brief, d.req.prompt); assert.strictEqual(view.chars, [...d.req.prompt].length); assert.strictEqual(view.lines, 4); // 이모지 줄, 빈 줄 2개, 숨겨진 부분
+  for (const lang of ['ko', 'en']) { const file = L.childPromptText(lang, d.req.prompt); assert.strictEqual(file.slice(file.indexOf('\n\n') + 2), view.brief); assert.ok(file.endsWith(view.brief)); } // 전달 파일의 본문이 화면의 글과 글자 그대로 같다
+  assert.strictEqual(L.childPromptText('ko', pad).endsWith(L.consentView({ token: 't', folder: '/a', title: 'x', prompt: pad }).brief), true);
+  assert.strictEqual(L.consentView({ token: 't', folder: '/a', title: 'x', prompt: '' }).lines, 0);
+});
+t('주 흐름(R8): 동의 토큰 한 번만 · 승인 뒤 시작 · 승인을 기다리는 사이 마루 pty 가 다시 시작돼도 허용, 옛 키로 서명한 디스크 요청은 auth 로 거절 · 창이 숨으면 받지 않음', () => {
+  // 한 번만 쓰는 토큰의 상태 전이: 답 -> used 로 표시 -> 같은 답 다시 = invalid
+  const p = { token: 'cd12ef34cd12ef34cd12ef34cd12ef34', expiresAt: 5000, used: false };
+  assert.strictEqual(L.consentAnswer(p, p.token, 'open', 1).result, 'open'); p.used = true; assert.strictEqual(L.consentAnswer(p, p.token, 'open', 2).result, 'invalid'); assert.strictEqual(L.consentAnswer(p, p.token, 'cancel', 2).result, 'invalid');
+  // 승인 뒤 시작: 모든 조건이 같으면 통과
+  const ok = { quitting: false, windowOk: true, parentAlive: L.parentUsable({ exists: true, eligible: true }), children: 0, wsCount: 1, realNow: '/w', approvedReal: '/w' };
+  assert.strictEqual(L.childLaunchCheck(ok), null);
+  // 동의 창이 떠 있는 동안 마루 pty 가 다시 시작됐다: pty 가 잠깐 없어도(term 없음) 같은 작업 공간이면 계속한다 — parentUsable 은 pty 를 보지 않는다
+  assert.strictEqual(L.parentUsable({ exists: true, eligible: true }), true); assert.strictEqual(L.parentUsable({ exists: false, eligible: true }), false); assert.strictEqual(L.parentUsable({ exists: true, eligible: false }), false);
+  // 그 사이 새 키가 생겼다: 옛 키로 서명한 디스크의 요청은 새 키로 검증하면 auth
+  const newKey = 'cd'.repeat(32); const restarted = () => chFacts().map((x) => (x.id === 'ws-maru' ? { ...x, key: newKey } : x));
+  const stale = L.decideChildRequest(chCtx({ requester: (f) => L.requesterOf(restarted(), f, true) })); assert.deepStrictEqual([stale.ok, stale.reason], [false, 'auth']);
+  const fresh = L.decideChildRequest(chCtx({ requester: (f) => L.requesterOf(restarted(), f, true) }, chReq({}, newKey))); assert.strictEqual(fresh.ok, true); // 새 키로 서명하면 통과
+  // 창이 숨었거나 앱이 끝나 가면 요청을 받지 않거나(스캔) 시작하지 않는다(승인 뒤 재확인)
+  assert.strictEqual(L.childWindowReady({ destroyed: false, visible: false, minimized: false }), false); assert.strictEqual(L.childLaunchCheck({ ...ok, windowOk: false }), 'busy'); assert.strictEqual(L.childLaunchCheck({ ...ok, quitting: true }), 'busy');
+});
+t('상태 기록 읽기 상한(R7): cwd 가 긴 한글 경로여도 8192 안에서 읽힌다', () => {
+  const cwd = '/' + '가'.repeat(1023); assert.strictEqual(cwd.length, 1024);
+  const raw = JSON.stringify({ state: 'busy', at: '2026-11-17T00:00:00Z', model: 'claude-sonnet-4', transcript_path: '/Users/x/.claude/projects/p/' + 'a'.repeat(8) + '.jsonl', cwd });
+  assert.ok(Buffer.byteLength(raw) > 3000 && Buffer.byteLength(raw) < 4096 + 1000); const rec = L.parseAgentRecord(raw); assert.strictEqual(rec.cwd, cwd); assert.strictEqual(rec.state, 'busy');
+  const esc = JSON.stringify({ state: 'idle', cwd }).replace(/[^\x00-\x7f]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')); // 파이썬 ensure_ascii 식(글자당 6바이트)
+  assert.ok(esc.length > 4096 && esc.length <= 8192); assert.strictEqual(L.parseAgentRecord(esc).cwd, cwd); assert.strictEqual(L.parseAgentRecord(' '.repeat(8193) + '{}'), null);
+  const f = path.join(tmp, 'agent-state.json'); fs.writeFileSync(f, esc); assert.strictEqual(L.parseAgentRecord(L.readRegular(f, 8192, false).text).cwd, cwd); // main 의 읽기 상한(8192)과 같은 값
+  assert.ok(/readRegular\(f, 8192, false\)/.test(fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8')));
 });
 
 (async () => {

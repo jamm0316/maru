@@ -434,3 +434,46 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 .meet #meet-text{flex:1 1 auto}
 .lang-note{margin:6px 4px 0}
 .lang-note[hidden]{display:none}
+
+/* 하위 세션(마루가 맡긴 일): 부모 아래 들여쓰기 + 가는 연결선 */
+.ws.kid{margin-left:16px}
+.ws.kid::before{content:'';position:absolute;left:-10px;top:-4px;height:calc(50% + 4px);width:9px;border-left:1px solid #3A2C20;border-bottom:1px solid #3A2C20;border-bottom-left-radius:6px;pointer-events:none}
+.ws.kid:not(.last)::after{content:'';position:absolute;left:-10px;top:50%;bottom:-4px;border-left:1px solid #3A2C20;pointer-events:none}
+.ws .dot.unknown{background:transparent;border:1.5px dotted #8A7A6A}
+.ws .dot.turnEnded{background:#8FCB8F;box-shadow:0 0 0 2px rgba(143,203,143,.28)}
+.ws .st.unknown{color:var(--mute)}.ws .st.turnEnded{color:#8FCB8F}
+.ws .nm{display:flex;align-items:baseline;gap:6px;min-width:0}
+.ws .chip{flex:none;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:15px;padding:0 6px;border-radius:8px;border:1px solid #4A3A2C;color:var(--or2)}
+.ws .l3{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;font-size:11px;color:var(--mute);min-width:0}
+.ws .l3 .loc{color:var(--or2)}.ws .l3 .rep{color:#8FCB8F}.ws .l3.cnote{color:var(--or2)}
+.ws-chev{flex:none;width:18px;align-self:stretch;margin-left:2px;border:0;background:transparent;color:var(--soft);font:inherit;font-size:13px;cursor:pointer;padding:0}
+.ws-chev:hover{color:var(--or)}.ws-chev:focus-visible{outline:2px solid var(--or);outline-offset:-2px;border-radius:6px}
+.ws-badge{flex:none;align-self:center;margin-right:6px;padding:2px 8px;border-radius:10px;border:1px solid var(--or);background:rgba(255,138,42,.14);color:var(--or2);font:inherit;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}
+.ws-badge:hover,.ws-badge:focus-visible{background:rgba(255,138,42,.28);outline:none}
+.ws-badge:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.4)}
+.ws.flash{animation:wsflash 1.2s ease-in-out 5}
+@keyframes wsflash{0%,100%{background:transparent}50%{background:rgba(255,138,42,.22)}}
+@media (prefers-reduced-motion:reduce){.ws.flash{animation:none;background:rgba(255,138,42,.16)}}
+.rep-pop{width:340px;max-width:calc(100vw - 16px);padding:12px;display:flex;flex-direction:column;gap:8px}
+.rep-pop[hidden]{display:none}
+.rep-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.rep-list{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto}
+.rep-item{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+.rep-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;font-size:12px}
+.rep-t{color:var(--mute);font-size:11px}
+.rep-text{font-size:12px;line-height:1.5;color:var(--soft);white-space:pre-wrap;overflow-wrap:anywhere}
+.rep-hint{border-top:1px solid var(--line);padding-top:6px}
+.rep-pop .chip{font-size:10px;padding:0 6px;border-radius:8px;border:1px solid #4A3A2C;color:var(--or2)}
+@media (max-width:1100px){.ws{flex-wrap:wrap}.ws-main{flex:1 1 calc(100% - 22px)}.ws-badge{order:5;margin:0 0 6px 28px}.ws .l3{font-size:10px}}
+/* 하위 세션 동의 창·묻지 않는 폴더 목록 */
+#dlg-consent .dialog{display:flex;flex-direction:column;gap:8px;max-width:620px}
+.cs-k{font-size:11px;letter-spacing:1px;color:var(--mute);margin-top:4px}
+.cs-path{font-family:var(--mono);font-size:12px;color:var(--ink);overflow-wrap:anywhere;word-break:break-all;white-space:normal}
+.cs-what{font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.cs-brief{max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+.cs-scroll{color:var(--or2)}
+#cs-ok:disabled{opacity:.4;cursor:not-allowed}
+.trust-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.trust-item{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.trust-path{font-family:var(--mono);font-size:12px;color:var(--soft);overflow-wrap:anywhere;min-width:0}
+.rep-none{color:var(--mute);font-style:italic}

@@ -65,6 +65,11 @@ contextBridge.exposeInMainWorld('maru', {
     return ipcRenderer.invoke('profile:set', p);
   },
   setCalendar: (on) => ipcRenderer.invoke('calendar:set', on === true),
+  // 하위 세션: 작업 공간 id·불리언만 싣는다. 보고는 읽기 전용 목록(main 이 검증해 보낸 평문)
+  getReports: (id) => ipcRenderer.invoke('reports:get', String(id)),
+  setWsCollapsed: (id, on) => ipcRenderer.invoke('ws:set-collapsed', String(id), on === true),
+  // 동의 창 답: 한 번만 쓰는 토큰과 'open'|'cancel' 만. main 이 토큰·보낸 창을 다시 검증한다
+  answerChildConsent: (token, answer) => ipcRenderer.invoke('child:answer', String(token).slice(0, 64), answer === 'open' ? 'open' : 'cancel'),
   resumePrevious: (id) => ipcRenderer.invoke('ws:resume-prev', String(id)),
   setResume: (on) => ipcRenderer.invoke('resume:set', on === true),
   getSettings: (recheckCalendar) => ipcRenderer.invoke('settings:get', recheckCalendar === true),

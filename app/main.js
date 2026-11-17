@@ -24,6 +24,7 @@ function isRepo(dir) {
 }
 // 관리형 홈(~/.maru): 앱에 실려 온 payload 를 풀어 두는 곳. 개발 실행에서만 환경변수로 시험용 위치를 지정할 수 있다.
 const absEnv = (k) => (!app.isPackaged && typeof process.env[k] === 'string' && path.isAbsolute(process.env[k]) ? path.normalize(process.env[k]) : null);
+if (absEnv('MARU_APP_USERDATA')) app.setPath('userData', absEnv('MARU_APP_USERDATA')); // 시험 전용: 사용자 데이터 위치(패키징 빌드에서는 무시)
 const MANAGED_HOME = absEnv('MARU_APP_MANAGED_HOME') || path.join(os.homedir(), '.maru');
 const DEV_MANAGED = !!(absEnv('MARU_APP_MANAGED_HOME') && absEnv('MARU_APP_PAYLOAD')); // 개발 실행에서 payload 를 쓰려면 둘 다 필요(실제 ~/.maru 를 건드리지 않게)
 const PAYLOAD_DIR = (DEV_MANAGED && absEnv('MARU_APP_PAYLOAD')) || path.join(process.resourcesPath || __dirname, 'payload');
@@ -61,9 +62,9 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph', 'setup'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph', 'setup', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
-const PERSIST = !SMOKE && !TEST_FX; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
+const PERSIST = !SMOKE && !TEST_FX && TEST_UI !== 'hierarchy'; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
 const AGENT_FILE_MAX = 8192;
 function readAgentParty() {
@@ -102,8 +103,12 @@ let refreshed = false;
 const wss = new Map();
 let activeId = null;
 const wsOf = (id) => L.lookupWs(wss, id); // 표에 없는·닫힌·이상한 id 는 null
-const wsOrder = () => [...wss.values()];
+// 화면 순서: 최상위는 만든 순서, 각 부모 바로 뒤에 하위 세션(만든 순서). ⌘숫자·트레이·저장 순서가 모두 이것을 따른다
+const reportSum = new Map(); // 마루 작업 공간 id -> { count, items, lastAt } (읽지 않은 보고 요약; 2초마다 갱신)
+const wsOrder = () => L.hierarchyOrder([...wss.values()]).map((x) => wss.get(x.id));
 const STATE_DIR = () => path.join(ROOT, 'data', 'state', 'app');
+const PROMPT_DIR = () => path.join(ROOT, 'data', 'state', 'app', 'prompts');
+const REQUEST_DIR = () => path.join(ROOT, 'data', 'state', 'app', 'requests');
 const stateFile = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.json') : null);
 function removeStateFile(w) { w.lastTranscript = null; w.lastModel = null; const f = stateFile(w); if (f) try { fs.unlinkSync(f); } catch { /* 없음 */ } clearSubs(w); }
 // ---- 서브에이전트: <id>.subs/<agent_id> 파일 하나가 실행 중 하나(내용: agent_type). 정규 파일만, 최대 32개, 30분 넘으면 지운다 ----
@@ -168,11 +173,12 @@ function leadModel(w) {
 }
 function readAgentState(w) {
   const f = stateFile(w);
-  const r = f ? readRegular(f, 4096, false) : null;
+  const r = f ? readRegular(f, 8192, false) : null; // 훅 기록(cwd 포함)이 들어가는 크기(lib.js AGENT_STATE_MAX 와 같다)
   return r ? L.refineAgentAt(L.parseAgentRecord(r.text), r.mtimeMs) : null;
 }
 // busy | idle | waiting | none | pending(시작 전) | exited | unavailable(폴더 없음)
 function wsState(w) {
+  if (TEST_UI === 'hierarchy' && w.fakeState) return w.fakeState; // 시험 전용: 가짜 상태
   if (w.unavailable) return 'unavailable';
   if (TEST_UI === 'party' && w.term) return 'busy'; // 시험 전용: 화면 확인용
   if (w.term) {
@@ -417,16 +423,22 @@ function writeFxState(w) {
 
 function spawnPty(w, cols, rows) {
   if (w.term) return true;
-  if (w.unavailable) { if (dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } else return false; } // 디스크가 다시 연결됐으면 시작 가능
-  if (!dirOk(w.cwd)) { w.unavailable = true; wsChanged(false); return false; }
+  if (w.unavailable) { if (dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } else { dropPromptFile(w); return false; } } // 디스크가 다시 연결됐으면 시작 가능
+  if (!dirOk(w.cwd)) { dropPromptFile(w); w.unavailable = true; wsChanged(false); return false; }
   const shellBin = process.env.SHELL || '/bin/zsh';
-  const env = { ...L.sanitizeHostEnv(process.env), TERM: 'xterm-256color', COLORTERM: 'truecolor' }; // Claude Code 호스트 환경을 물려주지 않는다(로그인 셸이 프로필의 사용자 설정은 다시 읽는다)
-  for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP')) delete env[k];
+  // 하위 세션(또는 프로젝트 이름표가 남은 옛 하위 세션): 고정 id·부모의 고정 id·프로젝트·프로젝트 폴더·프롬프트 파일을 환경변수로 건넨다(셸에 타이핑하지 않는다). 프롬프트 파일은 처음 한 번만.
+  // MARU_REQ_KEY(요청 인증 키)는 마루가 될 수 있는 작업 공간(최상위·저장소 루트·하위 세션이었던 적 없음)에만, 시작할 때마다 새로 정한다. 부모의 앱 세션 id 는 어떤 하위 세션에도 넘기지 않는다
+  const ho = L.promptHandoff({ file: typeof w.childPromptFile === 'string' ? w.childPromptFile : null, wrapperOk: !!claudeWrapper() });
+  const reqKey = !w.fx && L.maruEligible(w) ? crypto.randomBytes(32).toString('hex') : null;
+  const env = L.ptyEnv({ host: process.env, ws: w.fx ? null : w.id, parentWs: w.parentId, project: w.project, promptFile: ho.env, reqKey }); // Claude Code 호스트 환경을 물려주지 않는다(로그인 셸이 프로필의 사용자 설정은 다시 읽는다)
+  if (ho.deleteFile) dropPromptFile(w); // 승인 뒤 래퍼를 못 쓰게 됐다: 전달 파일은 지우고 같은 내용을 입력줄에(Enter 는 사용자가)
   const sid = L.newSessionId(() => crypto.randomUUID()); // 셸 env 에는 넣지 않고 claude 실행 명령에만 붙인다
   let self;
   try {
     self = pty.spawn(shellBin, ['-l'], { name: 'xterm-256color', cols, rows, cwd: w.cwd, env });
-  } catch { w.exited = true; wsChanged(false); return false; }
+  } catch { dropPromptFile(w); w.exited = true; wsChanged(false); return false; }
+  w.spawnPromptFile = ho.env; w.childPromptFile = null; w.reqKey = reqKey; // 래퍼가 읽고 지운다. 아직 남아 있으면 끝날 때 앱이 지운다
+  if (ho.paste && w.childBrief) { const b = w.childBrief; w.childBrief = null; setChildNote(wsOf(w.parentId), { kind: 'paste', title: w.title }); prefillChild(w, b); } else w.childBrief = null;
   removeStateFile(w);
   w.sessionId = sid; w.term = self; w.exited = false; w.bracketed = false; w.seqTail = ''; w.lastOutputAt = 0; w.escAt = 0; w.subsCutoff = 0;
   const resume = L.validSessionUuid(w.pendingResume) ? w.pendingResume : null; // 할 일 클릭이 정한 이어 열기 대상(검증된 uuid 만). 한 번만 쓴다(다시 시작은 새 세션)
@@ -454,6 +466,7 @@ function spawnPty(w, cols, rows) {
       spawnPty(w, w.cols || 80, w.rows || 24);
       return;
     }
+    dropPromptFile(w); w.reqKey = null;
     w.term = null; w.bracketed = false; w.exited = true; w.resumeSid = null; w.claudeUp = false; removeStateFile(w); // 실행에 실패한 이어 열기 표시를 남기지 않는다
     sendToRenderer('pty:exit', w.id, exitCode);
     wsChanged(false);
@@ -469,7 +482,7 @@ function spawnPty(w, cols, rows) {
 // pty 의 프로세스 그룹에 SIGHUP(터미널을 닫을 때와 같다). 2초 안에 안 끝나면 SIGKILL.
 const dying = new Set();
 function killPty(w) {
-  const old = w.term; w.term = null; w.bracketed = false; removeStateFile(w);
+  const old = w.term; w.term = null; w.bracketed = false; w.reqKey = null; removeStateFile(w);
   if (!old) return;
   let dead = false; const pid = old.pid;
   dying.add(pid); // 닫는 중인 그룹: 이 사이에 앱이 끝나면 killAllSync 가 마저 정리한다
@@ -542,7 +555,7 @@ function saveWsNow(opts) {
   const order = wsOrder();
   const on = resumeActive();
   if (on) syncHookSids();
-  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, claudeSid: w.claudeSid, claudeSidAt: w.claudeSidAt, prevSid: w.prevSid, transient: !!w.fromTodo })), activeId, on);
+  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, claudeSid: w.claudeSid, claudeSidAt: w.claudeSidAt, prevSid: w.prevSid, transient: !!w.fromTodo, parentId: w.parentId, project: w.project, origin: w.origin })), activeId, on);
   if (!keep) return;
   const clean = !!(opts && opts.clean);
   const body = L.workspacesJson(keep.list, keep.active, { cleanExit: clean });
@@ -559,14 +572,44 @@ function wsChanged(structural) {
   syncMenu();
   refreshTray();
 }
-function addWorkspace(cwd, title, fx, unavailable) {
-  const id = crypto.randomBytes(8).toString('hex');
-  const w = { id, cwd, title: L.uniqueTitle(title || L.workspaceTitle(cwd, tr('ws.untitled')), wsOrder().map((x) => x.title)), term: null, sessionId: null, bracketed: false, seqTail: '', lastOutputAt: 0, exited: false, unavailable: !!unavailable, fx: fx || null };
+// extra(선택): { id, parentId, project } — 저장된 하위 세션 관계를 되살릴 때(검증은 lib.js 가 이미 했다). 새 id 는 겹치지 않을 때만 쓴다
+function addWorkspace(cwd, title, fx, unavailable, extra) {
+  const x = extra || {};
+  const id = L.validWsId(x.id) && !wss.has(x.id) ? x.id : crypto.randomBytes(8).toString('hex');
+  const w = { id, cwd, title: L.uniqueTitle(title || L.workspaceTitle(cwd, tr('ws.untitled')), [...wss.values()].map((o) => o.title)), term: null, sessionId: null, bracketed: false, seqTail: '', lastOutputAt: 0, exited: false, unavailable: !!unavailable, fx: fx || null,
+    parentId: L.validWsId(x.parentId) ? x.parentId : null, project: L.isProjectKey(x.project) ? x.project : null, origin: x.origin === 'child' || L.validWsId(x.parentId) ? 'child' : null, cwdReal: realOrNull(cwd), inRoot: false, isRoot: false, reqKey: null };
+  w.inRoot = insideRoot(w.cwdReal); const rr = realOrNull(ROOT); w.isRoot = !!rr && w.cwdReal === rr; // isRoot: 저장소 루트 폴더(마루 세션 후보)
   wss.set(id, w);
   return w;
 }
+const realOrNull = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+// 폴더(실제 경로)가 저장소(훅이 도는 곳) 안인가. 만들 때 한 번 센다
+function insideRoot(real) {
+  if (!ROOT || !real) return false;
+  const root = realOrNull(ROOT);
+  return !!root && (real === root || L.pathInside(real, root));
+}
+function dropPromptFile(w) { // 래퍼가 읽지 못한 전달 파일을 지운다(이미 없으면 무시)
+  if (!ROOT || !w) return;
+  const f = w && w.spawnPromptFile; if (w) w.spawnPromptFile = null;
+  const own = typeof f === 'string' && f.startsWith(PROMPT_DIR() + '/') && L.validAbsDir(f);
+  if (own) try { fs.unlinkSync(f); } catch { /* 없음 */ }
+  if (w && typeof w.childPromptFile === 'string' && w.childPromptFile.startsWith(PROMPT_DIR() + '/')) { try { fs.unlinkSync(w.childPromptFile); } catch { /* 없음 */ } w.childPromptFile = null; }
+}
+// 시험 전용(MARU_APP_UI=hierarchy): 마루 + 하위 세션 3개 + 일반 작업 공간 하나를 가짜 상태로 그린다(아무것도 저장·실행하지 않는다)
+function initFakeHierarchy() {
+  const base = ROOT || os.homedir(); const now = Date.now();
+  const maru = addWorkspace(base, tr('app.title')); maru.fakeState = 'idle'; maru.fakeView = { reports: 2, flash: false, cnote: { kind: 'opened', title: 'blog-draft' } };
+  const mk = (title, cwd, project, fakeState, view) => { const w = addWorkspace(cwd, title, null, false, { parentId: maru.id, project }); w.fakeState = fakeState; w.fakeView = view; return w; };
+  mk('blog-draft', path.join(os.homedir(), 'work', 'blog'), 'blog/draft', 'pending', { state: 'idle', ux: 'turnEnded', reportAt: now - 3 * 60000, loc: null, subs: [], cc: true });
+  mk('api-server', path.join(os.homedir(), 'work', 'api-server'), 'dev/api', 'pending', { state: 'none', ux: 'unknown', loc: 'handlers', subs: [], cc: true });
+  mk('ledger', path.join(os.homedir(), 'work', 'ledger'), null, 'busy', { ux: 'busy', loc: null, subs: ['Explore', 'worker'], cc: true });
+  const notes = addWorkspace(path.join(os.homedir(), 'notes'), 'notes'); notes.fakeState = 'pending'; notes.fakeView = { ux: 'pending' };
+  activeId = maru.id;
+}
 function initWorkspaces() {
   const base = ROOT || os.homedir();
+  if (TEST_UI === 'hierarchy') { initFakeHierarchy(); return; }
   if (TEST_FX) {
     for (const d of FX_DEFS) { const c = path.join(base, 'projects', d.name); addWorkspace(dirOk(c) ? c : base, d.name, d); }
     activeId = wsOrder()[1].id;
@@ -578,13 +621,14 @@ function initWorkspaces() {
     if (r.status === 'corrupt') L.backupCorruptFile(wsFile()); // 망가진 파일은 .bak 으로 옮기고(예전 .bak 은 덮어씀) 새로 시작
     else if (r.status === 'ok' && r.data.list.length) {
       const dec = restoreDecisions(r.data);
-      r.data.list.forEach((e, i) => { // 폴더가 없어도 버리지 않는다
-        const w = addWorkspace(e.cwd, e.title, null, e.unavailable);
+      const made = r.data.list.map((e, i) => { // 폴더가 없어도 버리지 않는다. 하위 세션 관계·프로젝트 이름표도 되살린다(프롬프트 파일은 다시 만들지 않는다)
+        const w = addWorkspace(e.cwd, e.title, null, e.unavailable, { id: e.id, parentId: e.parentId, project: e.project, origin: e.origin });
         const d = dec[i];
         if (d && d.action === 'resume') { w.pendingResume = d.sid; w.claudeSid = d.sid; w.claudeSidAt = e.claudeSidAt; w.startNote = 'resumed'; } // 알림·입력 없이 실행만: spawnPty 가 --resume 을 붙인다
         else if (d && d.prev) { w.prevSid = d.prev; if (d.note) w.startNote = d.note; } // 새로 시작하지만 "원래 세션 열기" 로 되돌릴 수 있게 포인터를 남긴다
+        return w;
       });
-      activeId = wsOrder()[r.data.active].id;
+      activeId = made[r.data.active].id; // 목록 순서가 화면 순서(wsOrder)와 다를 수 있어 만든 배열로 찾는다
       if (startupInfo.mode === 'other-instance') { for (const w of wsOrder()) if (w.startNote === 'other' && w.id !== activeId) w.startNote = null; } // 다른 앱 창 안내는 한 번만(활성 탭)
       writeAlive(); saveWsLater(); // 정상 종료 표지를 지우고(내용이 바뀐다) 지금부터 살아 있음을 적는다
       return;
@@ -604,8 +648,29 @@ function claudeFound() {
   return claudeFoundVal;
 }
 // cc: 이 작업 공간 화면이 Claude Code 인지(렌더러가 Cmd+←/→ 를 alternate screen 에서도 보낼지 정한다). 시험용 가짜 작업 공간·스모크는 아님
-const wsView = () => wsOrder().map((w) => { const state = wsState(w); return { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, bp: w.bracketed, bg: L.bgCount(readAgentState(w), state, Date.now(), SUBS_TTL_MS), note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now: Date.now() }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }) }; });
-const attention = () => wsOrder().filter((w) => { const s = wsState(w); return s === 'busy' || s === 'waiting'; });
+const REPORT_FLASH_MS = 6000; const CNOTE_MS = 15000;
+const reportedAtOf = (w) => { const ps = w.parentId ? reportSum.get(w.parentId) : null; return ps && ps.lastAt[w.id] ? ps.lastAt[w.id] : null; }; // 이 하위 세션이 읽히지 않은 보고를 남긴 마지막 시각
+// 목록·트레이·종료 확인이 함께 쓰는 표시 상태: 훅이 도는 저장소 밖에서는 'unknown'(보고가 있으면 'turnEnded')
+function derivedState(w, state) {
+  const outside = !!ROOT && !w.inRoot && !w.fx && !SMOKE && !TEST_FX && !w.unavailable;
+  return L.stateDisplay({ state, hasTerm: !!w.term, outsideRoot: outside, reportedAt: reportedAtOf(w), lastOutputAt: w.lastOutputAt });
+}
+const wsView = () => {
+  const now = Date.now();
+  return L.hierarchyOrder([...wss.values()]).map((o) => {
+    const w = wss.get(o.id); const state = wsState(w); const rec = readAgentState(w);
+    const own = reportSum.get(w.id) || null;
+    const reportAt = reportedAtOf(w);
+    const ux = derivedState(w, state);
+    const v = { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, ux, bp: w.bracketed, bg: L.bgCount(rec, state, now, SUBS_TTL_MS), note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }),
+      parentId: o.depth === 1 ? w.parentId : null, depth: o.depth, project: w.project || null, loc: L.currentLocation({ recCwd: rec && rec.cwd, cwd: w.cwd, cwdReal: w.cwdReal }),
+      reports: own ? own.count : 0, reportAt, flash: !!w.flashUntil && w.flashUntil > now, auto: !!w.autoStart && !w.term && !w.exited && !w.unavailable,
+      cnote: w.childNote && now - w.childNote.at < CNOTE_MS ? { kind: w.childNote.kind, reason: w.childNote.reason || null, title: w.childNote.title || null } : null,
+      subs: w.parentId ? L.childSubNames(readSubs(w)) : [] };
+    return TEST_UI === 'hierarchy' && w.fakeView ? { ...v, ...w.fakeView, state: w.fakeView.state || state } : v;
+  });
+};
+const attention = () => wsOrder().filter((w) => { const s = derivedState(w, wsState(w)); return s === 'busy' || s === 'waiting' || s === 'unknown'; }); // 상태를 알 수 없는 실행 중 세션도 종료 확인에 센다
 function activate(id) { if (!wsOf(id) || id === activeId) return; activeId = id; wsChanged('active'); }
 function activateOffset(d) {
   const order = wsOrder(); if (order.length < 2) return;
@@ -653,9 +718,10 @@ async function closeWorkspace(id) {
       if (ans.response !== 0) return { ok: false, reason: 'cancel' };
       if (!wss.has(id)) return { ok: true };
     }
-    killPty(w); removeStateFile(w);
+    killPty(w); removeStateFile(w); dropPromptFile(w);
     const idx = wsOrder().findIndex((x) => x.id === id);
-    wss.delete(id);
+    wss.delete(id); reportSum.delete(id);
+    for (const k of wss.values()) if (k.parentId === id) k.parentId = null; // 부모를 닫아도 하위 세션은 닫지 않는다: 최상위가 되고 프로젝트 이름표는 남는다
     if (activeId === id) { const rest = wsOrder(); activeId = rest.length ? rest[Math.min(idx, rest.length - 1)].id : null; }
     wsChanged(true);
     return { ok: true };
@@ -674,7 +740,7 @@ async function confirmQuit() {
     if (ans.response === 0) { quitting = true; app.quit(); }
   } finally { quitAsking = false; }
 }
-function cleanup() { saveWsNow({ clean: true }); killAllSync(); } // 정상 종료 표지와 함께 마지막으로 저장
+function cleanup() { if (consent) finishConsent(consent, 'cancel'); saveWsNow({ clean: true }); killAllSync(); } // 정상 종료 표지와 함께 마지막으로 저장
 let restarting = false;
 async function restartActive() {
   const w = wsOf(activeId);
@@ -703,7 +769,7 @@ function createTray() {
 }
 function refreshTray(force) {
   if (!tray) return;
-  const view = wsView();
+  const view = wsView().map((w) => ({ ...w, state: w.ux || w.state })); // 목록과 같은 표시 상태(알 수 없음·턴 끝남)
   const sig = JSON.stringify([view, activeId, L.trayTodoTitles(cache.todos), curLang()]);
   if (!force && sig === traySig) return;
   traySig = sig;
@@ -747,7 +813,9 @@ const profilePath = () => path.join(ROOT, 'data', 'profile.json');
 const curLang = () => (profile ? profile.lang : L.defaultLang(app.getLocale()));
 const tr = (k, p) => I18N.t(curLang(), k, p);
 // ⌘1~9: 왼쪽 패널 순서(작업 공간들, 이어서 보이는 프로젝트 줄). 렌더러의 번호 힌트와 같은 L.numberTargets 를 쓴다.
-const gotoTargets = () => L.numberTargets(wsOrder().map((w) => w.id), L.visibleProjectKeys(proj.view.open, proj.view.collapsed));
+const wsCollapsed = () => (projUi && Array.isArray(projUi.wsCollapsed) ? projUi.wsCollapsed : []); // 접어 둔 부모의 고정 id
+const visibleWsIds = () => L.visibleWsIds(L.hierarchyOrder([...wss.values()]), wsCollapsed(), activeId); // 접힌 부모의 하위 세션은 번호에서 뺀다(활성이면 보인다)
+const gotoTargets = () => L.numberTargets(visibleWsIds(), L.visibleProjectKeys(proj.view.open, proj.view.collapsed));
 function gotoLabel(n, t) {
   if (!t) return tr('menu.gotoNone', { n });
   if (t.kind === 'workspace') { const w = wsOf(t.id); return w ? tr('menu.gotoWs', { n }) + ' · ' + w.title : tr('menu.gotoNone', { n }); }
@@ -1091,7 +1159,7 @@ ipcMain.handle('ws:get', (e) => {
   const list = wsView();
   const cur = wsOf(activeId);
   if (cur && cur.noteKind && !cur.noteShownAt) cur.noteShownAt = Date.now(); // 활성 탭에 처음 보여 준 시각(그때부터 몇 초)
-  return { list, active: activeId };
+  return { list, active: activeId, collapsed: wsCollapsed(), consent: consentView() };
 });
 // 새로 시작한 탭의 안내에서 "원래 세션 열기": 남겨 둔 prevSid 를 main 이 다시 검증하고(폴더·기록·소유자·열려 있는 탭), 이 탭을 그 세션으로 다시 시작한다
 ipcMain.handle('ws:resume-prev', async (e, id) => {
@@ -1311,6 +1379,212 @@ ipcMain.handle('files:drop', (e, id, paths) => {
   return { ok: true };
 });
 
+// ---- 하위 세션: 마루가 요청 파일로 다른 폴더의 세션을 연다 ----
+// 요청 폴더·프롬프트 폴더·보고 폴더는 <루트>/data/state/app 아래. 인증(mac)·판정·예산·동의·전달 파일은 lib.js 의 순수 함수가 맡고, 여기서는 연결과 상태만 가진다.
+// "묻지 않는 폴더"와 예산은 저장소 밖(앱 사용자 데이터 폴더)에 둔다: 저장소 안 파일로는 신뢰를 만들 수 없다.
+const budgetFile = () => path.join(app.getPath('userData'), 'child-budget.json');
+let budget = { list: [] };
+function loadChildStores() {
+  const b = L.readBudgetFile(budgetFile()); if (b.status === 'corrupt' && PERSIST) L.backupCorruptFile(budgetFile());
+  budget = { list: b.list };
+}
+function setBudget(list) { budget = { list }; if (PERSIST) L.saveBudgetFile(budgetFile(), list); }
+const monoMs = () => Number(process.hrtime.bigint() / 1000000n); // 단조 시계: 벽시계를 되돌려도 분당 한도가 풀리지 않는다
+const totalChildren = () => [...wss.values()].filter((w) => w.parentId).length; // 앱 전체(부모가 둘이어도 합쳐서)
+const maruCandidate = (w) => !!w.term && L.maruEligible(w);
+const reqHandled = new Set();
+let logSt = null;
+function childLog(kind, reason, name) { // 1분에 20줄까지(넘는 것은 세어 두었다가 다음 창에서 한 줄로 요약)
+  if (!ROOT || !PERSIST) return;
+  const g = L.logGate(logSt, Date.now()); logSt = g.st;
+  if (g.summary > 0) L.appendSyncLog(ROOT, 'child suppressed ' + g.summary);
+  if (g.action === 'log') L.appendSyncLog(ROOT, 'child ' + L.childLogLine(kind, reason, name));
+}
+function setChildNote(w, note) { if (w) { w.childNote = { ...note, at: Date.now() }; wsChanged(false); } }
+// 거절: 항상 기록(한 줄). 알림은 mac 인증을 통과한 요청의 마루 작업 공간에만, 작업 공간마다 10초에 한 번
+function refuseChild(reason, name, authedWsId) {
+  childLog('refused', reason, name);
+  const w = authedWsId ? wsOf(authedWsId) : null;
+  if (!w || !L.maruEligible(w) || !L.noticeOk(w.lastNoticeAt, Date.now())) return;
+  w.lastNoticeAt = Date.now();
+  setChildNote(w, { kind: 'refused', reason: L.childReasonCode(reason) });
+}
+const wsFacts = () => wsOrder().map((w) => ({ id: w.id, sessionId: w.sessionId, hasTerm: !!w.term, proc: termProc(w), isRoot: w.isRoot === true, parentId: w.parentId, origin: w.origin, key: w.reqKey || null }));
+function registryKeys() {
+  const reg = ROOT ? readHead(path.join(ROOT, 'data', 'projects.txt'), L.PROJ_REG_MAX_BYTES) : null;
+  return new Set(reg ? L.parseProjectRegistry(reg.text, reg.truncated).map((x) => x.key) : []);
+}
+function realDir(cwd) {
+  try { const real = fs.realpathSync(cwd); return L.workspaceDirOk(fs.statSync(real), process.getuid()) ? real : null; } catch { return null; }
+}
+const windowReady = () => L.childWindowReady({ destroyed: !win || win.isDestroyed(), visible: !!win && !win.isDestroyed() && win.isVisible(), minimized: !!win && !win.isDestroyed() && win.isMinimized() });
+
+// ---- 동의 창: main 이 상태를 가지고 renderer 는 보여 주기만 한다. 답은 한 번만 쓰는 토큰이 붙은 IPC 로만 온다 ----
+const CONSENT_MS = 5 * 60 * 1000;
+let consent = null; // { view, pending: { token, expiresAt, used }, resolve, timer }
+let fakeConsent = TEST_UI === 'hierarchy' && process.env.MARU_APP_CONSENT === '1';
+function askConsent(view) {
+  return new Promise((resolve) => {
+    const c = { view, pending: { token: view.token, expiresAt: Date.now() + CONSENT_MS, used: false }, resolve, timer: null };
+    c.timer = setTimeout(() => finishConsent(c, 'cancel'), CONSENT_MS);
+    consent = c; wsChanged(false); // 렌더러가 ws:get 으로 창을 띄운다
+  });
+}
+function finishConsent(c, answer) {
+  if (!c || consent !== c) return;
+  clearTimeout(c.timer); c.pending.used = true; consent = null; wsChanged(false);
+  c.resolve({ answer });
+}
+const consentView = () => (fakeConsent ? { token: 'fake', folder: path.join(os.homedir(), 'work', 'a-rather-long-project-folder-name', 'sub-folder-with-a-long-name', 'api-server'), project: 'dev/api', title: 'api-server', paste: false,
+  ...(() => { const brief = L.cleanPromptText(Array.from({ length: 14 }, (_, i) => (i % 5 === 4 ? '' : '설계 문서(docs/design.md)를 먼저 읽고 항목 ' + (i + 1) + ' 을 리팩터링해 주세요. 공개 API 는 바꾸지 마세요.')).join('\n') + '\n\n끝나면 무엇을 했고 무엇이 남았는지 짧게 보고하세요.'); return { brief, chars: [...brief].length, lines: brief.split('\n').length }; })() } : consent ? consent.view : null);
+ipcMain.handle('child:answer', (e, token, answer) => {
+  if (!fromMain(e)) return { ok: false };
+  if (fakeConsent) { fakeConsent = false; wsChanged(false); return { ok: true }; }
+  const r = L.consentAnswer(consent && consent.pending, token, answer, Date.now());
+  if (r.result === 'invalid') return { ok: false };
+  finishConsent(consent, r.result);
+  return { ok: true };
+});
+
+let childAccepted = []; // 받아들인 시각(단조 시계 ms)
+let seenMacs = []; // 최근에 받은 mac(재전송 방지)
+async function handleChildRequest(item) {
+  if (item.text === null) { refuseChild(item.reason || 'file', item.name, null); return; }
+  const keys = registryKeys();
+  const d = L.decideChildRequest({
+    name: item.name, size: item.size, mtimeMs: item.mtimeMs, text: item.text, nowMs: Date.now(), monoMs: monoMs(), requester: (f) => L.requesterOf(wsFacts(), f, claudeFound()), wsCount: wss.size, childCount: totalChildren,
+    accepted: childAccepted, launches: budget.list, seen: seenMacs, realDir, projectKnown: (k) => keys.has(k),
+  });
+  if (!d.ok) { refuseChild(d.reason, item.name, d.parentId || null); return; } // 알림은 인증을 통과한 요청에만(parentId 가 있을 때)
+  seenMacs = L.rememberMac(seenMacs, d.mac, Date.now());
+  const mono = monoMs(); childAccepted = [...childAccepted.filter((t) => mono - t < L.CHILD_RATE_MS), mono].slice(-10);
+  const parentId = d.parentId;
+  if (!wsOf(parentId) || !claudeFound()) { refuseChild('start', item.name, parentId); return; }
+  // 매번 동의를 받는다: 폴더·제목·맡길 내용 전체를 보여 주는 창이 유일한 관문이다(자동 시작도 "묻지 않기"도 없다)
+  const ans = await askConsent(L.consentView({ token: crypto.randomBytes(16).toString('hex'), folder: d.real, project: d.req.project, title: d.req.title, prompt: d.req.prompt, paste: !claudeWrapper() }));
+  if (ans.answer !== 'open') { childLog('cancelled', 'trust-cancel', item.name); setChildNote(wsOf(parentId), { kind: 'cancel' }); return; }
+  // 동의를 기다리는 사이 바뀌었을 수 있다(앱 종료·창·부모·자리·링크 바꿔치기). 마루 pty 가 다시 시작됐어도 같은 작업 공간이면 계속한다(요청의 키는 이미 검증을 마쳤다)
+  const par = wsOf(parentId);
+  const why = L.childLaunchCheck({ quitting, windowOk: windowReady(), parentAlive: L.parentUsable({ exists: !!par, eligible: !!par && L.maruEligible(par) }), children: totalChildren(), wsCount: wss.size, realNow: realDir(d.req.cwd), approvedReal: d.real });
+  if (why) { refuseChild(why, item.name, parentId); return; }
+  launchChild(par, d.req, d.real, item.name);
+}
+// 하위 세션을 만들고(마루 뒤에 들여써서) 시작한다. 래퍼를 쓸 수 있으면 프롬프트 파일(래퍼가 읽고 지운다), 아니면 입력줄에만 채우고 Enter 는 사용자가 누른다
+function launchChild(parent, req, real, name) {
+  let file = null;
+  if (claudeWrapper()) file = L.writeChildPromptFile({ dir: PROMPT_DIR(), text: L.childPromptText(curLang(), req.prompt), rand: () => crypto.randomBytes(8).toString('hex'), fsx: fs, uid: process.getuid() });
+  if (!file && claudeWrapper()) childLog('warn', 'prompt-file', name);
+  const w = addWorkspace(real, req.title, null, false, { parentId: parent.id, project: req.project, origin: 'child' });
+  w.expectClaude = true; w.autoStart = true; w.childPromptFile = file; w.childBrief = req.prompt; // childBrief: 시작 순간 래퍼를 못 쓰게 되면 같은 내용을 입력줄에 채우려고 시작 전까지만 들고 있는다
+  if (wsCollapsed().includes(parent.id)) setWsCollapsed(L.expandParent(wsCollapsed(), parent.id)); // 하위 세션은 숨긴 채 시작하지 않는다
+  setBudget(L.recordLaunch(budget.list, Date.now()));
+  childLog('opened', file ? 'auto' : 'paste', name);
+  setChildNote(parent, { kind: file ? 'opened' : 'paste', title: w.title });
+  wsChanged(true);
+  L.cleanStalePromptFiles({ dir: PROMPT_DIR(), nowMs: Date.now(), fsx: fs, uid: process.getuid() });
+  if (!file) { const b = w.childBrief; w.childBrief = null; prefillChild(w, b); }
+}
+const PREFILL_TIMEOUT_MS = 90000;
+// 입력줄에 채운다(Enter 없음). 기다리는 판단은 fillStep(순수). 사용자가 그 사이 입력하면 그만둔다. 내용은 동의 창에서 이미 전부 보여 준 것이다
+async function prefillChild(w, prompt) {
+  const text = L.childPromptText(curLang(), prompt);
+  if (!text) return;
+  const t0 = Date.now(); const typed0 = w.typedN || 0;
+  const note = (kind) => setChildNote(wsOf(w.parentId) || wsOrder().find((x) => L.maruEligible(x)), { kind, title: w.title });
+  for (;;) {
+    const exists = wss.get(w.id) === w;
+    const d = L.fillStep({ elapsedMs: Date.now() - t0, timeoutMs: PREFILL_TIMEOUT_MS, exists, active: true, hasTerm: !!w.term, state: exists ? wsState(w) : 'exited', claudeOnly: true,
+      claudeUp: w.claudeUp === true, bracketed: w.bracketed === true, quietMs: Date.now() - (w.lastOutputAt || 0), procName: termProc(w), typed: (w.typedN || 0) > typed0 });
+    if (d.do === 'abort' || d.do === 'cancel' || d.do === 'busy') return;
+    if (d.do === 'stash') { note('prefill'); return; }
+    if (d.do === 'fill') {
+      if (!w.term || shellFront(w) || !w.bracketed) { note('prefill'); return; }
+      w.term.write('\x1b[200~' + text + '\x1b[201~'); w.typedN = (w.typedN || 0) + 1; // 붙여넣기로 감싸 Enter 없이 입력줄에만(ESC 는 이미 걸러졌다)
+      return;
+    }
+    await delay(READY_POLL_MS);
+  }
+}
+let reqScanning = false; let reqWatcher = null; let reqScanTimer = null;
+const childChannelOn = () => PERSIST && !!ROOT && !TEST_UI;
+async function scanChildRequests() {
+  if (reqScanning || !childChannelOn() || quitting || !windowReady()) return; // 창이 안 보이면 받지 않는다(요청은 디스크에서 기다리다 60초 뒤 만료)
+  reqScanning = true;
+  try {
+    const r = L.takeChildRequests({ dir: REQUEST_DIR(), fsx: fs, uid: process.getuid(), rand: () => crypto.randomBytes(6).toString('hex'), handled: reqHandled, nowMs: Date.now() });
+    if (!r.dirOk) return; // 폴더가 안전하지 않으면 채널 전체를 무시한다
+    for (const it of r.items) { try { await handleChildRequest(it); } catch { /* 한 건의 오류가 다음 건을 막지 않는다 */ } }
+  } catch { /* 다음 훑기에 */ } finally { reqScanning = false; }
+}
+function scheduleScan() { if (reqScanTimer) return; reqScanTimer = setTimeout(() => { reqScanTimer = null; scanChildRequests(); }, 200); reqScanTimer.unref(); }
+function watchRequests() {
+  if (reqWatcher) return;
+  try { reqWatcher = fs.watch(REQUEST_DIR(), { persistent: false }, () => scheduleScan()); reqWatcher.on('error', () => { try { reqWatcher.close(); } catch { /* 무시 */ } reqWatcher = null; }); } catch { reqWatcher = null; }
+}
+// 보고 폴더 읽기(읽기 전용·비동기): 마루 작업 공간마다 <상태 폴더>/reports/<고정 작업 공간 id>
+let reportsBusy = false;
+async function refreshReports() {
+  if (!ROOT || reportsBusy) return;
+  reportsBusy = true;
+  try {
+    const uid = process.getuid(); const live = new Set();
+    for (const w of wsOrder()) {
+      if (!L.maruEligible(w)) continue; // 마루 작업 공간(pty 가 없어도): 보고는 고정 id 로 모인다
+      live.add(w.id);
+      const kids = wsOrder().filter((k) => k.parentId === w.id).map((k) => ({ id: k.id, title: k.title, project: k.project }));
+      const list = await L.readReportsDir({ dir: path.join(STATE_DIR(), 'reports', w.id), fsp: fs.promises, uid, nowMs: Date.now() });
+      if (wss.get(w.id) !== w) continue;
+      const sum = L.summarizeReports(list, kids);
+      const prev = reportSum.has(w.id) ? reportSum.get(w.id) : { count: 0, items: [], lastAt: {} };
+      reportSum.set(w.id, sum);
+      const now = Date.now();
+      if (L.reportFlash({ prev: prev.count, next: sum.count, active: activeId === w.id, lastFlashAt: w.lastFlashAt, nowMs: now })) { w.flashUntil = now + REPORT_FLASH_MS; w.lastFlashAt = now; }
+      if (prev.count !== sum.count || JSON.stringify(prev.lastAt) !== JSON.stringify(sum.lastAt) || prev.items.length !== sum.items.length) wsChanged(false);
+    }
+    for (const id of [...reportSum.keys()]) if (!live.has(id)) { reportSum.delete(id); wsChanged(false); }
+  } catch { /* 다음 번에 */ } finally { reportsBusy = false; }
+}
+function startChildChannel() {
+  if (!childChannelOn()) return;
+  const uid = process.getuid();
+  loadChildStores();
+  try { fs.mkdirSync(REQUEST_DIR(), { recursive: true, mode: 0o700 }); } catch { /* 없으면 아래 검사에서 무시된다 */ }
+  L.purgeChildRequests({ dir: REQUEST_DIR(), fsx: fs, uid }); // 앱이 꺼져 있던 동안의 요청·가져간 임시 파일은 처리하지 않고 지운다
+  L.cleanStalePromptFiles({ dir: PROMPT_DIR(), nowMs: Date.now(), fsx: fs, uid });
+  watchRequests();
+  setInterval(() => { // 와처가 놓쳐도 2초 안에 본다(창이 있는 동안만)
+    if (!win || win.isDestroyed()) return;
+    if (!reqWatcher) watchRequests();
+    scanChildRequests(); refreshReports();
+  }, 2000).unref();
+}
+ipcMain.handle('reports:get', async (e, id) => {
+  const w = wsFrom(e, id);
+  if (!w) return null;
+  if (TEST_UI === 'hierarchy') return w.fakeView && w.fakeView.reports ? { items: [
+    { at: Date.now() - 180000, title: 'blog-draft', project: 'blog/draft', text: '초안 3편 정리를 끝냈습니다.\n남은 일: 마지막 편의 사진 캡션.', bg: 0, known: true },
+    { at: Date.now() - 400000, title: 'api-server', project: 'dev/api', text: '', bg: 0, known: true },
+    { at: Date.now() - 600000, title: null, project: null, text: 'unknown sender <b>not html</b>', bg: 1, known: false }] } : { items: [] };
+  if (!L.maruEligible(w)) return { items: [] };
+  await refreshReports();
+  const s = reportSum.get(w.id);
+  return { items: s ? s.items.map((x) => ({ at: x.at, title: x.title, project: x.project, text: x.text, bg: x.bg, known: x.known })) : [] };
+});
+function setWsCollapsed(ids) { // 접힘 상태는 부모의 고정 id 로 화면 상태 파일(project-ui.json)에 둔다
+  if (PERSIST) loadProjUi();
+  const next = { ...projUi }; delete next.wsCollapsed;
+  if (ids.length) next.wsCollapsed = ids.slice(-L.WS_COLLAPSED_MAX);
+  const r = commitProjUi(next);
+  if (r.ok) wsChanged(false);
+  return r;
+}
+ipcMain.handle('ws:set-collapsed', (e, id, on) => {
+  const w = wsFrom(e, id);
+  if (!w || typeof on !== 'boolean' || w.parentId || ![...wss.values()].some((k) => k.parentId === w.id)) return { ok: false, reason: 'invalid' };
+  const set = new Set(wsCollapsed());
+  if (on) set.add(w.id); else set.delete(w.id);
+  return setWsCollapsed([...set]);
+});
 // ---- 알림과 승인함: 승인 대기(스쿼드·스킬 제안) + 알림(dream·reflect 로그 이벤트). 제안 폴더·로그는 모두 믿지 않는다(lib.js 가 엄격히 훑는다) ----
 const proposalBase = (kind) => (ROOT ? path.join(ROOT, 'data', kind === 'squad' ? 'squad-proposals' : 'skill-proposals') : null);
 const skillTrashDir = () => path.join(ROOT, 'data', 'skill-proposals-trash'); // 앱 소유 휴지 폴더(영구 삭제 아님)
@@ -1891,6 +2165,7 @@ app.whenReady().then(() => {
   session.defaultSession.on('will-download', (e) => e.preventDefault());
   cleanOldStateFiles();
   initWorkspaces();
+  startChildChannel(); // 요청 폴더 감시·보고 읽기(저장소가 있고 저장 모드일 때만)
   createWindow();
   createTray();
   refresh();

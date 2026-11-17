@@ -172,7 +172,8 @@
 
   // ---- 작업 공간 목록 ----
   let wsSeq = 0; let wsKey = null; const shownWsNotes = new Set();
-  const stateKey = (s) => (['busy', 'idle', 'waiting', 'exited', 'pending', 'unavailable'].includes(s) ? s : 'none');
+  const stateKey = (s) => (['busy', 'idle', 'waiting', 'exited', 'pending', 'unavailable', 'unknown', 'turnEnded'].includes(s) ? s : 'none');
+  let wsCollapsedIds = []; // 접어 둔 부모 작업 공간의 고정 id(main 이 화면 상태 파일에 저장)
   async function syncWs() {
     const my = ++wsSeq;
     let r = null;
@@ -196,41 +197,81 @@
     for (const w of r.list) if (!terms.has(w.id)) { const e = createTerm(w.id); fresh.push(e); if (w.bp) e.term.write('\x1b[?2004h'); } // 화면 복구로 다시 붙을 때 붙여넣기 모드를 되살린다
     for (const e of [...terms.values()]) if (!ids.has(e.id)) disposeTerm(e);
     wsList = r.list; activeId = ids.has(r.active) ? r.active : null;
+    wsCollapsedIds = Array.isArray(r.collapsed) ? r.collapsed.filter((x) => typeof x === 'string') : [];
+    syncConsent(r.consent);
     renderWs();
     if (activeId !== prev || fresh.some((e) => e.id === activeId)) { closeDetail(false); showActive(true); } // 상세가 터미널을 가린 채로는 xterm 을 열지 않는다(숨은 컨테이너에서 open 금지)
     ensureStarted(terms.get(activeId));
+    for (const w of r.list) if (w.auto === true && w.id !== activeId) ensureStarted(terms.get(w.id)); // 마루가 연 하위 세션은 보이지 않아도 시작한다(Enter 없이 맡긴 일이 시작되도록)
+  }
+  const fmtClock = (t) => { const d = new Date(t); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+  function childNoteText(n) {
+    if (!n) return '';
+    if (n.kind === 'opened') return T('child.note.opened', { title: String(n.title || '') });
+    if (n.kind === 'paste') return T('child.note.paste', { title: String(n.title || '') });
+    if (n.kind === 'cancel') return T('child.note.cancel');
+    if (n.kind === 'prefill') return T('child.note.prefill');
+    return T('child.note.refused', { reason: T(Lib.childReasonKey(n.reason), { n: Lib.CHILD_MAX }) });
   }
   function renderWs() {
-    const key = JSON.stringify([wsList, activeId, lang]);
+    const key = JSON.stringify([wsList, activeId, lang, wsCollapsedIds]);
     if (key === wsKey) return;
     wsKey = key;
     const box = $('workspaces');
     const f = document.activeElement;
     const fr = f && box.contains(f) ? f.closest('.ws') : null;
-    const refocus = fr ? { id: fr.dataset.id, x: f.classList.contains('ws-x') } : null;
+    const refocus = fr ? { id: fr.dataset.id, x: f.classList.contains('ws-x'), c: f.classList.contains('ws-chev'), b: f.classList.contains('ws-badge') } : null;
     box.replaceChildren();
     const nums = numberMap();
+    const kidCount = new Map(); for (const w of wsList) if (w.parentId) kidCount.set(w.parentId, (kidCount.get(w.parentId) || 0) + 1);
+    const titleOf = new Map(wsList.map((w) => [w.id, w.title]));
+    const lastOf = new Map(); for (const w of wsList) if (w.parentId) lastOf.set(w.parentId, w.id);
     for (const w of wsList) {
-      const on = w.id === activeId; const k = stateKey(w.state);
-      const row = el('div', 'ws' + (on ? ' active' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
+      const kid = !!w.parentId && titleOf.has(w.parentId);
+      if (kid && wsCollapsedIds.includes(w.parentId) && w.id !== activeId) continue; // 접힌 부모의 하위 세션은 숨긴다(활성이면 보인다)
+      const on = w.id === activeId; const ux = w.ux || w.state; const k = stateKey(ux);
+      const row = el('div', 'ws' + (on ? ' active' : '') + (kid ? ' kid' + (lastOf.get(w.parentId) === w.id ? ' last' : '') : '') + (w.flash ? ' flash' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
+      const kids = kidCount.get(w.id) || 0; const closedKids = kids > 0 && wsCollapsedIds.includes(w.id);
+      if (kids > 0) {
+        const ch = el('button', 'ws-chev', closedKids ? '▸' : '▾'); ch.type = 'button'; ch.setAttribute('aria-expanded', String(!closedKids));
+        ch.setAttribute('aria-label', T(closedKids ? 'ws.expand.aria' : 'ws.collapse.aria', { title: w.title })); ch.title = ch.getAttribute('aria-label');
+        ch.addEventListener('click', async () => { try { await window.maru.setWsCollapsed(w.id, !closedKids); } catch (x) { /* 무시 */ } syncWs(); });
+        row.append(ch);
+      }
       const main = el('button', 'ws-main'); main.type = 'button';
       if (on) main.setAttribute('aria-current', 'true');
       main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }));
       const c = el('span', 'col'); const num = nums.get('workspace:' + w.id);
-      const l1 = el('span', 'l1'); l1.append(el('span', 'n', w.title), el('span', 'st ' + k, T('agent.' + k)));
+      const l1 = el('span', 'l1'); const nm = el('span', 'nm'); nm.append(el('span', 'n', w.title));
+      l1.append(nm, el('span', 'st ' + k, T('agent.' + k)));
       const l2 = el('span', 'l2'); l2.append(el('span', 's', w.path)); if (num) l2.append(kbdHint(num));
       c.append(l1, l2);
+      const extra = [];
+      if (w.project) extra.push(el('span', 'chip', w.project)); // 프로젝트 이름표는 둘째 줄에(제목이 잘리지 않게)
+      if (w.loc) extra.push(el('span', 'loc', T('ws.loc', { name: w.loc }))); // 훅이 알려 준 현재 위치(다를 때만)
+      if (Array.isArray(w.subs) && w.subs.length) extra.push(el('span', 'subs', T('ws.sub', { names: w.subs.join(', ') })));
+      if (kid && Number.isFinite(w.reportAt)) extra.push(el('span', 'rep', T('ws.kid.rep', { time: fmtClock(w.reportAt) })));
+      if (extra.length) { const l3 = el('span', 'l3'); l3.append(...extra); c.append(l3); }
+      const cn = childNoteText(w.cnote);
+      if (cn) { const nt = el('span', 'l3 cnote', cn); nt.setAttribute('role', 'status'); c.append(nt); }
       if (num) main.setAttribute('aria-keyshortcuts', 'Meta+' + num);
       main.append(el('span', 'dot ' + k), c);
-      main.title = w.path;
+      main.title = w.path + (ux === 'unknown' ? ' — ' + T('agent.unknown.sub') : '');
       main.addEventListener('click', async () => { closeDetail(true); try { await window.maru.activateWorkspace(w.id); } catch (x) { /* 무시 */ } syncWs(); });
+      row.append(main);
+      if (w.reports > 0) {
+        const bd = el('button', 'ws-badge', T('ws.reports', { n: w.reports })); bd.type = 'button'; bd.setAttribute('aria-haspopup', 'dialog'); bd.dataset.id = w.id;
+        bd.setAttribute('aria-label', T('ws.reports.aria', { n: w.reports }));
+        bd.addEventListener('click', (ev) => { ev.stopPropagation(); if (repOpenId === w.id) closeReports(true); else openReports(w.id, bd); });
+        row.append(bd);
+      }
       const x = el('button', 'ws-x', '×'); x.type = 'button'; x.setAttribute('aria-label', T('ws.close.aria', { title: w.title }));
       x.addEventListener('click', async () => { try { await window.maru.closeWorkspace(w.id); } catch (e) { /* 무시 */ } syncWs(); });
-      row.append(main, x); box.append(row);
+      row.append(x); box.append(row);
     }
     if (refocus) {
       const r = [...box.children].find((n) => n.dataset.id === refocus.id);
-      const t = r && r.querySelector(refocus.x ? '.ws-x' : '.ws-main');
+      const t = r && r.querySelector(refocus.x ? '.ws-x' : refocus.c ? '.ws-chev' : refocus.b ? '.ws-badge' : '.ws-main');
       if (t) t.focus();
     }
     $('ws-add').disabled = wsList.length >= Lib.WS_MAX;
@@ -238,9 +279,84 @@
     const a = wsList.find((w) => w.id === activeId);
     $('term-name').textContent = a ? a.title : T('app.title');
     $('term-cwd').textContent = a ? a.path : '';
-    renderBusy(a ? a.state : 'none', a ? a.bg : 0);
+    renderBusy(a ? a.state : 'none', a ? a.bg : 0, a ? a.ux : null);
+    if (repOpenId) repRefresh();
     if (projHintWs !== wsList.length) renderProjects(projView); // 작업 공간 수가 바뀌면 프로젝트 줄의 번호도 바뀐다
   }
+  // ---- 하위 세션 보고 팝오버(읽기 전용): 읽음 표시도, 터미널에 쓰는 것도 하지 않는다. 내용은 textContent 로만 ----
+  let repOpenId = null; let repAnchor = null; let repCount = -1;
+  function closeReports(refocus) {
+    const pop = $('rep-pop'); const id = repOpenId; repOpenId = null; repCount = -1; pop.hidden = true; pop.replaceChildren();
+    document.removeEventListener('mousedown', repOutside, true);
+    if (refocus && id) { const b = [...document.querySelectorAll('.ws-badge')].find((n) => n.dataset.id === id); if (b) b.focus(); }
+  }
+  function repOutside(ev) { const pop = $('rep-pop'); if (!pop.contains(ev.target) && !(ev.target.closest && ev.target.closest('.ws-badge'))) closeReports(false); }
+  function paintReports(items) {
+    const pop = $('rep-pop'); pop.replaceChildren(); pop.setAttribute('aria-label', T('rep.title'));
+    const head = el('div', 'rep-head'); head.append(el('h3', 'pop-title', T('rep.title')));
+    const x = el('button', 'btn ghost rep-x', T('common.close')); x.type = 'button'; x.addEventListener('click', () => closeReports(true)); head.append(x);
+    pop.append(head);
+    const list = el('div', 'rep-list');
+    if (!items.length) list.append(el('div', 'hint', T('rep.empty')));
+    for (const it of items) {
+      const row = el('div', 'rep-item');
+      const meta = el('div', 'rep-meta');
+      meta.append(el('span', 'rep-t', fmtClock(it.at)), el('b', '', it.known === false || !it.title ? T('rep.unknown') : it.title));
+      if (it.project) meta.append(el('span', 'chip', it.project));
+      if (it.bg > 0) meta.append(el('span', 'hint', T('rep.bg', { n: it.bg })));
+      row.append(meta, el('div', 'rep-text' + (it.text ? '' : ' rep-none'), it.text ? String(it.text).slice(0, 2000) : T('rep.empty.text')));
+      list.append(row);
+    }
+    pop.append(list, el('div', 'hint rep-hint', T('rep.hint')));
+    return x;
+  }
+  async function openReports(id, anchor) {
+    let r = null; try { r = await window.maru.getReports(id); } catch (x) { r = null; }
+    const items = r && Array.isArray(r.items) ? r.items.filter((it) => it && typeof it.text === 'string' && Number.isFinite(it.at)).slice(0, 50) : [];
+    const pop = $('rep-pop'); const was = repOpenId;
+    repOpenId = id; repAnchor = anchor; repCount = items.length;
+    const x = paintReports(items); pop.hidden = false;
+    const ar = anchor.getBoundingClientRect(); const pw = pop.offsetWidth;
+    pop.style.left = Math.max(8, Math.min(ar.right + 8, window.innerWidth - pw - 8)) + 'px';
+    pop.style.top = Math.max(8, Math.min(ar.top, window.innerHeight - pop.offsetHeight - 8)) + 'px';
+    if (!was) { document.addEventListener('mousedown', repOutside, true); x.focus(); }
+  }
+  async function repRefresh() { // 열려 있는 동안 보고 수가 바뀌면 다시 읽는다
+    const w = wsList.find((n) => n.id === repOpenId);
+    if (!w || !(w.reports > 0)) { closeReports(false); return; }
+    if (w.reports !== repCount) { const b = [...document.querySelectorAll('.ws-badge')].find((n) => n.dataset.id === w.id); if (b) openReports(w.id, b); }
+  }
+  document.addEventListener('keydown', (e) => { if (repOpenId && e.key === 'Escape' && !modalOpen()) { e.preventDefault(); closeReports(true); } });
+  // ---- 하위 세션 동의 창: main 이 상태를 가진다(토큰은 한 번만 유효). 폴더·제목·맡길 내용 전체를 textContent 로만 보여 준다 ----
+  let consentTok = null;
+  function syncConsent(v) {
+    const dlg = $('dlg-consent');
+    if (!v || typeof v.token !== 'string' || typeof v.folder !== 'string' || typeof v.brief !== 'string') { if (consentTok) { consentTok = null; closeModal(dlg); } return; }
+    if (consentTok === v.token) return;
+    consentTok = v.token;
+    $('cs-title').textContent = T('consent.title');
+    $('cs-folder-k').textContent = T('consent.folder'); $('cs-folder').textContent = v.folder;
+    $('cs-what-k').textContent = T('consent.what'); $('cs-what').textContent = (typeof v.project === 'string' && v.project ? v.project + ' · ' : '') + String(v.title || '');
+    $('cs-brief-k').textContent = T('consent.brief'); $('cs-brief').textContent = v.brief; // 자르지 않는다(검증이 이미 4000자로 제한했고 전달하는 것과 같은 문자열)
+    $('cs-go').textContent = T(v.paste === true ? 'consent.paste' : 'consent.go');
+    $('cs-cancel').textContent = T('consent.cancel'); $('cs-ok').textContent = T('consent.open');
+    $('cs-count').textContent = T('consent.count', { n: Number.isInteger(v.chars) ? v.chars : [...v.brief].length, m: Number.isInteger(v.lines) ? v.lines : v.brief.split('\n').length });
+    const box = $('cs-brief'); box.scrollTop = 0;
+    $('cs-ok').disabled = true; $('cs-scroll').textContent = '';
+    const atEnd = () => box.scrollTop + box.clientHeight >= box.scrollHeight - 2;
+    const sync = () => { const ok = atEnd(); $('cs-ok').disabled = !ok; $('cs-scroll').textContent = ok ? '' : T('consent.scroll'); }; // 끝까지 내려야 열 수 있다(스크롤이 필요 없으면 바로)
+    box.onscroll = sync;
+    openModal(dlg, $('cs-cancel'), { closable: () => true, close: () => answerConsent('cancel') }); // 처음 포커스는 취소(실수로 Enter 를 눌러도 열리지 않는다)
+    sync(); // 모달이 보인 뒤에 크기를 잰다
+  }
+  async function answerConsent(ans) {
+    const tok = consentTok; if (!tok) return;
+    consentTok = null; closeModal($('dlg-consent'));
+    try { await window.maru.answerChildConsent(tok, ans); } catch (x) { /* main 이 만료시킨다 */ }
+    syncWs();
+  }
+  $('cs-ok').addEventListener('click', () => { if (!$('cs-ok').disabled) answerConsent('open'); });
+  $('cs-cancel').addEventListener('click', () => answerConsent('cancel'));
   async function newWs() { try { await window.maru.newWorkspace(); } catch (x) { /* 무시 */ } syncWs(); }
   $('ws-add').addEventListener('click', newWs);
   $('term-empty-new').addEventListener('click', newWs);
@@ -253,9 +369,10 @@
   window.maru.onWorkspacesChanged(() => syncWs());
   // ⌘W: 열린 모달·메뉴·팝오버가 있으면 그것을 닫고, 아니면 활성 작업 공간을 닫는다(확인은 main)
   window.maru.onCloseRequest(async () => {
-    const act = Lib.closeRequestAction({ overlayOpen: modalOpen() || menuOpen || updOpen || detailOpen, hasActive: !!activeId });
+    const act = Lib.closeRequestAction({ overlayOpen: modalOpen() || menuOpen || updOpen || detailOpen || !!repOpenId, hasActive: !!activeId });
     if (act === 'overlay') {
       if (modalOpen()) { const top = modals[modals.length - 1]; if (top.closable()) top.close(); }
+      else if (repOpenId) closeReports(true);
       else if (menuOpen) closeMenu(true);
       else if (updOpen) closeUpdate(true);
       else closeDetail(true);
@@ -701,7 +818,7 @@
   // ⌘숫자 힌트: main 메뉴와 같은 Lib.numberTargets 로 센다(작업 공간 먼저, 이어서 접히지 않은 진행 중 프로젝트 줄). 'kind:id' -> 번호
   function numberMap() {
     const m = new Map();
-    Lib.numberTargets(wsList.map((w) => w.id), Lib.visibleProjectKeys(projView.open, projView.collapsed)).forEach((t, i) => m.set(t.kind + ':' + t.id, i + 1));
+    Lib.numberTargets(Lib.visibleWsIds(Lib.hierarchyOrder(wsList), wsCollapsedIds, activeId), Lib.visibleProjectKeys(projView.open, projView.collapsed)).forEach((t, i) => m.set(t.kind + ':' + t.id, i + 1));
     return m;
   }
   function kbdHint(n) { const k = el('span', 'kbd', '⌘' + n); k.setAttribute('aria-hidden', 'true'); return k; }
@@ -1046,7 +1163,7 @@
   if (reducedMq && reducedMq.addEventListener) reducedMq.addEventListener('change', () => { if (!reduced()) ringSt = Lib.ringInit(); kickRing(); });
 
   let lastAgent = 'none';
-  function renderBusy(agent, bg) {
+  function renderBusy(agent, bg, ux) {
     lastAgent = agent; renderParty();
     const core = document.querySelector('.core');
     const k = stateKey(agent);
@@ -1055,8 +1172,9 @@
     ringMode = k; kickRing();
     core.classList.toggle('waiting', agent === 'waiting');
     const sx = Lib.agentStatusText(k, bg);
-    $('status-main').textContent = T(sx.key, sx.params);
-    $('status-sub').textContent = T('agent.' + k + '.sub');
+    const known = ux === 'unknown' || ux === 'turnEnded'; // 훅이 없는 폴더: 대기인 척하지 않는다
+    $('status-main').textContent = known ? T('agent.' + ux) : T(sx.key, sx.params);
+    $('status-sub').textContent = known ? T('agent.' + ux + '.sub') : T('agent.' + k + '.sub');
     $('core').setAttribute('aria-label', T('core.aria', { s: T(sx.key, sx.params) }));
   }
 

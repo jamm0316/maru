@@ -227,6 +227,19 @@
 </div>
 
 <!-- 모달: 설정 -->
+<div class="pop rep-pop" id="rep-pop" role="dialog" hidden></div>
+<div class="backdrop" id="dlg-consent" hidden>
+  <div class="dialog wide" role="alertdialog" aria-modal="true" aria-labelledby="cs-title" aria-describedby="cs-go">
+    <h2 class="dlg-title serif" id="cs-title"></h2>
+    <div class="cs-k" id="cs-folder-k"></div><div class="cs-path" id="cs-folder"></div>
+    <div class="cs-k" id="cs-what-k"></div><div class="cs-what" id="cs-what"></div>
+    <div class="cs-k" id="cs-brief-k"></div><pre class="out cs-brief" id="cs-brief" tabindex="0"></pre>
+    <div class="cs-count hint" id="cs-count"></div>
+    <div class="hint" id="cs-go"></div>
+    <div class="hint cs-scroll" id="cs-scroll" role="status"></div>
+    <div class="btn-row"><button type="button" class="btn ghost" id="cs-cancel"></button><button type="button" class="btn primary" id="cs-ok"></button></div>
+  </div>
+</div>
 <div class="backdrop" id="dlg-settings" hidden>
   <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="set-title">
     <div class="dlg-head"><h2 class="dlg-title serif" id="set-title" data-i18n="set.title">설정</h2>

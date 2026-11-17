@@ -228,6 +228,19 @@ const ko = {
   'proj.merge.ok': '합치기', 'proj.err.save': '저장하지 못했습니다. 다시 시도해 주세요.', 'proj.err.busy': '다른 확인 창이 열려 있습니다. 닫고 다시 시도해 주세요.', 'proj.err.rollback': '완료 처리에 실패했고, 방금 남긴 안 함 표시도 되돌리지 못했습니다. 할 일 목록을 확인해 주세요.', 'proj.err.size': '프로젝트 상태가 너무 커져 저장하지 못했습니다. 완료한 프로젝트가 많으면 정리가 필요합니다.', 'proj.err.invalid': '목록이 바뀌어 처리하지 않았습니다.',
   'project.continue': '"{title}" 프로젝트를 이어서 하자. 남은 일부터 정리해 줘.',
   'tray.none': '열린 작업 공간 없음', 'tray.tip': '마루', 'tray.open': '창 열기', 'tray.new': '새 작업 공간…', 'tray.settings': '설정…', 'tray.quit': '종료',
+  // ---- 하위 세션(마루가 맡기는 일) ----
+  'consent.title': '마루가 새 하위 세션을 열려고 합니다', 'consent.folder': '폴더', 'consent.what': '프로젝트 · 제목', 'consent.brief': '맡길 내용 전체', 'consent.go': '열기를 누르면 이 내용으로 바로 시작합니다. 그 폴더의 설정과 훅이 그 세션에서 실행됩니다.',
+  'consent.paste': '열기를 누르면 이 내용이 입력줄에만 채워집니다. Enter 는 직접 눌러야 시작됩니다. 그 폴더의 설정과 훅이 그 세션에서 실행됩니다.', 'consent.count': '{n}자 · {m}줄', 'consent.scroll': '맡길 내용을 끝까지 내려야 열 수 있습니다', 'consent.open': '열기', 'consent.cancel': '취소',
+  'child.note.opened': '하위 세션을 열었습니다: {title}', 'child.note.paste': '하위 세션을 열었습니다: {title} — 맡길 내용이 입력줄에 채워집니다. Enter 를 눌러야 시작됩니다', 'child.note.cancel': '새 폴더에서 세션 열기를 취소했습니다', 'child.note.refused': '요청을 열지 못했습니다: {reason}', 'child.note.prefill': '맡긴 내용을 입력줄에 넣지 못했습니다',
+  'child.reject.name': '요청 이름이 올바르지 않음', 'child.reject.size': '요청이 너무 큼', 'child.reject.stale': '요청이 오래됨', 'child.reject.json': '요청 형식 오류', 'child.reject.shape': '요청 내용 오류', 'child.reject.version': '지원하지 않는 요청 버전', 'child.reject.auth': '요청 인증 실패', 'child.reject.replay': '같은 요청이 다시 들어옴', 'child.reject.prompt-size': '맡길 내용이 너무 큼', 'child.reject.budget': '하루에 열 수 있는 하위 세션 수를 넘음',
+  'child.reject.cwd': '열 수 없는 폴더', 'child.reject.title': '제목이 올바르지 않음', 'child.reject.prompt': '맡길 내용이 올바르지 않음', 'child.reject.project': '프로젝트 이름이 올바르지 않음', 'child.reject.from': '요청한 세션을 찾지 못함',
+  'child.reject.child': '하위 세션은 다시 하위 세션을 열 수 없음', 'child.reject.not-maru': '마루 세션만 열 수 있음', 'child.reject.not-claude': '요청한 세션이 Claude 를 실행 중이 아님', 'child.reject.project-unknown': '등록되지 않은 프로젝트',
+  'child.reject.children-max': '하위 세션이 이미 {n}개', 'child.reject.ws-max': '작업 공간이 가득 참', 'child.reject.rate': '요청이 너무 잦음', 'child.reject.dir': '요청 폴더가 안전하지 않음', 'child.reject.file': '요청 파일이 안전하지 않음', 'child.reject.trust-cancel': '새 폴더 열기를 취소함', 'child.reject.busy': '다른 확인이 진행 중', 'child.reject.start': '세션을 시작하지 못함',
+  'agent.unknown': '상태 알 수 없음', 'agent.unknown.sub': '이 폴더에는 상태 훅이 없어 작업 중인지 알 수 없습니다', 'agent.turnEnded': '턴 끝남', 'agent.turnEnded.sub': '하위 세션이 한 턴을 마치고 보고했습니다',
+  'ws.loc': '→ {name}', 'ws.sub': '서브에이전트 {names}', 'ws.kid.rep': '보고 {time}',
+  'ws.collapse.aria': '{title} 하위 세션 접기', 'ws.expand.aria': '{title} 하위 세션 펼치기', 'ws.kids.n': '하위 {n}',
+  'ws.reports': '보고 {n}', 'ws.reports.aria': '읽지 않은 보고 {n}개 보기',
+  'rep.empty.text': '(내용 없음)', 'rep.title': '하위 세션 보고', 'rep.hint': '마루에게 다음 말을 걸면 자동으로 전달됩니다', 'rep.unknown': '알 수 없는 세션', 'rep.empty': '읽지 않은 보고가 없습니다', 'rep.bg': '백그라운드 {n}',
 };
 
 const en = {
@@ -448,6 +461,19 @@ const en = {
   'proj.merge.ok': 'Merge', 'proj.err.save': "Couldn't save. Try again.", 'proj.err.busy': 'Another confirmation window is open. Close it and try again.', 'proj.err.rollback': "Completing failed, and the skip marks just added couldn't be undone either. Please check your to-do list.", 'proj.err.size': 'The project state is too large to save. Too many finished projects need cleaning up.', 'proj.err.invalid': 'The list changed, so nothing was done.',
   'project.continue': 'Let\'s continue the "{title}" project. Start by sorting out what is left.',
   'tray.none': 'No workspaces open', 'tray.tip': 'Maru', 'tray.open': 'Show Window', 'tray.new': 'New Workspace…', 'tray.settings': 'Settings…', 'tray.quit': 'Quit',
+  // ---- child sessions (work handed off by Maru) ----
+  'consent.title': 'Maru wants to open a new child session', 'consent.folder': 'Folder', 'consent.what': 'Project · title', 'consent.brief': 'Full brief', 'consent.go': "Pressing Open starts the session right away with this brief. That folder's own settings and hooks will run in it.",
+  'consent.paste': "Pressing Open only places this brief in the input line; you must press Enter yourself to start. That folder's own settings and hooks will run in it.", 'consent.count': '{n} chars · {m} lines', 'consent.scroll': 'Scroll the brief to the end to enable Open', 'consent.open': 'Open', 'consent.cancel': 'Cancel',
+  'child.note.opened': 'Opened a child session: {title}', 'child.note.paste': 'Opened a child session: {title} — the brief is placed in its input line; press Enter to start', 'child.note.cancel': 'Cancelled opening a session in the new folder', 'child.note.refused': "Couldn't open the request: {reason}", 'child.note.prefill': "Couldn't place the brief in the input line",
+  'child.reject.name': 'bad request name', 'child.reject.size': 'request too large', 'child.reject.stale': 'request too old', 'child.reject.json': 'bad request format', 'child.reject.shape': 'bad request content', 'child.reject.version': 'unsupported request version', 'child.reject.auth': 'request authentication failed', 'child.reject.replay': 'the same request arrived again', 'child.reject.prompt-size': 'brief is too large', 'child.reject.budget': 'daily child-session limit reached',
+  'child.reject.cwd': 'folder cannot be opened', 'child.reject.title': 'bad title', 'child.reject.prompt': 'bad brief', 'child.reject.project': 'bad project name', 'child.reject.from': 'requesting session not found',
+  'child.reject.child': 'a child session cannot open children', 'child.reject.not-maru': 'only the Maru session can open', 'child.reject.not-claude': 'the requesting session is not running Claude', 'child.reject.project-unknown': 'project is not registered',
+  'child.reject.children-max': 'already {n} child sessions', 'child.reject.ws-max': 'workspaces are full', 'child.reject.rate': 'too many requests', 'child.reject.dir': 'request folder is not safe', 'child.reject.file': 'request file is not safe', 'child.reject.trust-cancel': 'you cancelled opening the new folder', 'child.reject.busy': 'another confirmation is open', 'child.reject.start': "couldn't start the session",
+  'agent.unknown': 'State unknown', 'agent.unknown.sub': 'This folder has no state hooks, so it is unknown whether it is working', 'agent.turnEnded': 'Turn ended', 'agent.turnEnded.sub': 'The child session finished a turn and reported',
+  'ws.loc': '→ {name}', 'ws.sub': 'sub-agents {names}', 'ws.kid.rep': 'report {time}',
+  'ws.collapse.aria': 'Collapse child sessions of {title}', 'ws.expand.aria': 'Expand child sessions of {title}', 'ws.kids.n': '{n} child',
+  'ws.reports': 'Reports {n}', 'ws.reports.aria': 'Show {n} unread reports',
+  'rep.empty.text': '(no content)', 'rep.title': 'Child session reports', 'rep.hint': 'They are passed to Maru automatically the next time you talk to it', 'rep.unknown': 'Unknown session', 'rep.empty': 'No unread reports', 'rep.bg': 'background {n}',
 };
 
 const STR = { ko, en };
