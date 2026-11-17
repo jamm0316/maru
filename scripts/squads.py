@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """스쿼드(총괄 1 + 팀원 1~6) 검증·목록·설치·제거, 그리고 `claude --agents` 용 JSON 생성. python3 표준 라이브러리만 쓴다.
-실행: python3 -I scripts/squads.py <json|meta|list|check|install|remove [--proposal]|propose> ...  (README·CLAUDE.md 의 스쿼드 절 참고)
+실행: python3 -I scripts/squads.py <json|meta|list|check|install|remove [--proposal]|propose> ...  (docs/manual.ko.md·CLAUDE.md 의 스쿼드 절 참고)
 
 위치: 저장소 내장 squads/<slug>/ (추적) 와 개인 data/squads/<slug>/ (비추적). 같은 slug 면 개인 것이 우선.
 에이전트 이름은 셸이 만든다: sq-<slug>-lead, sq-<slug>-<role> (파일 안의 name 은 무시). 이 접두가 소속의 근거다.

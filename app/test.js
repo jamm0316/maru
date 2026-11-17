@@ -2283,7 +2283,7 @@ t('앱 연결(소스 구조): fromMain·고정 문장·dev 전용 환경변수·
   assert.ok(/app\.relaunch\(\)/.test(main) && /'hierarchy'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main));
   assert.ok(!/innerHTML/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8')));
   const pk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).build.extraResources.map((e) => e.to);
-  for (const x of ['payload/scripts', 'payload/prompts', 'payload/squads', 'payload/squads-en', 'payload/launchd', 'payload/bin', 'payload/install.sh', 'payload/uninstall.sh', 'payload/CLAUDE.md', 'payload/CLAUDE.en.md', 'payload/README.md', 'payload/.claude/agents', 'payload/.claude/skills', 'payload/.claude/settings.json']) assert.ok(pk.includes(x), x);
+  for (const x of ['payload/scripts', 'payload/prompts', 'payload/squads', 'payload/squads-en', 'payload/launchd', 'payload/bin', 'payload/install.sh', 'payload/uninstall.sh', 'payload/CLAUDE.md', 'payload/CLAUDE.en.md', 'payload/README.md', 'payload/docs/manual.ko.md', 'payload/.claude/agents', 'payload/.claude/skills', 'payload/.claude/settings.json']) assert.ok(pk.includes(x), x);
   assert.ok(!pk.some((p) => /data|\.git|settings\.local|cmux|payload\/app/.test(p)));
 });
 

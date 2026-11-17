@@ -31,7 +31,7 @@ SKILLS_VIEW=${MARU_SKILLS_VIEW:-$MARU_DATA/skills-view}    # 헤드리스 모델
 # 텔레그램 상시 세션(scripts/telegram.sh). 값은 환경변수 또는 data/maru.conf 로 덮어쓴다.
 MARU_TELEGRAM_SESSION=${MARU_TELEGRAM_SESSION:-maru-telegram}   # tmux 세션 이름
 # 세션의 --permission-mode. 항상 명시적으로 넘긴다(사용자 전역 기본 모드가 암묵 적용되지 않게).
-# 허용 목록: default(매 승인마다 멈춤, 가장 보수적) / acceptEdits / plan / auto. 그 외(빈 값·bypassPermissions·dontAsk 포함)는 거부. 장단점은 README.
+# 허용 목록: default(매 승인마다 멈춤, 가장 보수적) / acceptEdits / plan / auto. 그 외(빈 값·bypassPermissions·dontAsk 포함)는 거부. 장단점은 docs/manual.ko.md 「텔레그램으로 지시하기」의 「권한 모드」.
 MARU_TELEGRAM_PERMISSION_MODE=${MARU_TELEGRAM_PERMISSION_MODE-default}
 MARU_TELEGRAM_MAX_RESTARTS=${MARU_TELEGRAM_MAX_RESTARTS:-5}      # 1시간 안에 허용하는 자동 재시작 횟수(양의 정수)
 # PATH 앞에 둘 디렉터리(시험에서는 MARU_PATH_PREFIX= 로 비울 수 있다)

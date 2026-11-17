@@ -158,7 +158,7 @@ const ko = {
   'cal.toggle': '일정 가져오기', 'cal.off': '꺼짐', 'cal.pending': '읽는 중…', 'cal.ok': '읽기 성공 · 일정 {n}개', 'cal.fail': '일정을 읽지 못했습니다 — 캘린더 접근을 허용해 주세요',
   'set.tg.name': '텔레그램', 'set.tg.desc': '폰에서 마루에 지시하는 선택 기능입니다.',
   'tg.running': '상시 세션 실행 중', 'tg.registered': '로그인 때 자동 시작 등록됨',
-  'tg.off': '설정하지 않음 — README 「텔레그램으로 지시하기」 와 scripts/telegram.sh status 를 보세요',
+  'tg.off': '설정하지 않음 — docs/manual.ko.md 「텔레그램으로 지시하기」 와 scripts/telegram.sh status 를 보세요',
   'set.mem.name': '기억 폴더', 'set.mem.desc': '회고가 쌓는 기억과 오늘 일지의 위치입니다(개수만 표시하며 내용은 읽지 않습니다).',
   'mem.ok': '기억 {n}개 · 오늘 일지 {j}', 'mem.journal.yes': '있음', 'mem.journal.no': '아직 없음', 'mem.none': '기억 폴더가 아직 없습니다 — 첫 세션이 끝나면 만들어집니다',
   // 업그레이드
@@ -393,7 +393,7 @@ const en = {
   'cal.toggle': 'Show events', 'cal.off': 'Off', 'cal.pending': 'Reading…', 'cal.ok': ['Read OK · {n} event', 'Read OK · {n} events'], 'cal.fail': "Couldn't read events — allow Calendar access",
   'set.tg.name': 'Telegram', 'set.tg.desc': 'Optional: give Maru instructions from your phone.',
   'tg.running': 'Always-on session is running', 'tg.registered': 'Registered to start at login',
-  'tg.off': 'Not set up — see the Telegram section of the README and scripts/telegram.sh status',
+  'tg.off': 'Not set up — see the Telegram section of docs/manual.ko.md (Korean only) and scripts/telegram.sh status',
   'set.mem.name': 'Memory folder', 'set.mem.desc': 'Where reflection keeps memories and today\'s journal (only counts are shown; contents are never read).',
   'mem.ok': '{n} memories · today\'s journal: {j}', 'mem.journal.yes': 'yes', 'mem.journal.no': 'not yet', 'mem.none': "The memory folder doesn't exist yet — it appears after your first session ends",
   'upd.title': 'Upgrade', 'upd.current': 'Current version {v}', 'upd.checking': 'Checking…', 'upd.none': "You're up to date",

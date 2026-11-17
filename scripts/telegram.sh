@@ -1,7 +1,7 @@
 #!/bin/bash
 # 텔레그램으로 지시를 받는 상시 세션(tmux 안의 claude --channels).
 # 사용: telegram.sh start [--unattended] | stop | status | attach | logs [줄 수]
-# 설치·토큰 입력·페어링은 사용자가 직접 한다(README 「텔레그램으로 지시하기」). 이 스크립트는 아무것도 설치하지 않고 토큰 파일을 읽지 않는다.
+# 설치·토큰 입력·페어링은 사용자가 직접 한다(docs/manual.ko.md 「텔레그램으로 지시하기」). 이 스크립트는 아무것도 설치하지 않고 토큰 파일을 읽지 않는다.
 set -u
 unset MARU_APP_SESSION  # 앱 세션 상태 신호가 텔레그램 세션에 섞이지 않게
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")
@@ -62,7 +62,7 @@ pane_blockers() {
   t=$(tmux capture-pane -p -t "=$SESS:" 2>/dev/null) || return 1
   if grep -qiE 'not logged in|please run /login|invalid api key|sign-in (has )?expired|session expired|run claude auth login' <<<"$t"; then echo "  막힘: 로그인 만료/필요 — attach 해서 /login 하세요(claude auth login)"; found=0; fi
   if grep -qiE 'trust this folder|do you trust|new mcp server found|use this mcp server|i am using this for local development' <<<"$t"; then echo "  막힘: 신뢰/동의 화면이 응답을 기다림 — attach 해서 직접 선택하세요"; found=0; fi
-  if grep -qiE 'telegram_bot_token|/telegram:configure|not configured|no bot token' <<<"$t"; then echo "  막힘: 텔레그램 플러그인이 설정되지 않음(토큰) — README 1회 설정 참고"; found=0; fi
+  if grep -qiE 'telegram_bot_token|/telegram:configure|not configured|no bot token' <<<"$t"; then echo "  막힘: 텔레그램 플러그인이 설정되지 않음(토큰) — docs/manual.ko.md 1회 설정 참고"; found=0; fi
   if grep -qiE 'blocked by org policy|not on the approved|channels? (are|is) not enabled|channels.*(disabled|blocked)' <<<"$t"; then echo "  막힘: 채널이 조직 정책/승인 목록으로 차단됨"; found=0; fi
   return $found
 }
@@ -114,8 +114,8 @@ cmd_start() {
     sc=$(plugin_scope)
     case "$sc" in
       local|project) ;;
-      user) die "텔레그램 플러그인이 user 범위로 설치되어 있습니다(모든 세션에서 로드되어 봇 폴러가 중복될 수 있음). README 의 범위 이동 절차(user 제거 후 maru 폴더에서 --scope local 설치)를 따르세요." ;;
-      *) die "텔레그램 플러그인이 설치되어 있지 않습니다. README 「텔레그램으로 지시하기」의 1회 설정(maru 폴더에서 claude plugin install telegram@claude-plugins-official --scope local)을 먼저 하세요." ;;
+      user) die "텔레그램 플러그인이 user 범위로 설치되어 있습니다(모든 세션에서 로드되어 봇 폴러가 중복될 수 있음). docs/manual.ko.md 의 범위 이동 절차(user 제거 후 maru 폴더에서 --scope local 설치)를 따르세요." ;;
+      *) die "텔레그램 플러그인이 설치되어 있지 않습니다. docs/manual.ko.md 「텔레그램으로 지시하기」의 1회 설정(maru 폴더에서 claude plugin install telegram@claude-plugins-official --scope local)을 먼저 하세요." ;;
     esac
   fi
   if ! access_ready; then

@@ -446,7 +446,7 @@ check "자동 설치 없음(data/squads 없음)" [ ! -e "$RDATA/squads" ]
 echo "== 가드"
 check "프롬프트에 스쿼드 제안 절" grep -q '^## 스쿼드 제안' "$REPO/prompts/reflect-prompt.md"
 # 공개해도 되는 파일인지: 사용자 홈 아래 절대 경로(macOS·리눅스의 홈 폴더 경로)가 없어야 한다. 개인 이름 등은 환경변수 MARU_TEST_PRIVATE_PATTERNS(grep -E 패턴)로 넘기면 같이 검사한다(저장소에는 적지 않는다).
-GUARD_FILES=("$REPO/squads" "$REPO/prompts" "$REPO/scripts/squads.py" "$REPO/scripts/maru-claude.sh" "$REPO/scripts/test-squads.sh" "$REPO/CLAUDE.md" "$REPO/README.md")
+GUARD_FILES=("$REPO/squads" "$REPO/prompts" "$REPO/scripts/squads.py" "$REPO/scripts/maru-claude.sh" "$REPO/scripts/test-squads.sh" "$REPO/CLAUDE.md" "$REPO/README.md" "$REPO/README.ko.md" "$REPO/README.zh-CN.md" "$REPO/docs/manual.ko.md")
 GP="/Use""rs/[^/[:space:]]+/|/ho""me/[^/[:space:]]+/"   # 이 파일 자신이 걸리지 않게 문자열을 나눠 쓴다
 check "추적 파일에 홈 절대 경로 없음(squads·prompts·squads.py·maru-claude.sh·test-squads.sh·CLAUDE.md·README.md)" [ -z "$(grep -rlE "$GP" "${GUARD_FILES[@]}" 2>/dev/null)" ]
 if [ -n "${MARU_TEST_PRIVATE_PATTERNS:-}" ]; then

@@ -59,11 +59,11 @@ else echo "$(T "  실패 plist 템플릿: $why" "  Failed plist template: $why")
 if [ -n "$TG" ]; then
   say "$(T "텔레그램 자동 시작 사전 확인" "Telegram auto-start pre-check")"
   if ! bash "$MARU_HOME/scripts/telegram.sh" check-access; then
-    echo "$(T "  --with-telegram 은 페어링과 allowlist 설정이 끝난 뒤에만 등록합니다. 먼저 README 「텔레그램으로 지시하기」의 1회 설정을 마친 뒤 다시 실행하세요(아무것도 등록하지 않고 종료)." "  --with-telegram registers only after pairing and the allowlist are set up. Finish the one-time setup in the README section on Telegram first, then run again (nothing was registered).")" >&2
+    echo "$(T "  --with-telegram 은 페어링과 allowlist 설정이 끝난 뒤에만 등록합니다. 먼저 docs/manual.ko.md 「텔레그램으로 지시하기」의 1회 설정을 마친 뒤 다시 실행하세요(아무것도 등록하지 않고 종료)." "  --with-telegram registers only after pairing and the allowlist are set up. Finish the one-time setup in the Telegram section of docs/manual.ko.md (Korean only) first, then run again (nothing was registered).")" >&2
     exit 1
   fi
   sc=$(cd "$MARU_HOME" && claude plugin list 2>/dev/null | awk '/^ *❯ /{on=($0 ~ /telegram@claude-plugins-official/)} on && /Scope:/{sub(/.*Scope: */,""); print; exit}')
-  [ "$sc" = user ] && echo "$(T "  경고: 텔레그램 플러그인이 user 범위입니다. README 의 범위 이동 절차를 따르세요(설치 스크립트는 플러그인을 설치하지 않습니다)." "  Warning: the Telegram plugin has user scope. Follow the scope-move steps in the README (the install script does not install plugins).")" >&2
+  [ "$sc" = user ] && echo "$(T "  경고: 텔레그램 플러그인이 user 범위입니다. docs/manual.ko.md 「텔레그램으로 지시하기」 1회 설정 2번의 범위 이동 절차를 따르세요(설치 스크립트는 플러그인을 설치하지 않습니다)." "  Warning: the Telegram plugin has user scope. Follow the scope-move steps in docs/manual.ko.md, Telegram section, one-time setup step 2 (the install script does not install plugins).")" >&2
 fi
 echo "  MARU_HOME=$MARU_HOME"; echo "  MARU_DATA=$MARU_DATA"; echo "$(T "  기억 폴더=$MEM" "  Memory folder=$MEM")"
 # 템플릿이 있고 비어 있지 않은지, 렌더가 되는지는 launchd 단계에서 임시 파일로 검증한다(기존 파일은 그 뒤에야 건드린다).

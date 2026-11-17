@@ -159,6 +159,10 @@
         "to": "payload/README.md"
       },
       {
+        "from": "../docs/manual.ko.md",
+        "to": "payload/docs/manual.ko.md"
+      },
+      {
         "from": "../.claude/agents",
         "to": "payload/.claude/agents",
         "filter": [
