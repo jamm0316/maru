@@ -1786,7 +1786,8 @@
     if (r && r.ok) { flashNote(T('meet.note.ok')); refreshMeet(); return; }
     const reason = r && r.reason;
     if (reason === 'cancel') return;
-    flashNote(T(reason === 'not-maru' ? 'meet.note.not-maru' : reason === 'setup' ? 'meet.note.setup' : reason === 'not-ready' || reason === 'no-term' || reason === 'shell' ? 'meet.note.not-ready' : 'meet.note.fail'));
+    const why = r && ['bracketed', 'claude-up', 'quiet'].includes(r.why) ? ' (' + T('meet.why.' + r.why) + ')' : ''; // 어느 조건에서 기다리는지(진단)
+    flashNote(T(reason === 'not-maru' ? 'meet.note.not-maru' : reason === 'setup' ? 'meet.note.setup' : reason === 'not-ready' || reason === 'no-term' || reason === 'shell' ? 'meet.note.not-ready' : 'meet.note.fail') + (reason === 'not-ready' ? why : ''));
   }
   $('meet-start').addEventListener('click', startMeet);
   $('meet-dismiss').addEventListener('click', async () => { try { await window.maru.meetDismiss(); } catch (e) { /* 무시 */ } $('meet-banner').hidden = true; });

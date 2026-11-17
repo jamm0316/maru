@@ -414,6 +414,14 @@ const SMOKE_LINE = 'maru-ok 한글 명조 정렬 테스트 가나다라마바사
 function trackBracketed(w, d) { // 순서·청크 경계 처리는 lib.js 의 bpStep(순수 함수, 시험 대상)
   const n = L.bpStep({ tail: w.seqTail, bracketed: w.bracketed, awaitClaude: w.awaitClaude, sawOff: w.sawOff, claudeUp: w.claudeUp }, d);
   w.seqTail = n.tail; w.bracketed = n.bracketed; w.sawOff = n.sawOff; w.claudeUp = n.claudeUp;
+  if (!w.claudeUp && w.awaitClaude && n.sawOn) w.claudeUp = L.claudeUpAfter({ claudeUp: false, awaitClaude: true, sawOn: true, procName: termProc(w) }); // 셸이 2004l 을 안 내도 포그라운드가 셸이 아니면 뜬 것(termProc 는 이때만 부른다)
+}
+// 판단하는 자리(fillStep·firstMeetingGate)에서 쓰는 claudeUp: 저장된 값이 거짓이어도 입력 모드가 켜져 있고 포그라운드가 셸이 아니면 뜬 것으로 본다(참이 되면 저장한다)
+function claudeUpNow(w) {
+  if (w.claudeUp === true) return true;
+  if (!w.awaitClaude || w.bracketed !== true) return false;
+  if (L.claudeUpAfter({ claudeUp: false, awaitClaude: true, sawOn: true, procName: termProc(w) })) { w.claudeUp = true; return true; }
+  return false;
 }
 function sendToRenderer(ch, ...args) { if (win && !win.isDestroyed()) win.webContents.send(ch, ...args); }
 function writeFxState(w) {
@@ -1284,7 +1292,7 @@ async function fillWhenReady(w, text, claudeOnly, timeoutMs = READY_TIMEOUT_MS) 
     const exists = wss.get(w.id) === w;
     const d = L.fillStep({
       elapsedMs: Date.now() - t0, timeoutMs, exists, active: activeId === w.id, hasTerm: !!w.term, state: exists ? wsState(w) : 'exited', claudeOnly,
-      claudeUp: w.claudeUp === true, bracketed: w.bracketed === true, quietMs: Date.now() - (w.lastOutputAt || 0), procName: termProc(w), typed: (w.typedN || 0) > typed0,
+      claudeUp: claudeUpNow(w), bracketed: w.bracketed === true, quietMs: Date.now() - (w.lastOutputAt || 0), procName: termProc(w), typed: (w.typedN || 0) > typed0,
     });
     if (d.do === 'abort') return { ok: false, reason: d.reason };
     if (d.do === 'busy') return { ok: true, filled: false, reason: 'agent-busy' };
@@ -1539,7 +1547,7 @@ async function prefillChild(w, prompt) {
   for (;;) {
     const exists = wss.get(w.id) === w;
     const d = L.fillStep({ elapsedMs: Date.now() - t0, timeoutMs: PREFILL_TIMEOUT_MS, exists, active: true, hasTerm: !!w.term, state: exists ? wsState(w) : 'exited', claudeOnly: true,
-      claudeUp: w.claudeUp === true, bracketed: w.bracketed === true, quietMs: Date.now() - (w.lastOutputAt || 0), procName: termProc(w), typed: (w.typedN || 0) > typed0 });
+      claudeUp: claudeUpNow(w), bracketed: w.bracketed === true, quietMs: Date.now() - (w.lastOutputAt || 0), procName: termProc(w), typed: (w.typedN || 0) > typed0 });
     if (d.do === 'abort' || d.do === 'cancel' || d.do === 'busy') return;
     if (d.do === 'stash') { note('prefill'); return; }
     if (d.do === 'fill') {
@@ -2128,7 +2136,13 @@ async function meetFacts() {
 function meetGate(id, w, term, facts) {
   if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' };
   if (!term || w.term !== term) return { ok: false, reason: 'no-term' };
-  return L.firstMeetingGate({ hasTerm: true, procName: termProc(w), bracketed: w.bracketed === true, awaitClaude: w.awaitClaude === true, claudeUp: w.claudeUp === true, quietMs: Date.now() - (w.lastOutputAt || 0), onboarded: facts.onboarded, hookState: !!readAgentState(w), loggedIn: facts.loggedIn });
+  return L.firstMeetingGate({ hasTerm: true, procName: termProc(w), bracketed: w.bracketed === true, awaitClaude: w.awaitClaude === true, claudeUp: claudeUpNow(w), quietMs: Date.now() - (w.lastOutputAt || 0), onboarded: facts.onboarded, hookState: !!readAgentState(w), loggedIn: facts.loggedIn });
+}
+// 출력이 막 있었던 것(quiet)만 걸렸으면 350ms 간격으로 최대 3번 다시 본다(터미널 상태·term 신원은 매번 다시 읽는다). meetBusy 는 그동안 유지된다
+async function meetGateWait(id, w, term, facts) {
+  let g = meetGate(id, w, term, facts);
+  for (let i = 0; i < 3 && !g.ok && g.reason === 'not-ready' && g.why === 'quiet'; i++) { await delay(350); g = meetGate(id, w, term, facts); }
+  return g;
 }
 let meetBusy = false; // 확인 창·검사가 진행 중이면 두 번째 요청은 무시(더블 클릭으로 확인 창·붙여넣기가 둘 되지 않게)
 // 시작/다시 하기: 스킬 "설치 요청" 과 같은 보호(활성 마루 작업 공간만, 붙여넣기 준비, 네이티브 확인, Enter 는 보내지 않음). 고정 문장 /first-meeting 만 쓴다.
@@ -2144,12 +2158,13 @@ ipcMain.handle('meet:start', async (e, id) => {
     const paste = L.firstMeetingPaste(text); // 고정 문장일 때만(일반 퀘스트 필터는 '/' 로 시작하는 문장을 거부한다)
     if (!paste) return { ok: false, reason: 'invalid' };
     const term0 = w.term;
-    const g0 = meetGate(id, w, term0, await meetFacts()); // 첫 설정(테마·로그인) 화면에는 입력줄이 없다: 준비가 확인될 때만 확인 창을 띄운다
-    if (!g0.ok) return { ok: false, reason: g0.reason };
+    const f0 = await meetFacts();
+    const g0 = await meetGateWait(id, w, term0, f0); // 첫 설정(테마·로그인) 화면에는 입력줄이 없다: 준비가 확인될 때만 확인 창을 띄운다
+    if (!g0.ok) return { ok: false, reason: g0.reason, why: g0.why };
     if (!(await confirmBox(tr('meet.confirm.title'), tr('meet.confirm.detail', { text }), tr('meet.start')))) return { ok: false, reason: 'cancel' };
     const facts = await meetFacts(); // 비동기 일은 여기까지. 아래 판정과 쓰기 사이에는 await 가 없다
-    const g = meetGate(id, w, term0, facts);
-    if (!g.ok) return { ok: false, reason: g.reason };
+    const g = await meetGateWait(id, w, term0, facts); // 성공하면 바로 아래 쓰기까지 await 가 없다
+    if (!g.ok) return { ok: false, reason: g.reason, why: g.why };
     w.term.write(paste); // Enter 는 보내지 않는다
     if (setupState && !setupState.metAt) saveSetup({ metAt: nowIso() });
     return { ok: true };

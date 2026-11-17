@@ -346,12 +346,19 @@ function isUserInput(data) {
 // awaitClaude(우리가 연 작업 공간): 셸이 줄을 받아들이며 끄고(l) 그 뒤 켜는(h) 것을 claudeUp 으로 센다. 셸이 살아 있어도 같은 순서가 나오므로 claudeUp 만으로 "Claude 가 떴다"를 확정하지 않는다 — fillStep 이 포그라운드 프로세스도 본다
 function bpStep(st, chunk) {
   const s = String((st && st.tail) || '') + String(chunk);
-  const re = /\x1b\[\?2004([hl])/g; let m; let last = null; let sawOff = !!(st && st.sawOff); let claudeUp = !!(st && st.claudeUp);
+  const re = /\x1b\[\?2004([hl])/g; let m; let last = null; let sawOff = !!(st && st.sawOff); let claudeUp = !!(st && st.claudeUp); let sawOn = false; // sawOn: 이번 걸음에 ?2004h 가 있었다(셸이 2004l 을 안 내는 설정에서도 claudeUpAfter 가 쓴다)
   while ((m = re.exec(s)) !== null) {
-    last = m[1];
+    last = m[1]; if (m[1] === 'h') sawOn = true;
     if (st && st.awaitClaude) { if (m[1] === 'l') sawOff = true; else if (sawOff) claudeUp = true; }
   }
-  return { ...st, tail: s.slice(-7), bracketed: last === 'h' ? true : last === 'l' ? false : !!(st && st.bracketed), sawOff, claudeUp };
+  return { ...st, tail: s.slice(-7), bracketed: last === 'h' ? true : last === 'l' ? false : !!(st && st.bracketed), sawOff, claudeUp, sawOn };
+}
+// 셸과 무관한 두 번째 claudeUp 판정(순수). zsh 의 `unset zle_bracketed_paste` 처럼 셸이 ?2004l 을 내지 않으면 bpStep 의 순서(l 다음 h)가 안 이뤄진다.
+// 그래서 awaitClaude 인 작업 공간에서 붙여넣기 모드 켬(h)을 봤고 포그라운드가 셸이 아니면(이름을 알 때만) claude 가 뜬 것으로 본다. 래퍼는 bash 스크립트라 셸 이름이어서 이 단계에서 걸러진다.
+function claudeUpAfter({ claudeUp, awaitClaude, sawOn, procName }) {
+  if (claudeUp === true) return true;
+  if (awaitClaude !== true || sawOn !== true) return false;
+  return typeof procName === 'string' && procName.length > 0 && !isShellProcessName(procName);
 }
 // 기다리며 채우기의 한 걸음(순수). c = { elapsedMs, timeoutMs, exists, active, hasTerm, state, claudeOnly, claudeUp, bracketed, quietMs, procName, typed }
 //  -> { do: 'abort', reason } | 'busy' | 'cancel'(기다리는 사이 사용자가 입력했다) | { do: 'stash', reason } | 'fill' | 'wait'
@@ -2746,7 +2753,10 @@ function firstMeetingGate(c) {
   if (!c || !c.hasTerm) return { ok: false, reason: 'no-term' };
   if (isShellProcessName(c.procName)) return { ok: false, reason: 'shell' };
   if (c.hookState !== true && c.onboarded !== true && (c.onboarded === false || c.loggedIn === false)) return { ok: false, reason: 'setup' };
-  if (c.bracketed !== true || (c.awaitClaude === true && c.claudeUp !== true) || !(c.quietMs >= READY_QUIET_MS)) return { ok: false, reason: 'not-ready' };
+  // why: not-ready 의 세부(먼저 걸린 것): 입력 모드(bracketed) → claude 시작(claude-up) → 출력 중(quiet). reason 은 그대로
+  if (c.bracketed !== true) return { ok: false, reason: 'not-ready', why: 'bracketed' };
+  if (c.awaitClaude === true && c.claudeUp !== true) return { ok: false, reason: 'not-ready', why: 'claude-up' };
+  if (!(c.quietMs >= READY_QUIET_MS)) return { ok: false, reason: 'not-ready', why: 'quiet' };
   return { ok: true };
 }
 function firstMeetingPaste(text) { return text === FIRST_MEETING_TEXT ? '\x1b[200~' + FIRST_MEETING_TEXT + '\x1b[201~' : null; }
@@ -3343,7 +3353,7 @@ const api = {
   hierarchyOrder, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
   MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, parseOnboarded, firstMeetingGate, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
   defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
-  PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, claudeCandidates, nvmVersionDirs, parseClaudeProbe, CLAUDE_PROBE_CMD, setupCommand, buildSetupScript, SETUP_KINDS, SETUP_INSTALL_CMD, firstMeetingBanner,
+  claudeUpAfter, PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, claudeCandidates, nvmVersionDirs, parseClaudeProbe, CLAUDE_PROBE_CMD, setupCommand, buildSetupScript, SETUP_KINDS, SETUP_INSTALL_CMD, firstMeetingBanner,
   INBOX_NOTIF_MAX, PROPOSAL_FILE_MAX, PROPOSAL_TOTAL_MAX, PROPOSAL_FILES_MAX, logAtMs, plausibleLogAt, fmtLogAt, seenToStore, PROPOSAL_LIST_MAX, INBOX_SEEN_MAX_BYTES, validProposalSlug, cleanDisplay, cleanProposalText, proposalMeta, scanProposalDir, listProposals, proposalDetail, trashProposalDir, skillRequestText, parseSquadCheck, summarizeSquadCheck, validateInboxSeen, parseInboxSeen, readInboxSeenFile, saveInboxSeen, markUnseen, newestAt, relativeAgo,
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,

@@ -2286,7 +2286,7 @@ t('앱 연결(소스 구조): fromMain·고정 문장·dev 전용 환경변수·
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   for (const ch of ['setup:get', 'setup:prereqs', 'setup:create-home', 'setup:connect-later', 'setup:finish', 'meet:get', 'meet:dismiss']) assert.ok(new RegExp("ipcMain\\.handle\\('" + ch + "', (async )?\\(e[,)][^\\n]*\\n?[\\s\\S]{0,80}fromMain\\(e\\)").test(main), ch);
   const ms = main.split("ipcMain.handle('meet:start'")[1].split('\n});')[0];
-  assert.ok(/wsFrom\(e, id\)/.test(ms) && /isMaruWs\(w\)/.test(ms) && /meetFacts\(\)/.test(ms) && /meetGate\(id, w, term0/.test(ms) && /bracketed: w\.bracketed === true/.test(main) && /awaitClaude: w\.awaitClaude === true/.test(main) && /meetBusy/.test(ms) && /confirmBox/.test(ms) && /firstMeetingPaste\(text\)/.test(ms) && !/writePrompt/.test(ms) && !/\\r|\\n/.test(ms));
+  assert.ok(/wsFrom\(e, id\)/.test(ms) && /isMaruWs\(w\)/.test(ms) && /meetFacts\(\)/.test(ms) && /meetGateWait\(id, w, term0/.test(ms) && /meetGate\(id, w, term, facts\)/.test(main) && /bracketed: w\.bracketed === true/.test(main) && /awaitClaude: w\.awaitClaude === true/.test(main) && /meetBusy/.test(ms) && /confirmBox/.test(ms) && /firstMeetingPaste\(text\)/.test(ms) && !/writePrompt/.test(ms) && !/\\r|\\n/.test(ms));
   assert.ok(/!app\.isPackaged && typeof process\.env\[k\]/.test(main) && /MARU_APP_MANAGED_HOME/.test(main) && /MARU_APP_PAYLOAD/.test(main));
   assert.ok(/MARU_LANG: curLang\(\)/.test(main) && /installEnv\(\)/.test(main));
   assert.ok(/app\.relaunch\(\)/.test(main) && /'hierarchy'\]\.includes\(process\.env\.MARU_APP_UI\)/.test(main));
@@ -3364,6 +3364,19 @@ t('parseOnboarded: true/false/null', () => {
   assert.strictEqual(L.parseOnboarded('{"hasCompletedOnboarding":"true"}'), false);
   for (const bad of ['', 'not json', '[1]', 'null', 42, undefined]) assert.strictEqual(L.parseOnboarded(bad), null);
 });
+t('claudeUpAfter: 셸이 2004l 을 안 내도 포그라운드가 셸이 아니면 뜬 것', () => {
+  const b = { claudeUp: false, awaitClaude: true, sawOn: true };
+  for (const p of ['claude', 'node', '2.1.326']) assert.strictEqual(L.claudeUpAfter({ ...b, procName: p }), true, p);
+  for (const p of ['bash', 'zsh', '-zsh', 'sh', 'fish', '', undefined, null, 5]) assert.strictEqual(L.claudeUpAfter({ ...b, procName: p }), false, String(p)); // 래퍼(bash) 단계·모름은 아님
+  assert.strictEqual(L.claudeUpAfter({ ...b, sawOn: false, procName: 'claude' }), false);
+  assert.strictEqual(L.claudeUpAfter({ ...b, awaitClaude: false, procName: 'claude' }), false);
+  assert.strictEqual(L.claudeUpAfter({ claudeUp: true, procName: 'zsh' }), true); // 이미 참이면 그대로
+  assert.strictEqual(L.claudeUpAfter({ claudeUp: false }), false);
+  const noOff = L.bpStep({ tail: '', bracketed: false, awaitClaude: true, sawOff: false, claudeUp: false }, '% \x1b[?2004h'); // 2004l 이 없는 셸
+  assert.deepStrictEqual([noOff.claudeUp, noOff.sawOn, noOff.bracketed], [false, true, true]);
+  assert.strictEqual(L.bpStep({ tail: '', bracketed: false }, 'plain').sawOn, false);
+  assert.strictEqual(L.claudeUpAfter({ claudeUp: noOff.claudeUp, awaitClaude: true, sawOn: noOff.sawOn, procName: 'claude' }), true);
+});
 t('firstMeetingGate: 첫 설정 중·셸·준비 전에는 채우지 않는다', () => {
   const ok = { hasTerm: true, procName: 'claude', bracketed: true, awaitClaude: true, claudeUp: true, quietMs: 1000, onboarded: true, hookState: false, loggedIn: true };
   assert.deepStrictEqual(L.firstMeetingGate(ok), { ok: true });
@@ -3377,7 +3390,11 @@ t('firstMeetingGate: 첫 설정 중·셸·준비 전에는 채우지 않는다',
   assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: null, loggedIn: null }).ok, true);
   assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: null, loggedIn: true }).ok, true);
   assert.strictEqual(L.firstMeetingGate({ ...ok, onboarded: null, loggedIn: false, hookState: true }).ok, true);
-  assert.strictEqual(L.firstMeetingGate({ ...ok, bracketed: false }).reason, 'not-ready');
+  assert.deepStrictEqual(L.firstMeetingGate({ ...ok, bracketed: false }), { ok: false, reason: 'not-ready', why: 'bracketed' });
+  assert.deepStrictEqual(L.firstMeetingGate({ ...ok, awaitClaude: true, claudeUp: false }), { ok: false, reason: 'not-ready', why: 'claude-up' });
+  assert.deepStrictEqual(L.firstMeetingGate({ ...ok, quietMs: 100 }), { ok: false, reason: 'not-ready', why: 'quiet' });
+  assert.strictEqual(L.firstMeetingGate({ ...ok, bracketed: false, awaitClaude: true, claudeUp: false, quietMs: 0 }).why, 'bracketed'); // 먼저 걸린 것
+  assert.strictEqual(L.firstMeetingGate({ ...ok, awaitClaude: true, claudeUp: false, quietMs: 0 }).why, 'claude-up');
   assert.strictEqual(L.firstMeetingGate({ ...ok, awaitClaude: true, claudeUp: false }).reason, 'not-ready'); // 우리가 연 작업 공간은 claudeUp 필요
   assert.strictEqual(L.firstMeetingGate({ ...ok, awaitClaude: false, claudeUp: false }).ok, true); // 처음 작업 공간·복원된 작업 공간은 awaitClaude 가 없다
   assert.strictEqual(L.firstMeetingGate({ ...ok, quietMs: 100 }).reason, 'not-ready');
