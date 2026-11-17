@@ -678,12 +678,22 @@ function matchSubs(subs, knownNames) {
 function squadOpen(userChoice, active) { return typeof userChoice === 'boolean' ? userChoice : !!active; }
 // 작업 공간에서 claude 를 띄우는 한 줄(셸에 쓴다). wrapper = 저장소의 maru-claude.sh 절대 경로(없거나 이상하면 null -> 그냥 claude)
 // resumeId(선택): 있으면 소문자 uuid 형식이어야 하고(아니면 null — 호출 쪽은 실행하지 않는다) `--resume <uuid>` 를 붙인다. 래퍼는 받은 인자를 그대로 claude 에 넘긴다.
-function claudeLaunchCommand(sid, wrapper, resumeId, freshId) {
-  const ok = typeof wrapper === 'string' && wrapper.startsWith('/') && wrapper.length <= 1024 && !hasBadChars(wrapper) && !/[\r\n]/.test(wrapper);
+// claudeBin(선택): resolveClaude() 가 찾은 절대 경로. 유효하면(래퍼와 같은 검증, 폴더가 "/" 이거나 ":" 를 품으면 제외) 사용자 셸의 PATH 에 claude 가 없어도 뜨게
+// PATH 맨 뒤에 그 폴더를 덧붙인다(앞이 아니라 뒤: 사용자 도구를 가리지 않는다). `[ -x bin ] || command -v claude` 라서 저장된 경로가 낡았어도 PATH 의 claude 가 있으면 그대로 간다.
+// 실행 대상은 래퍼(있으면) 아니면 이름 claude — 사용자 셸이 고른 claude 가 먼저고 덧붙인 폴더는 대비책이다. 래퍼가 이름으로 부르는 claude 도 같은 PATH 로 찾는다. { } 묶음은 쓰지 않는다(fish 호환).
+// 맨 앞 \x15(Ctrl-U)는 셸에 이미 쳐 둔 글자가 이 줄과 섞이지 않게 줄을 지운다(예전 형태에도 붙였다: 이 변경이 예전 형태의 유일한 차이).
+function claudeLaunchCommand(sid, wrapper, resumeId, freshId, claudeBin) {
+  const pathOk = (p) => typeof p === 'string' && p.startsWith('/') && p.length <= 1024 && !hasBadChars(p) && !/[\r\n]/.test(p);
+  const ok = pathOk(wrapper);
   const has = (v) => v !== undefined && v !== null;
   if ((has(resumeId) && !validSessionUuid(resumeId)) || (has(freshId) && !validSessionUuid(freshId)) || (has(resumeId) && has(freshId))) return null; // 둘 다 주면 거부(--resume 과 --session-id 는 함께 쓰지 않는다)
   const arg = resumeId ? ' --resume ' + resumeId : freshId ? ' --session-id ' + freshId : ''; // freshId: 새 세션에 앱이 정한 uuid(그 작업 공간의 claudeSid)
-  return 'command -v claude >/dev/null && ' + (sid ? 'MARU_APP_SESSION=' + sid + ' ' : '') + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + arg + ' ; exit 127\r'; // exec 가 안 되면(claude 없음·실패) 셸이 남지 않게 끝낸다(남은 셸에 문장을 채우는 사고 방지). 종료 코드 127 은 렌더러가 "claude 를 찾지 못함" 으로 알린다
+  const env = sid ? 'MARU_APP_SESSION=' + sid + ' ' : '';
+  if (pathOk(claudeBin)) {
+    const dir = require('path').dirname(claudeBin);
+    if (dir !== '/' && !dir.includes(':') && pathOk(dir)) return '\x15[ -x ' + shellQuote(claudeBin) + ' ] || command -v claude >/dev/null || exit 127; ' + env + 'PATH="$PATH":' + shellQuote(dir) + ' exec ' + (ok ? shellQuote(wrapper) : 'claude') + arg + ' ; exit 127\r';
+  }
+  return '\x15command -v claude >/dev/null && ' + env + 'exec ' + (ok ? shellQuote(wrapper) : 'claude') + arg + ' ; exit 127\r'; // exec 가 안 되면(claude 없음·실패) 셸이 남지 않게 끝낸다(남은 셸에 문장을 채우는 사고 방지). 종료 코드 127 은 렌더러가 "claude 를 찾지 못함" 으로 알린다
 }
 
 // 마루 저장소 위치 찾기. 순서: MARU_HOME -> ~/.config/maru/root 첫 줄 -> (패키징 안 됨) appDir/.. -> ~/maru -> ~/.maru(managed)

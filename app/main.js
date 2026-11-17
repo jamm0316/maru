@@ -474,7 +474,18 @@ function spawnPty(w, cols, rows) {
   // 스모크·시험에서는 claude 대신 echo. 평소에는 claude 가 있을 때만 교체(없으면 셸 유지)
   if (w.fx) { self.write('echo ' + SMOKE_LINE + '; echo fixture-' + w.fx.name + '\r'); writeFxState(w); }
   else if (SMOKE) self.write('echo ' + SMOKE_LINE + '\r');
-  else if (ROOT) { const cmd = L.claudeLaunchCommand(sid, claudeWrapper(), resume, fresh); if (cmd) self.write(cmd); } // 래퍼가 있으면 스쿼드를 실은 claude, 없으면 그냥 claude. 이어 열기면 --resume <uuid>
+  else if (ROOT) { // 래퍼가 있으면 스쿼드를 실은 claude, 없으면 그냥 claude. 이어 열기면 --resume <uuid>
+    // claude 위치는 점검과 같은 resolveClaude() 로 정한다(사용자 셸 PATH 에 없는 ~/.local/bin 등). 끝나면 쓴다: 그 사이 pty 가 끝났거나 바뀌었으면(w.term !== self) 쓰지 않는다. 찾지 못하면 예전처럼 PATH 의 claude
+    const wrapper = claudeWrapper();
+    withTimeout(resolveClaude(), 4000, null).then((found) => {
+      if (w.term !== self) return;
+      const bin = found || scanClaude([]); // 시간 안에 못 정했으면 고정 위치만 동기로 훑는다. 그래도 없으면 예전 형태
+      const cmd = L.claudeLaunchCommand(sid, wrapper, resume, fresh, bin); if (!cmd) return;
+      // 기다리는 동안 맨 셸에서 Enter 가 눌렸다면 셸의 붙여넣기 모드 끔→켬이 claudeUp 으로 잘못 셀 수 있다: 줄을 쓰기 직전에 되돌린다(awaitClaude·launchResumed 는 그대로)
+      w.claudeUp = false; w.sawOff = false; w.typedN = 0; w.startedAt = Date.now(); // startedAt: 이어 열기 빠른 실패 판정(resumeFailureDecision)을 claude 를 실제로 띄운 때부터 센다
+      try { self.write(cmd); } catch { /* 이미 끝난 pty */ }
+    }).catch(() => {});
+  }
   wsChanged(false);
   return true;
 }
@@ -640,6 +651,7 @@ function initWorkspaces() {
 // claude 실행 파일이 있는지(30초 캐시). 있으면 시작 명령의 exec 로 pty 가 Claude Code 가 된다
 let claudeFoundAt = 0; let claudeFoundVal = false;
 function claudeFound() {
+  if (claudeBin && claudeOk(claudeBin)) return true; // 점검이 찾아 둔 경로(사용자 셸 PATH 밖일 수 있다)
   const now = Date.now();
   if (now - claudeFoundAt < 30000) return claudeFoundVal;
   claudeFoundAt = now; claudeFoundVal = false;
@@ -889,6 +901,7 @@ const isFileSafe = (f) => { try { const st = fs.statSync(f); return st.isFile() 
 
 // pty 가 쓰는 claude: 로그인 셸의 `command -v claude`(없으면 흔한 설치 위치)
 let claudeBin;
+let resolving = null; // 진행 중인 탐색(겹친 호출이 나눠 쓴다)
 let probeMissAt = 0; // 셸 탐색이 아무것도 못 찾은 시각: 30초간 다시 돌리지 않는다(고정 후보는 매번 본다)
 // 셸 탐색 한 번: stdin 은 닫고(spawn ignore) 출력은 64KB 까지만 받는다. 시간이 지나면 죽이고 지금까지의 출력을 낸다(백그라운드 프로세스가 stdout 을 쥐고 있어도 멈추지 않는다)
 function shellProbe(sh, args, ms) {
@@ -903,10 +916,16 @@ function shellProbe(sh, args, ms) {
     } catch { fin(); }
   }), ms + 1000, '');
 }
-// force: 사용자가 "다시 확인"을 눌렀을 때(부정 캐시를 건너뛴다)
-async function resolveClaude(force) {
-  if (claudeBin) return claudeBin;
-  const home = os.homedir();
+// 후보가 실제로 쓸 수 있는 claude 인가(실행 권한 + 일반 파일)
+function claudeOk(c) { try { fs.accessSync(c, fs.constants.X_OK); return fs.statSync(c).isFile(); } catch { return false; } }
+// 고정 위치와 nvm 버전 폴더(이름만 읽고 500개까지)를 순서대로 본다. lines: 셸 탐색이 알려 준 경로들. 동기
+function scanClaude(lines) {
+  const home = os.homedir(); let nvmDirs = [];
+  try { nvmDirs = fs.readdirSync(path.join(home, '.nvm', 'versions', 'node')).slice(0, 500); } catch { /* nvm 없음 */ }
+  for (const c of L.claudeCandidates({ home, lines, nvmDirs })) if (claudeOk(c)) return c;
+  return null;
+}
+async function probeClaude(force) {
   const sh = process.env.SHELL || '/bin/zsh';
   const lines = [];
   if (force || Date.now() - probeMissAt >= 30000) {
@@ -914,13 +933,18 @@ async function resolveClaude(force) {
     // 로그인 셸은 .zshrc 를 읽지 않는다: nvm·fnm·volta 나 .zshrc 에서만 PATH 를 잡은 설치는 대화형으로 한 번 더 본다
     if (!lines[0] && /^(zsh|bash)$/.test(path.basename(sh))) lines.push(L.parseClaudeProbe(await shellProbe(sh, ['-l', '-i', '-c', L.CLAUDE_PROBE_CMD], 8000)));
   }
-  let nvmDirs = [];
-  try { nvmDirs = fs.readdirSync(path.join(home, '.nvm', 'versions', 'node')).slice(0, 500); } catch { /* nvm 없음 */ }
-  for (const c of L.claudeCandidates({ home, lines, nvmDirs })) {
-    try { fs.accessSync(c, fs.constants.X_OK); if (fs.statSync(c).isFile()) { claudeBin = c; probeMissAt = 0; return c; } } catch { /* 다음 후보 */ }
-  }
+  const c = scanClaude(lines);
+  if (c) { claudeBin = c; probeMissAt = 0; return c; }
   if (lines.length) probeMissAt = Date.now();
   return null;
+}
+// force: 사용자가 "다시 확인"을 눌렀을 때(캐시와 부정 캐시를 건너뛴다). 저장된 경로는 매번 다시 검증한다. 동시 호출은 진행 중인 탐색을 나눠 쓴다
+async function resolveClaude(force) {
+  if (force) claudeBin = null;
+  else if (claudeBin) { if (claudeOk(claudeBin)) return claudeBin; claudeBin = null; }
+  while (resolving) { if (!force) return resolving; await resolving; }
+  resolving = probeClaude(force === true).catch(() => null).finally(() => { resolving = null; });
+  return resolving;
 }
 
 // ---- 설정 화면: 읽기 전용 점검 ----
@@ -2171,7 +2195,7 @@ ipcMain.handle('resume:set', (e, on) => { // 다시 열 때 세션 이어 가기
 });
 ipcMain.handle('settings:get', async (e, recheckCalendar) => (fromMain(e) ? { rows: await settingsRows(recheckCalendar === true) } : null));
 ipcMain.handle('settings:open-pane', (e, key) => fromMain(e) && openSettingsPane(key));
-ipcMain.handle('settings:copy-login', (e) => { if (!fromMain(e)) return false; clipboard.writeText('claude auth login'); return true; });
+ipcMain.handle('settings:copy-login', async (e) => { if (!fromMain(e)) return false; const bin = await resolveClaude(); clipboard.writeText(L.setupCommand('login', bin) || 'claude auth login'); return true; }); // 찾은 절대 경로가 있으면 그것으로(PATH 에 없어도 붙여넣어 돌게)
 ipcMain.handle('hooks:preview', (e) => (fromMain(e) ? previewInstall() : { ok: false, reason: 'invalid' }));
 ipcMain.handle('hooks:install', (e) => (fromMain(e) ? runInstall() : { ok: false, reason: 'invalid' }));
 ipcMain.handle('update:check', (e) => (fromMain(e) ? checkUpdates(true) : null)); // 사용자가 업그레이드를 눌렀을 때만 저장소 fetch

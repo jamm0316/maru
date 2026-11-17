@@ -1350,9 +1350,9 @@ t('squadView·matchSubs·squadOpen: 모델 상속, 활동 매칭, 임시 줄, �
 });
 t('claudeLaunchCommand: 래퍼가 있으면 인용해 exec, 없거나 이상하면 claude', () => {
   const sid = 'abcd1234-aaaa';
-  assert.strictEqual(L.claudeLaunchCommand(sid, null), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude ; exit 127\r');
-  assert.strictEqual(L.claudeLaunchCommand(null, undefined), 'command -v claude >/dev/null && exec claude ; exit 127\r');
-  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh'), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, null), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(null, undefined), '\x15command -v claude >/dev/null && exec claude ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh'), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh ; exit 127\r');
   assert.strictEqual(L.claudeLaunchCommand(sid, '/my repo/a b$(x)`y`;&\'"/scripts/maru-claude.sh').split('exec ')[1], String.raw`/my\ repo/a\ b\$\(x\)\`y\`\;\&\'\"/scripts/maru-claude.sh` + ' ; exit 127\r');
   for (const bad of ['/r/a\nb', '/r/a\rb', '/r/a\u001bb', '/r/a\u202Eb', 'relative/x.sh', '', 5, '/' + 'a'.repeat(1030)]) assert.ok(L.claudeLaunchCommand(sid, bad).endsWith('exec claude ; exit 127\r'), String(bad).slice(0, 8)); // 개행·제어·bidi 가 든 경로는 쓰지 않는다
   assert.strictEqual(L.claudeLaunchCommand(sid, '/r/한글 폴더/scripts/maru-claude.sh').split('exec ')[1], '/r/한글\\ 폴더/scripts/maru-claude.sh ; exit 127\r');
@@ -1362,7 +1362,7 @@ t('스쿼드 정적 검사: 래퍼 검사·python 도구 폴더·시간·크기 
   assert.ok(/'\/Library\/Developer\/CommandLineTools\/usr\/bin\/python3'/.test(main) && !/'\/usr\/bin\/python3'/.test(main));
   assert.ok(/'-I', script, 'meta'\], \{ timeout: 3000, maxBuffer: L\.SQUAD_META_MAX_BYTES/.test(main) && L.SQUAD_META_MAX_BYTES === 256 * 1024);
   assert.ok(/setInterval\(refreshSquads, 60000\)/.test(main) && !/refreshSquads\(\)/.test(main.split('setInterval(() => {\n    if (TEST_FX)')[1] || ''), '1초 폴링에 넣지 않는다');
-  assert.ok(/lstatSync\(f\)[\s\S]{0,120}st\.isFile\(\) \|\| !safeOwned\(st\)[\s\S]{0,80}X_OK/.test(main) && /L\.claudeLaunchCommand\(sid, claudeWrapper\(\), resume, fresh\)/.test(main));
+  assert.ok(/lstatSync\(f\)[\s\S]{0,120}st\.isFile\(\) \|\| !safeOwned\(st\)[\s\S]{0,80}X_OK/.test(main) && /L\.claudeLaunchCommand\(sid, wrapper, resume, fresh, bin\)/.test(main));
   assert.ok(!/exec claude/.test(main.replace(/\/\/.*$/gm, '')), 'exec claude 문자열은 lib 의 한 곳에만');
   assert.ok(/squadUser/.test(rd) && /aria-expanded/.test(rd) && !/innerHTML/.test(rd));
   for (const k of ['squad.eyebrow', 'squad.base', 'squad.personal', 'squad.head.aria', 'role.squadLead', 'squad.working', 'squad.working.n']) for (const lg of I.LANGS) assert.ok(I.STR[lg][k], lg + ':' + k);
@@ -2421,11 +2421,48 @@ t('decideTodoOpen: 실제 파일 시스템(임시 폴더)에서도 같은 판정
   fs.unlinkSync(tf); assert.strictEqual(L.decideTodoOpen({ ...dsrc, cwd: proj }, { ...c, force: true }).reason, 'no-transcript');
   fs.rmSync(proj, { recursive: true }); assert.strictEqual(L.decideTodoOpen({ ...dsrc, cwd: proj }, c).reason, 'no-folder');
 });
+t('claudeLaunchCommand: claudeBin 이 있으면 Ctrl-U + [ -x ] || command -v + PATH 뒤에 폴더 덧붙임', () => {
+  const sid = 'abcd1234-aaaa'; const U1 = '11111111-2222-4333-8444-555555555555'; const U2 = '66666666-7777-4888-9999-000000000000';
+  const B = '/h/.local/bin/claude'; const P = '\x15[ -x /h/.local/bin/claude ] || command -v claude >/dev/null || exit 127; ';
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', null, null, B), P + 'MARU_APP_SESSION=abcd1234-aaaa PATH="$PATH":/h/.local/bin exec /r/scripts/maru-claude.sh ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, null, null, null, B), P + 'MARU_APP_SESSION=abcd1234-aaaa PATH="$PATH":/h/.local/bin exec claude ; exit 127\r'); // 대상은 이름 claude(사용자 PATH 가 먼저)
+  assert.strictEqual(L.claudeLaunchCommand(null, null, null, null, B), P + 'PATH="$PATH":/h/.local/bin exec claude ; exit 127\r');
+  assert.ok(!L.claudeLaunchCommand(sid, null, null, null, B).includes('{'));
+  assert.ok(L.claudeLaunchCommand(sid, null, U1, null, B).endsWith(' exec claude --resume ' + U1 + ' ; exit 127\r'));
+  assert.ok(L.claudeLaunchCommand(sid, '/r/w.sh', null, U2, B).endsWith(' exec /r/w.sh --session-id ' + U2 + ' ; exit 127\r'));
+  assert.strictEqual(L.claudeLaunchCommand(sid, null, U1, U2, B), null); assert.strictEqual(L.claudeLaunchCommand(sid, null, 'x', null, B), null);
+  const q = L.claudeLaunchCommand(sid, null, null, null, "/my dir/it's $(x)/claude");
+  assert.ok(q.startsWith("\x15[ -x /my\\ dir/it\\'s\\ \\$\\(x\\)/claude ] || ") && q.includes('PATH="$PATH":/my\\ dir/it\\\'s\\ \\$\\(x\\) exec claude '));
+  for (const bad of [undefined, null, '', 'claude', 'rel/claude', '/claude', '/a:b/claude', '/a/b\nc/claude', '/a/b\rc/claude', '/a/‮c/claude', '/a/\u0007/claude', '/' + 'a'.repeat(1030), 5, {}]) {
+    assert.strictEqual(L.claudeLaunchCommand(sid, '/r/w.sh', U1, null, bad), L.claudeLaunchCommand(sid, '/r/w.sh', U1), String(bad).slice(0, 10)); // 예전 형태와 같다
+    assert.ok(L.claudeLaunchCommand(sid, null, null, null, bad).startsWith('\x15command -v claude >/dev/null && '));
+  }
+  assert.ok(L.claudeLaunchCommand(sid, null).startsWith('\x15')); // 예전 형태도 Ctrl-U 로 시작한다
+});
+t('claudeLaunchCommand 실행: 낡은 경로·PATH 밖 설치·없음(zsh·bash)', () => {
+  const cp = require('child_process');
+  const dir = fs.mkdtempSync(path.join(tmp, 'launch '));
+  const bd = path.join(dir, "bin dir's"); fs.mkdirSync(bd);
+  const bin = path.join(bd, 'claude'); fs.writeFileSync(bin, '#!/bin/sh\necho "stub-ran:$MARU_APP_SESSION:$*"\nexit 0\n', { mode: 0o755 });
+  const wrap = path.join(dir, 'wrap per.sh'); fs.writeFileSync(wrap, '#!/bin/sh\nexec claude "$@"\n', { mode: 0o755 });
+  const pd = path.join(dir, 'on-path'); fs.mkdirSync(pd); fs.writeFileSync(path.join(pd, 'claude'), '#!/bin/sh\necho "path-ran:$*"\nexit 0\n', { mode: 0o755 });
+  const U1 = '11111111-2222-4333-8444-555555555555'; const stale = path.join(dir, 'gone', 'claude');
+  for (const sh of ['/bin/zsh', '/bin/bash']) {
+    const run = (line, p) => cp.spawnSync('/usr/bin/env', ['-i', 'PATH=' + (p || '/usr/bin:/bin'), sh, '-c', line.replace(/^\x15/, '').replace(/\r$/, '')], { encoding: 'utf8', timeout: 10000 });
+    const a = run(L.claudeLaunchCommand('sid1', null, null, null, stale), '/usr/bin:/bin:' + pd); assert.strictEqual(a.status, 0, sh + ' ' + a.stderr); assert.strictEqual(a.stdout.trim(), 'path-ran:', sh); // (a) 낡은 경로여도 PATH 의 claude
+    const a2 = run(L.claudeLaunchCommand('sid1', wrap, null, null, stale), '/usr/bin:/bin:' + pd); assert.strictEqual(a2.status, 0, sh); assert.strictEqual(a2.stdout.trim(), 'path-ran:', sh);
+    const b = run(L.claudeLaunchCommand('sid1', wrap, U1, null, bin)); assert.strictEqual(b.status, 0, sh + ' ' + b.stderr); assert.strictEqual(b.stdout.trim(), 'stub-ran:sid1:--resume ' + U1, sh); // (b) 래퍼 + PATH 밖 설치
+    const c = run(L.claudeLaunchCommand('sid1', null, null, null, bin)); assert.strictEqual(c.status, 0, sh); assert.strictEqual(c.stdout.trim(), 'stub-ran:sid1:', sh); // (c) 래퍼 없이 덧붙인 폴더로
+    const c2 = run(L.claudeLaunchCommand('sid1', null, null, null, bin), '/usr/bin:/bin:' + pd); assert.strictEqual(c2.stdout.trim(), 'path-ran:', sh); // 사용자 PATH 의 claude 가 덧붙인 폴더보다 먼저
+    const d = run(L.claudeLaunchCommand('sid1', wrap, null, null, stale)); assert.strictEqual(d.status, 127, sh); assert.ok(!/ran/.test(d.stdout)); // (d) 어디에도 없음
+    const d2 = run(L.claudeLaunchCommand('sid1', wrap, null, null, null)); assert.strictEqual(d2.status, 127, sh);
+  }
+});
 t('claudeLaunchCommand: 이어 열기(--resume <uuid>)는 검증된 uuid 만, 잘못된 값은 null', () => {
   const sid = 'abcd1234-aaaa';
-  assert.strictEqual(L.claudeLaunchCommand(sid, null, U1), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude --resume ' + U1 + ' ; exit 127\r');
-  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', U1), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh --resume ' + U1 + ' ; exit 127\r');
-  assert.strictEqual(L.claudeLaunchCommand(sid, null), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude ; exit 127\r'); // 인자 없으면 예전과 같다
+  assert.strictEqual(L.claudeLaunchCommand(sid, null, U1), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude --resume ' + U1 + ' ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', U1), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh --resume ' + U1 + ' ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, null), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude ; exit 127\r'); // 인자 없으면 예전과 같다
   assert.strictEqual(L.claudeLaunchCommand(sid, null, null), L.claudeLaunchCommand(sid, null));
   for (const bad of ['', 'x', U1.toUpperCase(), U1 + ' ; rm -rf ~', U1 + '\n', '$(id)', '--fork-session', U1.slice(1), U1 + 'a', 5, {}, ['a'], '../' + U1]) assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', bad), null, JSON.stringify(bad));
   assert.ok(!/fork-session|bypass|skip-permissions/.test(L.claudeLaunchCommand(sid, null, U1)));
@@ -2697,9 +2734,9 @@ t('todo 클릭: 훅 정보가 없어도 claudeSid 로 이미 열린 탭을 찾�
 });
 t('claudeLaunchCommand: 새 세션은 --session-id <uuid>, 이어 열기는 --resume <uuid>, 둘을 함께 주면 거부', () => {
   const sid = 'abcd1234-aaaa';
-  assert.strictEqual(L.claudeLaunchCommand(sid, null, null, U1), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude --session-id ' + U1 + ' ; exit 127\r');
-  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', undefined, U1), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh --session-id ' + U1 + ' ; exit 127\r');
-  assert.strictEqual(L.claudeLaunchCommand(sid, null, U1, null), 'command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude --resume ' + U1 + ' ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, null, null, U1), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude --session-id ' + U1 + ' ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, '/r/scripts/maru-claude.sh', undefined, U1), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec /r/scripts/maru-claude.sh --session-id ' + U1 + ' ; exit 127\r');
+  assert.strictEqual(L.claudeLaunchCommand(sid, null, U1, null), '\x15command -v claude >/dev/null && MARU_APP_SESSION=abcd1234-aaaa exec claude --resume ' + U1 + ' ; exit 127\r');
   assert.strictEqual(L.claudeLaunchCommand(sid, null, U1, U2), null); assert.strictEqual(L.claudeLaunchCommand(sid, null, null, null), L.claudeLaunchCommand(sid, null));
   for (const bad of ['', 'x', U1.toUpperCase(), U1 + ' ; id', U1 + '\n', '$(id)', '--fork-session', 5, {}]) assert.strictEqual(L.claudeLaunchCommand(sid, null, null, bad), null, JSON.stringify(bad));
 });
