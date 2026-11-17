@@ -1,6 +1,6 @@
 // All page strings. Keys are referenced from index.html via data-i18n.
 // Set the two links below when the download and the repository are public.
-window.MARU_LINKS = { download: "", github: "" };
+window.MARU_LINKS = { download: "https://github.com/jamm0316/maru/releases/latest", github: "https://github.com/jamm0316/maru" };
 
 window.MARU_COPY = {
   en: {
@@ -118,7 +118,7 @@ window.MARU_COPY = {
 
     "s6.label": "06 — Get started",
     "s6.h2": "Five quiet minutes.",
-    "s6.1": "Download and open Maru.",
+    "s6.1": "Download and open Maru. The build is not signed yet, so macOS asks once: System Settings → Privacy & Security → Open Anyway.",
     "s6.2": "It checks what it needs and shows exactly what it will change — you confirm each step.",
     "s6.3": "A short first conversation, so it starts with something to remember.",
     "s6.close": "Then just say: Hey Maru.",
@@ -261,7 +261,7 @@ window.MARU_COPY = {
 
     "s6.label": "06 — 시작하기",
     "s6.h2": "조용한 5분이면 됩니다.",
-    "s6.1": "Maru를 내려받아 엽니다.",
+    "s6.1": "Maru를 내려받아 엽니다. 아직 서명되지 않은 빌드라 macOS가 한 번 막습니다. 시스템 설정 → 개인정보 보호 및 보안 → “그래도 열기”를 누르세요.",
     "s6.2": "필요한 것을 확인하고 무엇을 바꾸는지 그대로 보여 줍니다. 단계마다 직접 확인합니다.",
     "s6.3": "짧은 첫 대화로, 기억할 것을 가지고 시작합니다.",
     "s6.close": "그리고 이렇게만 말하세요: 마루야.",
