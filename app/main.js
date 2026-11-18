@@ -290,6 +290,11 @@ function fakeRefresh() {
   recomputeProjects();
   refreshed = true;
 }
+// 시험 전용 가짜 상세(하루 보기): 가벼운 목록에 끝 시각·캘린더·장소·메모를 덧붙인다
+function fakeDayDetail(day) {
+  const ex = { 'Seed swap meetup': { endTime: '11:30', cal: 'Community', loc: 'Greenhouse hall, east entrance', notes: 'Bring labeled envelopes.\nSpare seed packets are welcome.\nTea provided.' }, 'Community garden day': { cal: 'Home' } };
+  return (fakeMonthEvents(day.slice(0, 7))[day] || []).map((e) => ({ ...e, endDay: '', endTime: '', cal: '', loc: '', notes: '', ...(ex[e.title] || {}) }));
+}
 // 시험 전용 가짜 일정: 오늘 기준 며칠(그 달에 속하는 것만) + 다른 달에도 몇 개
 function fakeMonthEvents(ym) {
   const out = {};
@@ -1206,10 +1211,47 @@ function calMonthGet(ym) {
   if (c) c.used = Date.now();
   return c ? { state: c.state, events: c.events } : { state: 'pending', events: {} };
 }
+// 하루 상세 읽기(하루 보기가 열려 있을 때만): 'YYYY-MM-DD' -> { state, events, at, busy, started, used, fails, okAt }. 최대 5일, 하루마다 5분에 한 번만 다시 읽고, 달 읽기와 같은 큐를 쓴다(osascript 는 한 번에 하나, 20초 제한). 메모리에만 둔다.
+// used = 그 날을 마지막으로 요청한 때(days:detail 마다 갱신). 큐에서 차례가 왔을 때 used 가 오래됐으면(이미 떠난 날) 읽지 않고 건너뛴다. 다시 읽기가 실패하면 이전 상세를 연속 2번·15분까지만 남기고 그 뒤에는 'fail' 이다.
+const calDays = new Map();
+const CAL_DAY_TTL_MS = 5 * 60 * 1000; const CAL_DAY_MAX = 5;
+function ensureCalDay(day) {
+  if (!L.validDay(day) || FAKE_DAY || !calOn()) return;
+  const y = +day.slice(0, 4), m = +day.slice(5, 7), d = +day.slice(8, 10);
+  const script = L.calDayScript(y, m, d); if (!script) return;
+  let c = calDays.get(day);
+  if (c) c.used = Date.now();
+  if (c && (c.busy || Date.now() - c.at < CAL_DAY_TTL_MS)) return;
+  if (!c) {
+    while (calDays.size >= CAL_DAY_MAX) { const old = L.calDayVictim([...calDays]); if (old === null) return; calDays.delete(old); } // 가득 차면 쉬는 것, 없으면 아직 시작하지 않은 대기 중 가장 오래된 것을 밀어낸다
+    c = { state: 'pending', events: [], at: 0, busy: false, started: false, used: Date.now(), fails: 0, okAt: 0 }; calDays.set(day, c);
+  }
+  c.busy = true; c.started = false;
+  const fail = () => { c.busy = false; c.at = Date.now(); c.fails++; c.state = c.state === 'pending' ? 'fail' : L.calDayAfterFail(c, c.at); if (c.state === 'fail') c.events = []; };
+  calMonthQueue = calMonthQueue.then(async () => {
+    if (!calOn() || calDays.get(day) !== c) return;
+    if (L.calDayJobStale(c.used, Date.now())) { c.busy = false; if (c.state === 'pending') calDays.delete(day); return; } // 이미 떠난 날: 읽지 않고(달 큐를 늦추지 않는다) 건너뛴다
+    c.started = true;
+    const args = []; for (const line of script) args.push('-e', line);
+    const r = await exec('/usr/bin/osascript', args, { timeout: 20000, maxBuffer: 1 << 20, cwd: os.homedir() });
+    if (!calOn() || calDays.get(day) !== c) return; // 읽는 동안 꺼졌거나 밀려났으면 버린다
+    const evs = r.err ? null : L.parseCalendarDay(r.stdout, y, m, d); // null = 읽기 실패(상한 초과·형식 오류), []는 일정 없음
+    if (!evs) { fail(); return; }
+    c.busy = false; c.at = Date.now(); c.state = 'ok'; c.events = evs; c.fails = 0; c.okAt = c.at;
+  }).catch(() => { if (calDays.get(day) === c) fail(); });
+}
+// -> { state, events } (아직 읽지 않았으면 pending 이고 읽기를 시작한다)
+function calDayGet(day) {
+  if (FAKE_DAY) return { state: 'ok', events: fakeDayDetail(day) };
+  ensureCalDay(day);
+  const c = calDays.get(day);
+  if (c) c.used = Date.now();
+  return c ? { state: c.state, events: c.events } : { state: 'pending', events: [] };
+}
 let cal = { pending: false, ok: false, events: [] };
 let calRun = null;
 function readCalendar() {
-  if (!profile || !profile.calendar) { cal = { pending: false, ok: false, events: [] }; calMonths.clear(); return Promise.resolve(); } // 꺼지면 달 캐시도 모두 버린다
+  if (!profile || !profile.calendar) { cal = { pending: false, ok: false, events: [] }; calMonths.clear(); calDays.clear(); return Promise.resolve(); } // 꺼지면 달·하루 캐시도 모두 버린다
   if (FAKE_PROJ) return Promise.resolve();
   if (calRun) return calRun;
   cal = { ...cal, pending: true };
@@ -2023,7 +2065,11 @@ ipcMain.handle('days:detail', (e, day) => {
   if (!fromMain(e) || !L.validDay(day) || !L.parseYm(day.slice(0, 7))) return null;
   const on = calOn();
   let events = { state: 'off', items: [] };
-  if (on) { const r = calMonthGet(day.slice(0, 7)); events = { state: r.state, items: r.state === 'ok' ? (r.events[day] || []) : [] }; }
+  if (on) { // 상세(day 읽기)가 준비되면 그것을, 아니면 달 캐시의 가벼운 목록을 detail 표지와 함께 준다(렌더러가 행을 먼저 그리고 상세는 나중에 채운다)
+    const dd = calDayGet(day);
+    if (dd.state === 'ok') events = { state: 'ok', detail: 'ok', items: dd.events };
+    else { const r = calMonthGet(day.slice(0, 7)); events = { state: r.state, detail: dd.state, items: r.state === 'ok' ? (r.events[day] || []) : [] }; }
+  }
   const d = proj.diaries.get(day) || null;
   return { day, isToday: day === todayStr(), diary: d ? { title: d.title, body: d.body } : null, groups: L.buildDayGroups({ entries: proj.raw.entries, day, registry: proj.raw.registry, state: projState }), calendarOn: on, events };
 });
@@ -2315,7 +2361,7 @@ ipcMain.handle('meet:start', async (e, id) => {
   } finally { meetBusy = false; }
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
-  uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null,
+  uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null, uiDayOpen: FAKE_DAY && !app.isPackaged && process.env.MARU_APP_DAY_OPEN === '1',
   homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,
 } : null));
 // patch: { name?: string, lang?: 'ko'|'en' } 만 허용. 이름은 main 이 다시 정리·검증한다. 첫 저장에는 name 이 필요하다.

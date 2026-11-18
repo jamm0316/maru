@@ -1517,8 +1517,9 @@
       if (r.toggle) {
         const lab = el('label', 'tog'); const cb = el('input'); cb.type = 'checkbox'; cb.setAttribute('role', 'switch'); cb.checked = r.toggle.on; cb.disabled = !r.toggle.available || setLoading; cb.dataset.k = 'tog';
         cb.addEventListener('change', async () => {
-          cb.disabled = true;
-          try { await (r.toggle.kind === 'resume' ? window.maru.setResume(cb.checked) : window.maru.setCalendar(cb.checked)); } catch (e) { /* 다시 읽기에서 반영 */ }
+          cb.disabled = true; const want = cb.checked;
+          try { await (r.toggle.kind === 'resume' ? window.maru.setResume(want) : window.maru.setCalendar(want)); } catch (e) { /* 다시 읽기에서 반영 */ }
+          if (r.toggle.kind !== 'resume' && !want) forgetDayEvents(); // 끄는 즉시 펼친 일정 제목과 받아 둔 상세를 잊는다
           if (r.toggle.kind !== 'resume') { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); } // 끄면 일정 제목·점이 5초 폴링을 기다리지 않고 바로 사라진다
           setLoading = false; loadSettings(false);
         });
@@ -1717,6 +1718,11 @@
   // 모든 문구는 textContent 로만 넣는다. 날짜 문자열은 main 이 검증해 준 값이고, 하루 보기는 읽기 전용이다.
   let calYm = todayStr().slice(0, 7); let calData = null; let calSeq = 0; let calSig = '';
   let dayKey = null; let dayData = null; let daySig = ''; let daySeq = 0; let dayPendTimer = null;
+  const dayColl = new Set(); const dayExp = new Set(); let devDayOpen = false; // 접힌 기록 묶음(묶음 정체성 키)·펼친 일정(날짜|시각|제목): 렌더러 메모리에만 둔다(저장 안 함, 하루 보기를 닫았다 열어도 앱이 도는 동안 유지)
+  const capAdd = (set, k) => { set.delete(k); set.add(k); while (set.size > 200) set.delete(set.values().next().value); }; // 두 상태는 최대 200개만 둔다(가장 오래된 것부터 버림)
+  const grpId = (g) => (g.key ? 'p:' + g.key : g.title ? 't:' + g.title : 'n:');
+  const evKey = (day, e) => day + '|' + (e.allDay ? '' : e.time) + '|' + e.title;
+  const capText = (x, n) => { const c = [...String(x == null ? '' : x)]; return c.length > n ? c.slice(0, n).join('') + '…' : c.join(''); };
   const ymdDate = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d); return new Date(+m[1], +m[2] - 1, +m[3]); };
   const fmtIntl = (date, opts) => { try { return new Intl.DateTimeFormat(lang, opts).format(date); } catch (x) { return ''; } };
   function calDayLabel(day, info) {
@@ -1811,10 +1817,18 @@
     if (my !== daySeq || !detailOpen || detailMode !== 'day' || day !== dayKey) return;
     if (!d || d.day !== day || !Array.isArray(d.groups) || !d.events) { closeDetail(true); return; }
     clearTimeout(dayPendTimer);
-    if (d.events.state === 'pending') dayPendTimer = setTimeout(() => { if (detailOpen && detailMode === 'day' && day === dayKey) fetchDay(); }, 1500); // 일정을 읽는 중이면 곧 다시 묻는다
-    const sig = JSON.stringify(d);
+    if (d.calendarOn === false || d.events.state === 'off') dayExp.clear(); // 캘린더가 꺼졌으면 펼친 일정 제목을 바로 잊는다
+    if (d.events.state === 'pending' || (d.events.state === 'ok' && d.events.detail === 'pending')) dayPendTimer = setTimeout(() => { if (detailOpen && detailMode === 'day' && day === dayKey) fetchDay(); }, 1500); // 일정(또는 그 상세)을 읽는 중이면 곧 다시 묻는다
+    if (devDayOpen && d.events.state === 'ok' && d.events.items.length && d.groups.length > 1) { devDayOpen = false; for (const e of d.events.items.slice(0, 2)) capAdd(dayExp, evKey(d.day, e)); capAdd(dayColl, grpId(d.groups[1])); } // 시험 전용(MARU_APP_DAY_OPEN=1): 앞 두 일정 펼침·둘째 묶음 접힘
+    const sig = JSON.stringify([d, [...dayColl], [...dayExp]]);
     if (sig === daySig && dayData) return; // 같으면 다시 그리지 않는다(깜박임·포커스 이동 없음)
     daySig = sig; dayData = d; renderDay(false);
+  }
+  const fmtEndDay = (x) => (typeof x === 'string' && Lib.validDay(x) ? fmtIntl(ymdDate(x), { month: 'long', day: 'numeric' }) : '');
+  function evRange(e, bk) { // bk: 끝 날·끝 시각을 가진 블록(합쳐진 다른 캘린더 것이면 그쪽 값)
+    const end = bk.endDay ? fmtEndDay(bk.endDay) : '';
+    if (e.allDay) return T('cal.allday') + (end ? ' – ' + end : '');
+    return e.time + (bk.endTime ? ' – ' + (end ? end + ' ' : '') + bk.endTime : '');
   }
   function renderDay() {
     const d = dayData; if (!d) return;
@@ -1822,9 +1836,10 @@
     $('dv-title').textContent = fmtIntl(ymdDate(d.day), { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
     $('dv-prev').disabled = !Lib.shiftDay(d.day, -1); $('dv-next').disabled = !Lib.shiftDay(d.day, 1);
     const body = $('dv-body'); const f = document.activeElement;
-    const keep = f && body.contains(f) ? f : null; // 본문에는 포커스 가는 요소가 없지만 안전하게
+    const keepKey = f && body.contains(f) && f.dataset && f.dataset.fk ? f.dataset.fk : null; // 다시 그린 뒤 같은 토글에 포커스를 되돌린다
+    const keep = f && body.contains(f) ? f : null;
     body.replaceChildren();
-    const sec = (key) => { const x = el('section', 'dv-sec'); x.append(el('h3', 'pd-h', T(key))); body.append(x); return x; };
+    const sec = (key, act) => { const x = el('section', 'dv-sec'); if (act) { const h = el('div', 'dv-sh'); h.append(el('h3', 'pd-h', T(key)), act); x.append(h); } else x.append(el('h3', 'pd-h', T(key))); body.append(x); return x; };
     if (d.diary || d.groups.length || d.isToday) {
       const x = sec('day.sec.diary');
       if (d.diary) {
@@ -1837,20 +1852,62 @@
       const x = sec('day.sec.events');
       if (ev.state === 'pending') x.append(el('p', 'hint dv-hint', T('day.events.loading')));
       else if (ev.state === 'fail') x.append(el('p', 'hint dv-hint', T('day.events.fail')));
-      else for (const e of ev.items) { const r = el('div', 'cal-ev'); r.append(el('span', 'cal-t', e.allDay ? T('cal.allday') : e.time), el('span', 'cal-n', e.title)); x.append(r); }
+      else ev.items.forEach((e, i) => {
+        const k = evKey(d.day, e); const open = dayExp.has(k); const id = 'dv-ev-' + i;
+        const w = el('div', 'dv-evx' + (open ? ' open' : ''));
+        const b = el('button', 'dv-ev'); b.type = 'button'; b.dataset.fk = 'e:' + k; b.setAttribute('aria-expanded', String(open)); if (open) b.setAttribute('aria-controls', id); // 대상이 그려져 있을 때만 aria-controls
+        b.append(el('span', 'cal-t', e.allDay ? T('cal.allday') : e.time), el('span', 'cal-n', e.title));
+        b.addEventListener('click', () => { if (dayExp.has(k)) dayExp.delete(k); else capAdd(dayExp, k); fetchDayLocal(); });
+        w.append(b);
+        if (open) {
+          const dt = el('div', 'dv-evd'); dt.id = id;
+          const blocks = [e, ...(Array.isArray(e.more) ? e.more.slice(0, 3) : [])]; // 같은 일정이 여러 캘린더에 있으면 블록마다 캘린더 이름을 소제목으로 보여 준다
+          blocks.forEach((bk, bi) => {
+            const bx = blocks.length > 1 ? el('div', 'evd-b') : dt;
+            if (blocks.length > 1) bx.append(el('div', 'evd-bh', capText(bk.cal, 80) || T('day.ev.cal')));
+            const tr = (!e.allDay || bk.endDay) ? evRange(e, bk) : ''; // 하루짜리 종일 일정은 시간 줄을 생략한다(이미 "종일"이 위에 있다)
+            if (tr) bx.append(el('div', 'evd-time', tr));
+            const row = (lk, v, cls) => { if (!v) return; const r = el('div', 'evd-r'); r.append(el('span', 'evd-l', T(lk)), el('span', 'evd-v' + (cls ? ' ' + cls : ''), v)); bx.append(r); };
+            if (blocks.length === 1) row('day.ev.cal', capText(bk.cal, 80));
+            row('day.ev.loc', capText(bk.loc, 200)); row('day.ev.notes', capText(bk.notes, 600), 'evd-notes');
+            if (bx !== dt) dt.append(bx);
+          });
+          if (ev.detail === 'pending') dt.append(el('div', 'hint evd-wait', T('day.events.loading')));
+          else if (ev.detail === 'fail') dt.append(el('div', 'hint evd-wait', T('day.events.fail'))); // 상세를 읽지 못했으면 상세가 없는 일정처럼 보이지 않게 알린다
+          w.append(dt);
+        }
+        x.append(w);
+      });
     }
     if (d.groups.length) {
-      const x = sec('day.sec.records');
-      for (const g of d.groups) {
-        x.append(el('h4', 'dv-gh', g.title || T('day.notag')));
-        const lg = el('div', 'pd-log');
+      const ids = d.groups.map(grpId); const allClosed = ids.every((i) => dayColl.has(i));
+      const all = el('button', 'dv-all', T(allClosed ? 'day.all.expand' : 'day.all.collapse')); all.type = 'button'; all.dataset.fk = 'all';
+      all.addEventListener('click', () => { for (const i of ids) { if (allClosed) dayColl.delete(i); else capAdd(dayColl, i); } fetchDayLocal(); });
+      const x = sec('day.sec.records', all);
+      d.groups.forEach((g, gi) => {
+        const id = ids[gi]; const closed = dayColl.has(id); const lid = 'dv-log-' + gi;
+        const h = el('h4', 'dv-gh'); const b = el('button', 'dv-gt'); b.type = 'button'; b.dataset.fk = 'g:' + id; b.setAttribute('aria-expanded', String(!closed)); if (!closed) b.setAttribute('aria-controls', lid);
+        b.append(el('span', 'ct', g.title || T('day.notag')));
+        if (closed) b.append(el('span', 'cn', T('day.group.n', { n: g.items.length })));
+        b.addEventListener('click', () => { if (dayColl.has(id)) dayColl.delete(id); else capAdd(dayColl, id); fetchDayLocal(); });
+        h.append(b); x.append(h);
+        if (closed) return;
+        const lg = el('div', 'pd-log'); lg.id = lid;
         for (const it of g.items) { const r = el('div', 'pd-row dv-row'); r.append(el('span', 'd', it.time), el('span', 'k k-' + it.kind, T('proj.kind.' + it.kind)), el('span', 'x', it.text)); lg.append(r); }
         x.append(lg);
-      }
+      });
     }
     if (!d.diary && !d.groups.length && !(ev.items && ev.items.length) && (ev.state === 'off' || ev.state === 'ok')) body.append(el('p', 'dv-empty', T('day.empty')));
+    if (keepKey) { const n = [...body.querySelectorAll('[data-fk]')].find((x) => x.dataset.fk === keepKey); if (n) { n.focus(); return; } }
     if (keep && !document.contains(keep)) $('dv-title').focus();
   }
+  // 캘린더를 끈 직후: 펼친 일정 상태와 받아 둔 하루 데이터 안의 일정(제목·장소·메모)을 모두 지우고, 열려 있으면 다시 그린다
+  function forgetDayEvents() {
+    dayExp.clear(); daySig = '';
+    if (dayData) { dayData = { ...dayData, calendarOn: false, events: { state: 'off', items: [] } }; if (detailOpen && detailMode === 'day') renderDay(); }
+  }
+  // 토글을 눌렀을 때: 이미 받은 데이터로 바로 다시 그린다(포커스는 renderDay 가 같은 토글로 되돌린다)
+  function fetchDayLocal() { renderDay(); daySig = JSON.stringify([dayData, [...dayColl], [...dayExp]]); }
   $('dv-close').addEventListener('click', () => closeDetail(true));
   $('dv-prev').addEventListener('click', () => { const n = Lib.shiftDay(dayKey, -1); if (n) showDay(n, 'keep'); });
   $('dv-next').addEventListener('click', () => { const n = Lib.shiftDay(dayKey, 1); if (n) showDay(n, 'keep'); });
@@ -2068,7 +2125,7 @@
     else if (init && init.uiOpen === 'update') openUpdate();
     else if (init && init.uiOpen === 'squadnew') openSquadNew(); // 시험 전용(MARU_APP_UI=squadnew): 화면 확인용
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') showDay(init.uiDay, 'title'); if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
     setInterval(() => { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); }, 5000); // 일지·회고·일정은 main 이 읽어 둔 캐시를 가볍게 다시 묻는다
     refreshMeet(); setInterval(refreshMeet, 30000);

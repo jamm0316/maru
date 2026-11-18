@@ -1284,14 +1284,14 @@ t('calMonthScript: 고정 줄, 정수만 삽입, 범위 검증', () => {
   const sc = L.calMonthScript(2026, 11);
   assert.ok(Array.isArray(sc) && sc.every((x) => typeof x === 'string'));
   const i0 = sc.indexOf('set d0 to current date');
-  assert.deepStrictEqual(sc.slice(i0, i0 + 8), ['set d0 to current date', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set time of d0 to 0', 'copy d0 to d1', 'set year of d1 to 2026', 'set month of d1 to 12']);
+  assert.deepStrictEqual(sc.slice(i0, i0 + 10), ['set d0 to current date', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set time of d0 to 0', 'if (day of d0) is not 1 then set d0 to d0 + (1 * hours)', 'copy d0 to d1', 'set year of d1 to 2026', 'set month of d1 to 12', 'if (day of d1) is not 1 then set d1 to d1 + (1 * hours)']);
   const dec = L.calMonthScript(2026, 12); assert.ok(dec.includes('set year of d1 to 2027') && dec.includes('set month of d1 to 1'));
   const base = L.CAL_SCRIPT; assert.ok(base.includes('set d1 to d0 + (2 * days)') && !sc.includes('set d1 to d0 + (2 * days)'));
-  const rest = (a) => a.filter((x) => !/^set (d0|d1|day of d0|year of d[01]|month of d[01]|time of d0)\b|^copy d0 to d1$/.test(x)); assert.deepStrictEqual(rest(sc), rest(base)); // 날짜 범위 줄만 다르다
+  const rest = (a) => a.filter((x) => !/^set (d0|d1|day of d0|year of d[01]|month of d[01]|time of d0)\b|^copy d0 to d1$|^if \(day of d[01]\) is not 1 then/.test(x)); assert.deepStrictEqual(rest(sc), rest(base)); // 날짜 범위 줄만 다르다
   for (const [y, m] of [[1999, 1], [2101, 1], [2026, 0], [2026, 13], [2026.5, 1], ['2026', 11], [2026, '11'], [null, 1], [NaN, 1]]) assert.strictEqual(L.calMonthScript(y, m), null, y + '-' + m);
   assert.ok(sc.every((x) => !/\$|`|\\/.test(x) || base.includes(x)));
   assert.ok(!sc.some((x) => /^set d1 to d0$/.test(x))); // 별칭(같은 날짜 객체) 금지
-  assert.deepStrictEqual(sc.slice(i0, i0 + 8), L.calMonthDateSetup(2026, 11)); assert.strictEqual(L.calMonthDateSetup(2026, 13), null);
+  assert.deepStrictEqual(sc.slice(i0, i0 + 10), L.calMonthDateSetup(2026, 11)); assert.strictEqual(L.calMonthDateSetup(2026, 13), null);
 });
 if (process.platform === 'darwin') t('calMonthDateSetup: osascript 로 d0=그 달 1일 00:00, d1=다음 달 1일(12월 포함)', () => {
   const { execFileSync } = require('child_process');
@@ -1321,6 +1321,112 @@ t('parseCalendarMonth: 그 달만, 검증·중복·상한·정렬', () => {
   for (const bad of ['', 'garbage', undefined, 5, 'x'.repeat(600000)]) assert.deepStrictEqual(L.parseCalendarMonth(bad, 2026, 11), {});
   assert.deepStrictEqual(L.parseCalendarMonth(out, 1999, 11), {}); assert.deepStrictEqual(L.parseCalendarMonth(out, 2026, 13), {});
   assert.deepStrictEqual(L.parseCalendarOutput(rec('2026-11-18', '10:00', '0', 'x'), new Date(2026, 10, 18)).length, 1); // 기존 파서는 그대로
+});
+t('calDayScript: 고정 줄, 정수만 삽입, 범위·날짜 검증, 별칭 금지', () => {
+  const sc = L.calDayScript(2026, 11, 18);
+  assert.ok(Array.isArray(sc) && sc.every((x) => typeof x === 'string'));
+  const i0 = sc.indexOf('set d0 to current date');
+  assert.deepStrictEqual(sc.slice(i0, i0 + L.calDayDateSetup(2026, 11, 18).length), L.calDayDateSetup(2026, 11, 18));
+  assert.deepStrictEqual(L.calDayDateSetup(2026, 11, 18).slice(0, 6), ['set d0 to current date', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set day of d0 to 18', 'set time of d0 to 0']);
+  assert.ok(sc.includes('copy d0 to d1') && !sc.includes('set d1 to d0') && !sc.some((x) => /36 \* hours/.test(x)));
+  assert.deepStrictEqual(L.calDayDateSetup(2026, 12, 31).slice(7), ['copy d0 to d1', 'set time of d1 to 43200', 'set day of d1 to 1', 'set year of d1 to 2027', 'set month of d1 to 1', 'set day of d1 to 1', 'set time of d1 to 0', 'if (day of d1) is not 1 then set d1 to d1 + (1 * hours)']); // 다음 날짜는 JS 가 계산
+  assert.ok(L.calDayDateSetup(2026, 11, 18).includes('if (day of d0) is not 18 then set d0 to d0 + (1 * hours)'));
+  assert.ok(!sc.includes('if sd < d0 then set sd to d0')); // 시작을 이 날 0시로 당기는 clamp 가 없다(월·오늘 스크립트는 그대로)
+  assert.ok(L.calMonthScript(2026, 11).includes('if sd < d0 then set sd to d0') && L.CAL_SCRIPT.includes('if sd < d0 then set sd to d0'));
+  for (const [y, m, d] of [[1999, 1, 1], [2101, 1, 1], [2026, 0, 1], [2026, 13, 1], [2026, 2, 29], [2026, 4, 31], [2026, 11, 0], [2026, 11, 31], [2026.5, 1, 1], ['2026', 11, 1], [2026, 11, '1'], [2026, 11, null], [2026, 11, NaN]]) assert.strictEqual(L.calDayScript(y, m, d), null, y + '-' + m + '-' + d);
+  assert.ok(L.calDayScript(2028, 2, 29)); // 윤일
+  const tail = sc.join('\n');
+  assert.ok(/try\nset rl to location of e\nif rl is not missing value/.test(tail) && /try\nset rn to description of e/.test(tail)); // 장소·메모는 try + missing value 방어
+  assert.ok(tail.includes('text 1 thru 2000') && tail.includes('my clean(rn)') && tail.includes('my clean(rl)') && tail.includes('my clean(cn)') && tail.includes('my clean(ttl)'));
+  for (const [v, n] of [['ttl', 200], ['rl', 400], ['cn', 200], ['rn', 2000]]) assert.ok(tail.includes('if (count of ' + v + ') > ' + n + ' then set ' + v + ' to text 1 thru ' + n + ' of ' + v), v); // 길이를 먼저 자른 뒤 clean
+  assert.ok(sc.every((x) => !/\$|`|\\/.test(x) || L.CAL_SCRIPT.includes(x)));
+});
+if (process.platform === 'darwin') t('calDayDateSetup: osascript 로 d0=그 날 0시, d1=다음 날 0시(월말·12월 31일 포함, Calendar 는 건드리지 않음)', () => {
+  const { execFileSync } = require('child_process');
+  const run = (y, m, d) => {
+    const lines = [...L.calDayDateSetup(y, m, d),
+      'return ((year of d0) as text) & "-" & ((month of d0) as integer) & "-" & (day of d0) & "T" & (time of d0) & " " & ((year of d1) as text) & "-" & ((month of d1) as integer) & "-" & (day of d1) & "T" & (time of d1)'];
+    return execFileSync('/usr/bin/osascript', lines.flatMap((x) => ['-e', x]), { encoding: 'utf8', timeout: 20000 }).trim();
+  };
+  assert.strictEqual(run(2026, 11, 18), '2026-11-18T0 2026-11-19T0');
+  assert.strictEqual(run(2026, 11, 30), '2026-11-30T0 2026-12-1T0');
+  assert.strictEqual(run(2026, 12, 31), '2026-12-31T0 2027-1-1T0');
+  assert.strictEqual(run(2028, 2, 29), '2028-2-29T0 2028-3-1T0');
+  // 자정에 서머타임이 바뀌는 시간대(osascript 는 TZ 환경 변수를 따른다). 0시가 없는 날은 필드(`day of`)가 전날로 보이는 경계 시각이 되므로 isot 문자열로 비교한다
+  const runTz = (tz, y, m, d) => {
+    const lines = [...L.calDayDateSetup(y, m, d), 'return (d0 as «class isot» as string) & " " & (d1 as «class isot» as string)'];
+    return execFileSync('/usr/bin/osascript', lines.flatMap((x) => ['-e', x]), { encoding: 'utf8', timeout: 20000, env: { ...process.env, TZ: tz } }).trim();
+  };
+  assert.strictEqual(runTz('America/Santiago', 2026, 9, 5), '2026-09-05T00:00:00 2026-09-06T00:00:00');
+  assert.strictEqual(runTz('America/Santiago', 2026, 9, 6), '2026-09-06T00:00:00 2026-09-07T00:00:00');
+  assert.strictEqual(runTz('America/Havana', 2026, 3, 7), '2026-03-07T00:00:00 2026-03-08T00:00:00');
+  assert.strictEqual(runTz('America/Havana', 2026, 3, 8), '2026-03-08T00:00:00 2026-03-09T00:00:00');
+  assert.strictEqual(runTz('Asia/Seoul', 2026, 11, 18), '2026-11-18T00:00:00 2026-11-19T00:00:00');
+});
+t('parseCalendarDay: 그 날 시작만, 필드 9개·형식 검증, 정리·상한·정렬', () => {
+  const rec = (...f) => f.join('\x1f') + '\x1e';
+  const R = (date, tm, fl, ti, ed, et, cal, loc, nt) => rec(date, tm, fl, ti, ed, et, cal, loc, nt);
+  const day = '2026-11-18';
+  const out = R(day, '14:30', '0', '회의', day, '15:30', '업무', '회의실 A', '안건\r\n준비물\r끝') + R(day, '', '1', '휴일', '2026-11-20', '', '집', '', '')
+    + R(day, '09:00', '0', '아침', '2026-11-19', '01:00', ' 개인\t캘린더 ', '서울\n어딘가', '') + R(day, '09:00', '0', '아침', day, '10:00', 'x', '', '')
+    + R('2026-11-17', '10:00', '0', '어제 시작', day, '11:00', '', '', '') + R(day, '25:00', '0', '나쁜 시각', day, '10:00', '', '', '') + R(day, '10:00', '0', '나쁜 끝', day, '99:00', '', '', '')
+    + R(day, '10:00', '2', '나쁜 플래그', day, '11:00', '', '', '') + R(day, '10:00', '0', '', day, '11:00', '', '', '') + R(day, '10:00', '0', '나쁜 끝날', '2026-13-01', '11:00', '', '', '')
+    + R(day, '', '1', '종일인데 시각', day, '10:00', '', '', '') + day + '\x1f10:00\x1f0\x1f적은 필드\x1e' + R(day, '10:00', '0', 'a​b', day, '11:00', '', '', '');
+  const r = L.parseCalendarDay(out, 2026, 11, 18);
+  assert.deepStrictEqual(r.map((x) => x.title), ['휴일', '아침', 'ab', '회의']);
+  assert.deepStrictEqual(r[0], { allDay: true, time: '', title: '휴일', endDay: '2026-11-20', endTime: '', cal: '집', loc: '', notes: '' });
+  assert.deepStrictEqual(r[1], { allDay: false, time: '09:00', title: '아침', endDay: '2026-11-19', endTime: '01:00', cal: '개인캘린더', loc: '서울 어딘가', notes: '', more: [{ endDay: '', endTime: '10:00', cal: 'x', loc: '', notes: '' }] }); // 같은 시각·제목은 한 행, 다른 캘린더 상세는 more
+  assert.deepStrictEqual(r[3], { allDay: false, time: '14:30', title: '회의', endDay: '', endTime: '15:30', cal: '업무', loc: '회의실 A', notes: '안건\n준비물\n끝' });
+  // cal·loc 상한, 메모: 줄·글자 상한과 …, 제어문자
+  const big = L.parseCalendarDay(R(day, '08:00', '0', 't', day, '09:00', 'c'.repeat(200), 'l'.repeat(500), Array.from({ length: 30 }, (_, i) => 'L' + i).join('\n')) + R(day, '08:10', '0', 'u', day, '09:00', '', '', 'x'.repeat(900)) + R(day, '08:20', '0', 'v', day, '09:00', '', '', 'a\x01b\x7fc\rd\n\ne'), 2026, 11, 18);
+  assert.strictEqual(L.calNotes('a\rb\r\nc\nd'), 'a\nb\nc\nd'); // 옛 CR 줄바꿈도 나눈다
+  assert.strictEqual([...big[0].cal].length, 80); assert.strictEqual([...big[0].loc].length, 200);
+  assert.strictEqual(big[0].notes.split('\n').length, 20); assert.ok(big[0].notes.endsWith('L19…'));
+  assert.strictEqual([...big[1].notes].length, 601); assert.ok(big[1].notes.endsWith('…'));
+  assert.strictEqual(big[2].notes, 'abc\nd\n\ne');
+  // 개수 상한 30
+  let many = ''; for (let i = 0; i < 50; i++) many += R(day, '10:' + String(i).padStart(2, '0'), '0', 't' + i, day, '11:00', '', '', '');
+  assert.strictEqual(L.parseCalendarDay(many, 2026, 11, 18).length, 30);
+  // 읽기 실패는 null(상한 초과·문자열 아님·날짜 인자 오류), 정상인데 비면 []
+  for (const bad of [undefined, 5, null, {}, 'x'.repeat(600000)]) assert.strictEqual(L.parseCalendarDay(bad, 2026, 11, 18), null);
+  for (const ok of ['', 'garbage']) assert.deepStrictEqual(L.parseCalendarDay(ok, 2026, 11, 18), []);
+  for (const [y, m, d] of [[1999, 11, 18], [2026, 13, 1], [2026, 11, 31], [2026, 11, '18'], [2026.5, 11, 18]]) assert.strictEqual(L.parseCalendarDay(out, y, m, d), null);
+  // 앞선 날에 시작한 일정(clamp 가 없으니 실제 시작 날짜로 온다)과 다음 날 시작은 버려 달 목록과 같은 일정만 남는다
+  assert.deepStrictEqual(L.parseCalendarDay(R('2026-11-19', '10:00', '0', 'x', '2026-11-19', '11:00', '', '', '') + R('2026-11-17', '', '1', '어제부터', '2026-11-19', '', '', '', '') + R('2026-11-17', '23:00', '0', '밤샘', day, '02:00', '', '', ''), 2026, 11, 18), []);
+  // 병합: 최대 4블록(첫 블록 포함), 완전히 같은 블록은 버림
+  const mg = L.parseCalendarDay(['a', 'b', 'c', 'd', 'e', 'a'].map((c) => R(day, '10:00', '0', '같은 일정', day, '11:00', c, '', '')).join(''), 2026, 11, 18);
+  assert.strictEqual(mg.length, 1); assert.deepStrictEqual([mg[0].cal, ...mg[0].more.map((x) => x.cal)], ['a', 'b', 'c', 'd']);
+});
+t('하루 읽기 큐 결정: 오래된 요청 건너뛰기·밀어낼 항목·실패 뒤 상태', () => {
+  const F = L.CAL_DAY_FRESH_MS;
+  assert.strictEqual(L.calDayJobStale(1000, 1000 + F), false); assert.strictEqual(L.calDayJobStale(1000, 1000 + F + 1), true); assert.strictEqual(L.calDayJobStale(undefined, 5), true);
+  const e = (busy, started, used) => ({ busy, started, used });
+  assert.strictEqual(L.calDayVictim([['a', e(true, true, 1)], ['b', e(true, false, 5)], ['c', e(true, false, 2)]]), 'c'); // 시작 안 한 대기 중 가장 오래된 것
+  assert.strictEqual(L.calDayVictim([['a', e(true, false, 1)], ['b', e(false, false, 9)], ['c', e(false, false, 4)]]), 'c'); // 쉬는 것이 먼저
+  assert.strictEqual(L.calDayVictim([['a', e(true, true, 1)], ['b', e(true, true, 2)]]), null); // 읽는 중인 것은 밀어내지 않는다
+  assert.strictEqual(L.calDayVictim([]), null);
+  const MIN = 60000;
+  assert.strictEqual(L.calDayAfterFail({ state: 'ok', fails: 1, okAt: 0 }, 5 * MIN), 'ok');
+  assert.strictEqual(L.calDayAfterFail({ state: 'ok', fails: 2, okAt: 0 }, 5 * MIN), 'ok');
+  assert.strictEqual(L.calDayAfterFail({ state: 'ok', fails: 3, okAt: 0 }, 5 * MIN), 'fail');
+  assert.strictEqual(L.calDayAfterFail({ state: 'ok', fails: 1, okAt: 0 }, 15 * MIN + 1), 'fail');
+  assert.strictEqual(L.calDayAfterFail({ state: 'fail', fails: 1, okAt: 0 }, MIN), 'fail');
+});
+t('하루 상세 연결(소스 구조): 메모리 전용·검증·정리', () => {
+  const fs = require('fs'); const read = (f) => fs.readFileSync(require('path').join(__dirname, f), 'utf8');
+  const main = read('main.js'); const rend = read('renderer/renderer.js');
+  assert.ok(/calDayJobStale\(c\.used/.test(main) && /calDayVictim\(\[\.\.\.calDays\]\)/.test(main) && /L\.parseCalendarDay\(r\.stdout/.test(main) && /if \(!evs\) \{ fail\(\)/.test(main));
+  assert.ok(/forgetDayEvents\(\)/.test(rend) && /dayExp\.clear\(\)/.test(rend) && /size > 200/.test(rend) && /if \(open\) b\.setAttribute\('aria-controls'/.test(rend) && /if \(!closed\) b\.setAttribute\('aria-controls'/.test(rend) && /ev\.detail === 'fail'/.test(rend));
+  assert.ok(/ensureCalDay\(day\)[\s\S]{0,200}!calOn\(\)/.test(main) && /calMonthQueue = calMonthQueue\.then\(async \(\) => \{\s*if \(!calOn\(\) \|\| calDays\.get\(day\) !== c\)/.test(main)); // 같은 큐, 꺼지면 읽지 않음
+  assert.ok(/calMonths\.clear\(\); calDays\.clear\(\)/.test(main) && /CAL_DAY_MAX = 5/.test(main) && /CAL_DAY_TTL_MS = 5 \* 60 \* 1000/.test(main));
+  const m = /ipcMain\.handle\('days:detail'[\s\S]*?\n\}\);/.exec(main)[0]; assert.ok(m.includes('fromMain(e)') && m.includes('L.validDay(day)') && m.includes('calDayGet(day)'));
+  assert.ok(/uiDayOpen: FAKE_DAY && !app\.isPackaged/.test(main));
+  assert.ok(!/localStorage|sessionStorage/.test(rend.slice(rend.indexOf('const dayColl'), rend.indexOf('$(\'dv-close\')'))));
+  assert.ok(!/innerHTML/.test(rend.slice(rend.indexOf('function renderDay'), rend.indexOf('$(\'dv-close\')'))));
+  const I = require('./i18n');
+  for (const k of ['day.group.n', 'day.all.collapse', 'day.all.expand', 'day.ev.cal', 'day.ev.loc', 'day.ev.notes']) { assert.ok(I.STR.ko[k] && I.STR.en[k], k); }
+  assert.strictEqual(I.t('ko', 'day.group.n', { n: 3 }), '3건'); assert.strictEqual(I.t('en', 'day.group.n', { n: 1 }), '1 item'); assert.strictEqual(I.t('en', 'day.group.n', { n: 2 }), '2 items');
+  for (const l of ['ko', 'en']) assert.ok(/(장소|location)/i.test(I.t(l, 'set.cal.desc')));
 });
 t('달력 카드·하루 보기 연결(소스 구조)', () => {
   const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8'); const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');

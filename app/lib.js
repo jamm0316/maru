@@ -2239,7 +2239,9 @@ function calMonthDateSetup(year, month) {
   const ny = month === 12 ? year + 1 : year; const nm = month === 12 ? 1 : month + 1;
   return [
     'set d0 to current date', 'set day of d0 to 1', 'set year of d0 to ' + year, 'set month of d0 to ' + month, 'set time of d0 to 0',
+    'if (day of d0) is not 1 then set d0 to d0 + (1 * hours)', // 1일 0시가 없는 시간대(자정 서머타임)는 전달 23시로 가므로 1시간을 더한다
     'copy d0 to d1', 'set year of d1 to ' + ny, 'set month of d1 to ' + nm,
+    'if (day of d1) is not 1 then set d1 to d1 + (1 * hours)',
   ];
 }
 function calMonthScript(year, month) {
@@ -2311,6 +2313,109 @@ function parseCalendarMonth(text, year, month) {
     if (!out[d].length) delete out[d];
   }
   return out;
+}
+
+// ---- 하루 상세 읽기(하루 보기를 열었을 때만, 켜져 있을 때만) ----
+// 출력: 이벤트마다 <시작 날짜>US<시작 시각|빈 값>US<종일 1|0>US<제목>US<끝 날짜>US<끝 시각|빈 값>US<캘린더 이름>US<장소>US<메모>RS. 시작 날짜·시각은 실제 값 그대로다(앞선 날에 시작한 일정을 이 날 0시로 당기지 않는다:
+// 파서가 그 날에 시작하지 않은 것을 버려 달 목록과 같은 일정만 남는다). 모든 글 필드는 먼저 길이를 자르고(제목 200·장소 400·캘린더 이름 200·메모 2000자) clean 이 RS/US 를 제거한다.
+// 장소·메모는 missing value 일 수 있어 try 로 읽고 비면 "". 종일 일정의 끝은 배타적(다음 날 0시)이라 1초를 뺀다. 날짜 설정 줄은 숫자 리터럴(검증된 정수)만 들어간다.
+const CAL_DAY_TAIL = [
+  'tell application "Calendar"',
+  'repeat with c in calendars', 'try',
+  'set cn to ""', 'try', 'set cn to (name of c) as text', 'if (count of cn) > 200 then set cn to text 1 thru 200 of cn', 'set cn to my clean(cn)', 'end try',
+  'set evs to (every event of c whose start date < d1 and end date > d0)',
+  'repeat with e in evs', 'try',
+  'set sd to start date of e', 'set ed to end date of e', 'set ad to allday event of e', 'set ttl to (summary of e) as text', 'if (count of ttl) > 200 then set ttl to text 1 thru 200 of ttl', 'set ttl to my clean(ttl)',
+  'if ad is true then set ed to ed - 1',
+  'set lc to ""', 'try', 'set rl to location of e', 'if rl is not missing value then', 'set rl to rl as text', 'if (count of rl) > 400 then set rl to text 1 thru 400 of rl', 'set lc to my clean(rl)', 'end if', 'end try',
+  'set nt to ""', 'try', 'set rn to description of e', 'if rn is not missing value then', 'set rn to rn as text', 'if (count of rn) > 2000 then set rn to text 1 thru 2000 of rn', 'set nt to my clean(rn)', 'end if', 'end try',
+  'set tm to ""', 'set etm to ""', 'set fl to "1"',
+  'if ad is false then', 'set tm to (my p2(hours of sd)) & ":" & (my p2(minutes of sd))', 'set etm to (my p2(hours of ed)) & ":" & (my p2(minutes of ed))', 'set fl to "0"', 'end if',
+  'set out to out & (my fmt(sd)) & US & tm & US & fl & US & ttl & US & (my fmt(ed)) & US & etm & US & cn & US & lc & US & nt & RS',
+  'end try', 'end repeat', 'end try', 'end repeat',
+  'end tell', 'return out',
+];
+// 하루: d0 = 그 날 0시, d1 = 다음 날 0시. 다음 날짜(연·월·일)는 JS 에서 계산해 d1 에 그대로 넣는다(36시간을 더하는 방식은 자정에 서머타임이 바뀌는 시간대에서 하루가 어긋난다).
+// d1 은 먼저 정오로 옮긴 뒤 날짜를 바꾼다(0시인 채로 0시가 없는 날로 옮기면 전날로 밀려 하루가 어긋난다). 그런 시간대(예: America/Santiago·Havana)는 0시가 없어 `set time to 0` 이 전날 23시로 가므로, 일이 기대와 다르면 1시간을 더한다. 날짜 설정 줄만 따로 돌려준다(시험에서 Calendar 없이 실행).
+// 월을 바꾸기 전에 1일로 먼저 맞추고 마지막에 일을 정한다.
+function calDayDateSetup(year, month, day) {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day) || year < 2000 || year > 2100 || month < 1 || month > 12) return null;
+  if (!validDay(String(year) + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0'))) return null;
+  const nx = new Date(Date.UTC(year, month - 1, day + 1));
+  const ny = nx.getUTCFullYear(), nm = nx.getUTCMonth() + 1, nd = nx.getUTCDate();
+  return [
+    'set d0 to current date', 'set day of d0 to 1', 'set year of d0 to ' + year, 'set month of d0 to ' + month, 'set day of d0 to ' + day, 'set time of d0 to 0',
+    'if (day of d0) is not ' + day + ' then set d0 to d0 + (1 * hours)',
+    'copy d0 to d1', 'set time of d1 to 43200', 'set day of d1 to 1', 'set year of d1 to ' + ny, 'set month of d1 to ' + nm, 'set day of d1 to ' + nd, 'set time of d1 to 0',
+    'if (day of d1) is not ' + nd + ' then set d1 to d1 + (1 * hours)',
+  ];
+}
+function calDayScript(year, month, day) {
+  const setup = calDayDateSetup(year, month, day);
+  if (!setup) return null;
+  return [...CAL_PRE, ...setup, ...CAL_DAY_TAIL];
+}
+const CAL_DAY_DETAIL_MAX_EVENTS = 30; const CAL_DAY_MERGE_MAX = 4;
+const CAL_DAY_DETAIL_MAX_BYTES = 512 * 1024;
+// ---- 하루 읽기 큐 결정(main 이 쓰는 순수 함수) ----
+const CAL_DAY_FRESH_MS = 6000; // 큐에서 차례가 왔을 때 이 시간 안에 요청된 날만 읽는다(열린 날은 5초마다 다시 묻는다)
+const CAL_DAY_KEEP_FAILS = 2; const CAL_DAY_KEEP_MS = 15 * 60 * 1000; // 다시 읽기가 실패해도 이전 상세는 연속 2번·15분까지만 남긴다
+// 차례가 온 작업을 건너뛸지: 마지막 요청이 너무 오래됐으면(사용자가 이미 떠난 날) true
+const calDayJobStale = (reqAt, now) => !Number.isFinite(reqAt) || now - reqAt > CAL_DAY_FRESH_MS;
+// 캐시가 가득 찼을 때 버릴 항목: 쉬는 것 중 가장 오래 쓰지 않은 것, 없으면 아직 시작하지 않은 대기 작업 중 가장 오래 요청된 것, 둘 다 없으면 null(읽는 중인 것은 절대 버리지 않는다)
+// entries: [[key, { busy, started, used }]]
+function calDayVictim(entries) {
+  let idle = null, queued = null;
+  for (const [k, v] of entries) {
+    if (!v.busy) { if (!idle || v.used < idle[1]) idle = [k, v.used]; }
+    else if (!v.started) { if (!queued || v.used < queued[1]) queued = [k, v.used]; }
+  }
+  return idle ? idle[0] : queued ? queued[0] : null;
+}
+// 다시 읽기가 실패한 뒤의 상태: 이전에 읽은 상세(ok)는 연속 실패가 2번 이하이고 마지막 성공이 15분 안일 때만 유지한다. c: { state, fails(이번 실패 포함), okAt }
+function calDayAfterFail(c, now) {
+  return c.state === 'ok' && c.fails <= CAL_DAY_KEEP_FAILS && now - c.okAt <= CAL_DAY_KEEP_MS ? 'ok' : 'fail';
+}
+const CAL_NAME_MAX = 80; const CAL_LOC_MAX = 200; const CAL_NOTES_MAX = 600; const CAL_NOTES_LINES = 20;
+const calOneLine = (s, max) => [...(typeof s === 'string' ? s.replace(/[\r\n]+/g, ' ').replace(BAD_CHARS_G, '') : '').replace(/\s+/g, ' ').trim()].slice(0, max).join('').trim();
+function calNotes(s) {
+  if (typeof s !== 'string') return '';
+  const lines = s.replace(/\r\n?/g, '\n').replace(/[^\S\n]+$/gm, '').split('\n').map((x) => x.replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g, '').replace(BAD_CHARS_G, ''));
+  let cut = lines.length > CAL_NOTES_LINES;
+  let t = lines.slice(0, CAL_NOTES_LINES).join('\n').trim();
+  const cp = [...t];
+  if (cp.length > CAL_NOTES_MAX) { t = cp.slice(0, CAL_NOTES_MAX).join('').trimEnd(); cut = true; }
+  return t && cut ? t + '…' : t;
+}
+// 하루 상세 출력 -> [{allDay, time, title, endDay, endTime, cal, loc, notes, more?}] (그 날에 시작하는 것만; 종일 먼저·시각순; 최대 30개). endDay 는 끝이 더 뒤 날일 때만 'YYYY-MM-DD', 아니면 ''.
+// 같은 시각·같은 제목은 한 행으로 합쳐 달 목록과 같은 수를 유지하고, 다른 캘린더의 상세(끝·캘린더·장소·메모)는 more 에 모은다(첫 블록 포함 최대 4개, 완전히 같은 블록은 버림).
+// 입력이 문자열이 아니거나 상한을 넘거나 날짜 인자가 잘못이면 null(읽기 실패)이고, 정상인데 일정이 없으면 []다.
+function parseCalendarDay(text, year, month, day) {
+  const ds = Number.isInteger(year) && Number.isInteger(month) && Number.isInteger(day) ? String(year).padStart(4, '0') + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0') : null;
+  if (!ds || year < 2000 || year > 2100 || !validDay(ds) || typeof text !== 'string' || text.length > CAL_DAY_DETAIL_MAX_BYTES) return null;
+  const timeOk = (x) => /^([01]\d|2[0-3]):[0-5]\d$/.test(x);
+  const seen = new Map(); const out = [];
+  for (const rec of text.split('\x1e')) {
+    const f = rec.replace(/^[\r\n]+/, '').split('\x1f');
+    if (f.length !== 9) continue;
+    const [date, time, flag, rawTitle, endDate, endTime, rawCal, rawLoc, rawNotes] = f;
+    if (date !== ds || !validDay(endDate) || (flag !== '0' && flag !== '1')) continue;
+    const allDay = flag === '1';
+    if (allDay ? time !== '' || endTime !== '' : !timeOk(time) || !timeOk(endTime)) continue;
+    const title = [...cleanQuestText(rawTitle)].slice(0, CAL_TITLE_MAX).join('').trim();
+    if (!title) continue;
+    const key = time + '|' + title;
+    const blk = { endDay: endDate > ds ? endDate : '', endTime, cal: calOneLine(rawCal, CAL_NAME_MAX), loc: calOneLine(rawLoc, CAL_LOC_MAX), notes: calNotes(rawNotes) };
+    const prev = seen.get(key);
+    if (prev) { // 같은 일정이 다른 캘린더에도 있으면 한 행으로 두고 상세만 모은다
+      const all = [prev, ...(prev.more || [])];
+      if (all.length < CAL_DAY_MERGE_MAX && !all.some((b) => b.endDay === blk.endDay && b.endTime === blk.endTime && b.cal === blk.cal && b.loc === blk.loc && b.notes === blk.notes)) (prev.more || (prev.more = [])).push(blk);
+      continue;
+    }
+    const ev = { allDay, time, title, ...blk }; seen.set(key, ev); out.push(ev);
+  }
+  out.sort((a, b) => (a.allDay === b.allDay ? 0 : a.allDay ? -1 : 1) || (a.time < b.time ? -1 : a.time > b.time ? 1 : (a.title < b.title ? -1 : a.title > b.title ? 1 : 0)));
+  return out.slice(0, CAL_DAY_DETAIL_MAX_EVENTS);
 }
 
 // ---- 알림과 승인함(inbox) ----
@@ -3561,7 +3666,7 @@ const api = {
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
-  SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth,
+  SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth, calDayScript, calDayDateSetup, parseCalendarDay, calNotes, calDayJobStale, calDayVictim, calDayAfterFail, CAL_DAY_FRESH_MS,
   DIARY_FILE_MAX_BYTES, DIARY_FILES_MAX, DIARY_TITLE_MAX, DIARY_BODY_MAX, parseDiaryText, readDiaries, parseYm, shiftYm, shiftDay, monthLayout, buildMonthSummary, buildDayGroups,
   SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, teamChip, matchSubs, squadOpen, claudeLaunchCommand,
   TODO_DONE_MAX, TODO_DONE_MAX_BYTES, fitTodoDone, todoMarkKey, TODO_DONE_KEEP_SEC, TODO_DONE_HIDE_SEC, titleKey, todoTitleRecordable, validTodoDoneEntry, makeTodoDone, todoMarkable, formatTodoDone, parseTodoDone, pruneTodoDone, addTodoDone, removeTodoDone, filterTodos, readTodoDoneFile, saveTodoDone, projectOpenTodos,
