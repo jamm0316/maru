@@ -155,11 +155,11 @@
     });
   });
 
-  // By-role demo: a mock app window that plays a scenario step by step. All text comes from copy.js (keys under "demo.").
+  // By-role demo: a mock app window that plays a scenario by itself, step by step and role by role (hover or keyboard focus pauses it; tabs and step dots jump). All text comes from copy.js (keys under "demo.").
   var ROLES = ['dev', 'mkt', 'pm', 'res'], NSTEP = 5;
-  var dRole = 0, dStep = 0, dHint = true, dWidth = 0;
+  var dRole = 0, dStep = 0, dWidth = 0;
   var dm = {};
-  ['body', 'flow', 'ws', 'sq', 'plus', 'sum', 'dots', 'prev', 'next', 'count', 'live', 'take', 'panel'].forEach(function (k) { dm[k] = document.getElementById('dm-' + k); });
+  ['body', 'flow', 'ws', 'sq', 'plus', 'sum', 'dots', 'prog', 'live', 'take', 'panel'].forEach(function (k) { dm[k] = document.getElementById('dm-' + k); });
   var dTabs = document.querySelectorAll('.demo-tabs [role="tab"]');
 
   function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
@@ -406,10 +406,6 @@
       b.setAttribute('aria-label', t('demo.stepword') + ' ' + (i + 1) + ': ' + label);
       if (i === dStep) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current');
     });
-    dm.prev.setAttribute('aria-disabled', dStep === 0 ? 'true' : 'false');
-    dm.next.textContent = t(dStep === NSTEP - 1 ? 'demo.restart' : 'demo.next');
-    dm.next.classList.toggle('is-hint', dHint);
-    dm.count.textContent = (dStep + 1) + ' / ' + NSTEP;
   }
 
   function measure() {
@@ -427,14 +423,14 @@
   function demoApply() { renderChrome(); measure(); }
 
   function setStep(n, announce) {
-    dStep = Math.max(0, Math.min(NSTEP - 1, n)); dHint = false;
-    renderStep(); renderChrome();
+    dStep = Math.max(0, Math.min(NSTEP - 1, n));
+    renderStep(); renderChrome(); restartProg();
     if (!reduced) { dm.flow.classList.remove('dm-in'); void dm.flow.offsetWidth; dm.flow.classList.add('dm-in'); }
     if (announce) dm.live.textContent = t('demo.stepword') + ' ' + (dStep + 1) + '/' + NSTEP + ': ' + t(DATA[ROLES[dRole]].labels[dStep]);
   }
   function setRole(i, focus) {
-    dRole = i; dStep = 0; dHint = false;
-    renderStep(); renderChrome();
+    dRole = i; dStep = 0;
+    renderStep(); renderChrome(); restartProg();
     if (!reduced) { dm.flow.classList.remove('dm-in'); void dm.flow.offsetWidth; dm.flow.classList.add('dm-in'); }
     if (focus) dTabs[i].focus();
   }
@@ -451,8 +447,19 @@
     });
   });
   Array.prototype.forEach.call(dm.dots.querySelectorAll('button'), function (b, i) { b.addEventListener('click', function () { setStep(i, true); }); });
-  dm.prev.addEventListener('click', function () { if (dStep > 0) setStep(dStep - 1, true); });
-  dm.next.addEventListener('click', function () { setStep(dStep === NSTEP - 1 ? 0 : dStep + 1, true); });
+  // Autoplay: the progress bar's CSS animation is the clock. When it ends, go to the next step (after the last step, the next role).
+  // Pausing is animation-play-state, so the bar and the clock can never drift apart. With reduced motion nothing plays; the dots still work.
+  var dWrap = document.querySelector('.demo'), dHov = false, dFoc = false, dVis = !('IntersectionObserver' in window);
+  function restartProg() { dm.prog.classList.remove('run'); if (reduced) return; void dm.prog.offsetWidth; dm.prog.classList.add('run'); }
+  function syncPause() { dWrap.classList.toggle('paused', dHov || dFoc || !dVis || document.hidden); }
+  dm.prog.addEventListener('animationend', function () { if (dStep < NSTEP - 1) setStep(dStep + 1, false); else setRole((dRole + 1) % ROLES.length, false); });
+  dWrap.addEventListener('pointerenter', function (e) { if (e.pointerType === 'mouse') { dHov = true; syncPause(); } });
+  dWrap.addEventListener('pointerleave', function () { dHov = false; syncPause(); });
+  dWrap.addEventListener('focusin', function (e) { var k = false; try { k = e.target.matches(':focus-visible'); } catch (x) { k = false; } dFoc = k; syncPause(); }); // keyboard focus only: a tapped tab keeps focus on touch screens
+  dWrap.addEventListener('focusout', function () { dFoc = false; syncPause(); });
+  document.addEventListener('visibilitychange', syncPause);
+  if ('IntersectionObserver' in window) new IntersectionObserver(function (es) { dVis = es[es.length - 1].isIntersecting; syncPause(); }, { threshold: 0.35 }).observe(dm.panel);
+  syncPause(); restartProg();
   var dTimer = null;
   window.addEventListener('resize', function () { clearTimeout(dTimer); dTimer = setTimeout(function () { if (window.innerWidth !== dWidth) measure(); }, 150); });
 
