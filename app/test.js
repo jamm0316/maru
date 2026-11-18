@@ -554,6 +554,54 @@ t('캘린더 스크립트는 고정 문자열 배열', () => {
   for (const l of ['ko', 'en']) assert.ok(/(일정을 읽어|reads events from your Calendar)/.test(I.t(l, 'set.cal.desc')) && /(메모리에만|in memory)/.test(I.t(l, 'set.cal.desc')) && /(macOS가 캘린더 접근 허용을 묻습니다|macOS asks you to allow Calendar)/.test(I.t(l, 'set.cal.desc')) && !/(반복 일정은|Recurring events may)/.test(I.t(l, 'set.cal.desc'))); // 두 경로 모두 참인 문구: 읽음·메모리에만·처음 읽을 때 macOS 가 묻는다
 });
 
+// ---- 좌우 패널 너비 ----
+t('clampPanelWidths 기본·범위·창 너비', () => {
+  assert.deepStrictEqual(L.PANEL_DEFAULT, { left: 220, right: 340 });
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 300, right: 400 }, 1440), { left: 300, right: 400 });
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 100, right: 100 }, 1440), { left: 180, right: 260 });
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 9999, right: 9999 }, 3000), { left: 480, right: 560 });
+  // 가운데 420 확보: 1440 - 64 - 420 = 956 이 왼쪽+오른쪽 한도. 오른쪽을 먼저 줄인다
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 480, right: 560 }, 1440), { left: 480, right: 476 });
+  const w = L.clampPanelWidths({ left: 480, right: 560 }, 1200); assert.ok(w.left + w.right <= 1200 - 64 - 420 && w.right >= 260 && w.left >= 180);
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 300, right: 400 }, 1200), { left: 300, right: 400 });
+});
+t('clampPanelWidths 좁은 배치(1100 이하)는 왼쪽을 150 으로 보고 오른쪽을 제한', () => {
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 300, right: 560 }, 1100), { left: 300, right: 466 }); // 1100-64-420-150
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 220, right: 340 }, 900), { left: 220, right: 266 });
+  assert.deepStrictEqual(L.panelRange('left', 300, 900), { min: 180, max: 480 });
+  assert.strictEqual(L.panelRange('right', 999, 900).max, 266);
+});
+t('clampPanelWidths 잘못된 값은 기본값', () => {
+  const d = { left: 220, right: 340 };
+  for (const bad of [NaN, Infinity, '300', null, undefined, {}, [], true]) assert.deepStrictEqual(L.clampPanelWidths({ left: bad, right: bad }, 1600), d);
+  for (const bad of [null, undefined, 'x', 5, []]) assert.deepStrictEqual(L.clampPanelWidths(bad, 1600), d);
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 250.6, right: 'a' }, 1600), { left: 251, right: 340 });
+  for (const vw of [NaN, undefined, '1000', 0, -5]) assert.deepStrictEqual(L.clampPanelWidths({ left: 480, right: 560 }, vw), { left: 480, right: 560 }); // 창 너비를 모르면 고정 범위만
+  assert.deepStrictEqual(L.clampPanelWidths({ left: 480, right: 560 }, 500), { left: 480, right: 260 }); // 아주 좁으면 오른쪽은 최소값이 이긴다(왼쪽은 좁은 배치에서 CSS 가 150 으로 고정)
+});
+t('parsePanelWidths·parseColsEnv', () => {
+  assert.deepStrictEqual(L.parsePanelWidths('{"left":300,"right":400}'), { left: 300, right: 400 });
+  assert.deepStrictEqual(L.parsePanelWidths('{"left":300}'), { left: 300, right: 340 });
+  assert.deepStrictEqual(L.parsePanelWidths('{"left":"300","right":null}'), null);
+  for (const bad of [null, '', 'not json', '[1,2]', '5', '{}', '"x"']) assert.strictEqual(L.parsePanelWidths(bad), null);
+  assert.deepStrictEqual(L.parseColsEnv('300,400'), { left: 300, right: 400 });
+  assert.deepStrictEqual(L.parseColsEnv(' 250 , 500 '), { left: 250, right: 500 });
+  for (const bad of ['300', '300,', 'a,b', '-1,2', '1,2,3', '', undefined, 5]) assert.strictEqual(L.parseColsEnv(bad), null);
+});
+t('panelKeyDelta: 손잡이가 움직이는 방향', () => {
+  assert.strictEqual(L.panelKeyDelta('left', 'ArrowRight', false), 16); assert.strictEqual(L.panelKeyDelta('left', 'ArrowLeft', false), -16);
+  assert.strictEqual(L.panelKeyDelta('left', 'ArrowRight', true), 64); assert.strictEqual(L.panelKeyDelta('left', 'ArrowLeft', true), -64);
+  assert.strictEqual(L.panelKeyDelta('right', 'ArrowLeft', false), 16); assert.strictEqual(L.panelKeyDelta('right', 'ArrowRight', false), -16);
+  assert.strictEqual(L.panelKeyDelta('right', 'ArrowLeft', true), 64);
+  for (const side of ['left', 'right']) { assert.strictEqual(L.panelKeyDelta(side, 'Home'), 'min'); assert.strictEqual(L.panelKeyDelta(side, 'End'), 'max'); assert.strictEqual(L.panelKeyDelta(side, 'Enter'), 'default'); assert.strictEqual(L.panelKeyDelta(side, 'a'), null); }
+});
+t('패널 기본값이 style.css 와 같다 + 손잡이 마크업', () => {
+  const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8'); const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+  assert.ok(css.includes('--left-w:' + L.PANEL_DEFAULT.left + 'px;--right-w:' + L.PANEL_DEFAULT.right + 'px'));
+  assert.ok(/\.left\{flex:0 0 var\(--left-w\)/.test(css) && /\.right-col\{flex:0 0 var\(--right-w\)/.test(css));
+  for (const id of ['col-l', 'col-r']) assert.ok(new RegExp('id="' + id + '" role="separator" aria-orientation="vertical" tabindex="0"').test(html));
+});
+
 // ---- i18n ----
 t('i18n 표 완전성(ko·en 키 일치, 자리표시자 일치)', () => {
   const kk = Object.keys(I.STR.ko).sort(); const ek = Object.keys(I.STR.en).sort();

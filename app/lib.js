@@ -3765,6 +3765,59 @@ function reportFlash({ prev, next, active, lastFlashAt, nowMs }) {
 // 한 줄 기록(개인 정보 없이: 이유 코드와 파일 이름뿐)
 function childLogLine(kind, reason, name) { return String(kind).replace(/[^a-z-]/g, '').slice(0, 12) + ' ' + String(reason).replace(/[^a-z-]/g, '').slice(0, 20) + ' ' + (typeof name === 'string' && REQ_NAME_RE.test(name) ? name : '-'); }
 
+// ---- 좌우 패널 너비(끌어서 조절) ----
+// 기본값은 style.css 의 .left / .right-col flex-basis 와 같아야 한다. 가운데 열은 최소 PANEL_CENTER_MIN 이 남아야 한다.
+const PANEL_DEFAULT = { left: 220, right: 340 };
+const PANEL_RANGE = { left: [180, 480], right: [260, 560] };
+const PANEL_CENTER_MIN = 420;
+const PANEL_PAD = 16; // .cols 의 좌우 안쪽 여백과 열 사이 간격(각 16px): 가운데 = 창 - 여백 2개 - 간격 2개 - 왼쪽 - 오른쪽
+const PANEL_NARROW_MAX = 1100; // 이하에서는 CSS 가 왼쪽을 PANEL_LEFT_NARROW 로 고정한다
+const PANEL_LEFT_NARROW = 150;
+const PANEL_STORE_KEY = 'maru.cols.v1';
+const panelNum = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : d);
+const panelVw = (vw) => (typeof vw === 'number' && Number.isFinite(vw) && vw > 0 ? vw : null);
+// side 쪽 패널이 가질 수 있는 [min, max]. other 는 반대쪽의 지금 너비(숫자가 아니면 기본값). 창 너비가 없으면 고정 범위만. 최소값이 항상 이긴다.
+function panelRange(side, other, viewportWidth) {
+  const s = side === 'left' ? 'left' : 'right'; const o = s === 'left' ? 'right' : 'left';
+  const [min, max] = PANEL_RANGE[s];
+  const vw = panelVw(viewportWidth);
+  if (vw === null) return { min, max };
+  let otherEff = panelNum(other, PANEL_DEFAULT[o]);
+  if (vw <= PANEL_NARROW_MAX) { if (s === 'left') return { min, max }; otherEff = PANEL_LEFT_NARROW; } // 좁은 배치의 왼쪽은 CSS 가 150px 로 고정(여기서는 저장값만 범위 안으로)
+  const room = vw - 4 * PANEL_PAD - PANEL_CENTER_MIN - otherEff;
+  return { min, max: Math.max(min, Math.min(max, room)) };
+}
+// 저장·입력값 -> 화면에 적용할 너비. 잘못된 값(NaN·문자열 등)은 기본값. 저장값 자체는 바꾸지 않는다(호출한 쪽이 보관).
+function clampPanelWidths(w, viewportWidth) {
+  const src = w && typeof w === 'object' ? w : {};
+  const cl = (v, r) => Math.max(r.min, Math.min(r.max, v));
+  const l0 = cl(panelNum(src.left, PANEL_DEFAULT.left), { min: PANEL_RANGE.left[0], max: PANEL_RANGE.left[1] }); const r0 = cl(panelNum(src.right, PANEL_DEFAULT.right), { min: PANEL_RANGE.right[0], max: PANEL_RANGE.right[1] });
+  const right = cl(r0, panelRange('right', l0, viewportWidth));
+  const left = cl(l0, panelRange('left', right, viewportWidth));
+  return { left, right };
+}
+// 저장된 JSON 문자열 -> {left,right} 또는 null(없음·깨짐·두 값 모두 숫자 아님)
+function parsePanelWidths(text) {
+  let o = null; try { o = JSON.parse(text); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  if (!(typeof o.left === 'number' && Number.isFinite(o.left)) && !(typeof o.right === 'number' && Number.isFinite(o.right))) return null;
+  return { left: panelNum(o.left, PANEL_DEFAULT.left), right: panelNum(o.right, PANEL_DEFAULT.right) };
+}
+// 개발용 환경변수 MARU_APP_COLS="왼쪽,오른쪽"(정수 둘) -> {left,right} 또는 null
+function parseColsEnv(s) {
+  const m = /^\s*(\d{1,4})\s*,\s*(\d{1,4})\s*$/.exec(typeof s === 'string' ? s : '');
+  return m ? { left: Number(m[1]), right: Number(m[2]) } : null;
+}
+// 키보드 조절: 손잡이가 움직이는 방향 기준(왼쪽 손잡이 → 는 왼쪽을 넓히고, 오른쪽 손잡이 ← 는 오른쪽을 넓힌다). 반환: 'default' | 'min' | 'max' | 변화량(px) | null
+function panelKeyDelta(side, key, shift) {
+  if (key === 'Enter') return 'default';
+  if (key === 'Home') return 'min';
+  if (key === 'End') return 'max';
+  if (key !== 'ArrowLeft' && key !== 'ArrowRight') return null;
+  const step = shift ? 64 : 16; const toRight = key === 'ArrowRight';
+  return side === 'left' ? (toRight ? step : -step) : (toRight ? -step : step);
+}
+
 const api = {
   CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, consentChoice, squadChoices, cleanSquadAsk, SQUAD_ASK_MAX, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
   macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, CHILD_HEADER_USER, parseSubOpen, subDraftAdd, subDraftCheck, subDraftUse, subLimitCheck, subNoticeLine, cleanNoticePart, SUB_TITLE_MAX, SUB_BRIEF_MAX, SUB_DRAFT_MS, SUB_DRAFT_MAX, promptHandoff, childBriefPlan, briefAtSpawn, isMaruRootDir, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
@@ -3794,6 +3847,7 @@ const api = {
   PROJ_UI_MAX_BYTES, PROJ_UI_MAX_TAGS, PROJ_UI_MAX_PER_TAG, GOTO_MAX, defaultProjectUi, validateProjectUi, parseProjectUi, readProjectUiFile, projectUiFits, pruneProjectUi, saveProjectUi, applyOrder, applyProjectUi, moveInOrder, visibleProjectKeys, numberTargets, parseMemoryMeta, relatedMemories, readMemoryMetas, buildProjectDetail,
   MEMV_FILES_MAX, MEMV_FILE_MAX_BYTES, MEMV_TOTAL_MAX_BYTES, MEMV_TYPES, MEMV_TAG_EDGE_MEMBERS_MAX, MEMV_EDGES_MAX, parseMemoryFile, buildMemoryModel, readMemoryFiles, buildMemoryGraph, simulateGraph, fitGraph, layoutGraph, filterMemories, memorySearchText, MEMV_CACHE_TTL_MS, MEMV_DIR_SCAN_MAX, MEM_FILE_RE, MEM_LINE_MAX,
   PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
+  PANEL_DEFAULT, PANEL_RANGE, PANEL_CENTER_MIN, PANEL_STORE_KEY, panelRange, clampPanelWidths, parsePanelWidths, parseColsEnv, panelKeyDelta,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.MaruLib = api; // 렌더러(번들러 없음)에서는 전역으로 노출

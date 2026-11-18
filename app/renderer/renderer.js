@@ -131,7 +131,12 @@
   // 한글 글꼴이 로드된 뒤 다시 적용해 글자 아틀라스를 새로 만든다
   if (document.fonts && document.fonts.load) document.fonts.load('14px MaruHangul', '가').then(() => { for (const e of terms.values()) { e.term.options.fontFamily = TERM_FONT + ' '; e.term.options.fontFamily = TERM_FONT; } }).catch(() => {});
 
+  let colDragging = false; let dragFitTimer = null; // 패널 너비를 끄는 동안에는 pty 크기 맞춤을 120ms 에 한 번으로 묶는다(놓을 때 반드시 한 번 더 맞춘다)
   function doFit() {
+    if (colDragging) { if (!dragFitTimer) dragFitTimer = setTimeout(() => { dragFitTimer = null; if (colDragging) doFitNow(); }, 120); return; }
+    doFitNow();
+  }
+  function doFitNow() {
     const e = terms.get(activeId);
     if (detailOpen || !e || !e.opened || e.host.hidden) return; // 상세가 터미널을 가리는 동안은 맞추지 않는다(크기 0 으로 pty 를 줄이지 않게)
     try { e.fit.fit(); window.maru.ptyResize(e.id, e.term.cols, e.term.rows); } catch (x) { /* 레이아웃 전 */ }
@@ -195,6 +200,96 @@
   });
   new ResizeObserver(doFit).observe($('terminal'));
   window.addEventListener('resize', doFit);
+
+  // ---- 좌우 패널 너비 조절(손잡이) ----
+  // colsUser: 사용자가 정한 너비({left,right}) 또는 null(= 기본 CSS 그대로). 창이 줄면 화면에 적용하는 값만 줄이고 이 값은 유지한다.
+  let colsUser = null; let colsStore = false;
+  const colsEl = $('cols'); const colHandles = { left: $('col-l'), right: $('col-r') };
+  const colsApplied = () => (colsUser ? Lib.clampPanelWidths(colsUser, window.innerWidth) : { ...Lib.PANEL_DEFAULT });
+  // 손잡이는 position:fixed 로 열 사이 간격 가운데에 놓는다(.cols 를 기준 상자로 만들면 그 안의 절대 배치 요소 위치가 달라진다)
+  const colSideEls = { left: colsEl.querySelector('.left'), right: colsEl.querySelector('.right-col') };
+  function placeColHandles() {
+    const c = colsEl.getBoundingClientRect(); const l = colSideEls.left.getBoundingClientRect(); const r = colSideEls.right.getBoundingClientRect();
+    for (const [side, x] of [['left', l.right + 4], ['right', r.left - 12]]) {
+      const st = colHandles[side].style; st.left = x + 'px'; st.top = (c.top + 16) + 'px'; st.height = Math.max(0, c.height - 32) + 'px';
+    }
+  }
+  new ResizeObserver(placeColHandles).observe(colsEl); new ResizeObserver(placeColHandles).observe(colSideEls.left); new ResizeObserver(placeColHandles).observe(colSideEls.right);
+  function applyCols() {
+    const w = colsApplied();
+    if (colsUser) { colsEl.style.setProperty('--left-w', w.left + 'px'); colsEl.style.setProperty('--right-w', w.right + 'px'); }
+    else { colsEl.style.removeProperty('--left-w'); colsEl.style.removeProperty('--right-w'); }
+    placeColHandles();
+    for (const side of ['left', 'right']) {
+      const rg = Lib.panelRange(side, side === 'left' ? w.right : w.left, window.innerWidth); const h = colHandles[side];
+      h.setAttribute('aria-valuemin', String(rg.min)); h.setAttribute('aria-valuemax', String(rg.max)); h.setAttribute('aria-valuenow', String(w[side]));
+    }
+  }
+  function saveCols() {
+    if (!colsStore) return;
+    try {
+      const d = Lib.PANEL_DEFAULT;
+      if (!colsUser || (colsUser.left === d.left && colsUser.right === d.right)) { colsUser = null; localStorage.removeItem(Lib.PANEL_STORE_KEY); applyCols(); }
+      else localStorage.setItem(Lib.PANEL_STORE_KEY, JSON.stringify({ left: colsUser.left, right: colsUser.right }));
+    } catch (x) { /* 저장 실패해도 이번 실행에서는 그대로 동작 */ }
+  }
+  function setColWidth(side, px, persist, raw) { // px 는 범위 안으로 줄여서 적용한다. raw(기본값으로 되돌리기): 창이 좁아 지금은 줄여 보이더라도 정한 값 그대로 둔다
+    const cur = colsApplied(); const rg = Lib.panelRange(side, side === 'left' ? cur.right : cur.left, window.innerWidth);
+    const v = raw ? px : Math.max(rg.min, Math.min(rg.max, Math.round(px)));
+    colsUser = { ...(colsUser || Lib.PANEL_DEFAULT) }; colsUser[side] = v; // 반대쪽은 사용자가 정해 둔 값을 그대로 둔다(창이 좁아 줄여 보이는 값으로 덮어쓰지 않는다)
+    applyCols(); if (persist) saveCols();
+  }
+  function initCols(init) {
+    let dev = null; if (init && init.cols && typeof init.cols === 'object') dev = init.cols;
+    colsStore = !!(init && init.colsStore === true);
+    if (dev) { colsUser = { left: dev.left, right: dev.right }; for (const k of ['left', 'right']) colHandles[k].classList.add('active'); } // 시험 전용(MARU_APP_COLS): 손잡이 선을 켜 둔다(위치 확인용)
+    else if (colsStore) { try { colsUser = Lib.parsePanelWidths(localStorage.getItem(Lib.PANEL_STORE_KEY)); } catch (x) { colsUser = null; } } // 스모크·가짜 화면(colsStore 거짓)에서는 읽지도 쓰지도 않는다
+    applyCols();
+  }
+  let colDrag = null; // { side, id, x0, w0, user0 }
+  function endColDrag(commit) {
+    if (!colDrag) return;
+    const d = colDrag; colDrag = null; colDragging = false;
+    document.body.classList.remove('col-drag'); colHandles[d.side].classList.remove('active');
+    document.removeEventListener('keydown', colDragKey, true);
+    try { if (colHandles[d.side].hasPointerCapture(d.id)) colHandles[d.side].releasePointerCapture(d.id); } catch (x) { /* 무시 */ }
+    if (!commit) { colsUser = d.user0; applyCols(); } else saveCols();
+    clearTimeout(dragFitTimer); dragFitTimer = null;
+    requestAnimationFrame(doFit); doFit(); // 놓은 뒤 최종 크기로 한 번 맞춘다(레이아웃 반영 뒤 한 번 더)
+    if (document.activeElement === colHandles[d.side]) { colHandles[d.side].blur(); focusTerm(); } // 마우스로 끌고 난 뒤 손잡이에 포커스가 남으면 이어서 친 글자가 터미널로 가지 않는다
+  }
+  function colDragKey(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); endColDrag(false); } }
+  for (const side of ['left', 'right']) {
+    const h = colHandles[side];
+    h.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || colDrag || modalOpen()) return;
+      e.preventDefault();
+      const cur = colsApplied();
+      colDrag = { side, id: e.pointerId, x0: e.clientX, w0: cur[side], user0: colsUser ? { ...colsUser } : null };
+      colDragging = true; document.body.classList.add('col-drag'); h.classList.add('active');
+      try { h.setPointerCapture(e.pointerId); } catch (x) { /* 무시 */ }
+      document.addEventListener('keydown', colDragKey, true);
+    });
+    h.addEventListener('pointermove', (e) => {
+      if (!colDrag || colDrag.id !== e.pointerId) return;
+      const dx = e.clientX - colDrag.x0;
+      setColWidth(side, colDrag.w0 + (side === 'left' ? dx : -dx), false);
+    });
+    h.addEventListener('pointerup', (e) => { if (colDrag && colDrag.id === e.pointerId) endColDrag(true); });
+    h.addEventListener('pointercancel', (e) => { if (colDrag && colDrag.id === e.pointerId) endColDrag(false); });
+    h.addEventListener('lostpointercapture', (e) => { if (colDrag && colDrag.id === e.pointerId) endColDrag(true); });
+    const toDefault = () => { if (!modalOpen()) setColWidth(side, Lib.PANEL_DEFAULT[side], true, true); };
+    h.addEventListener('dblclick', (e) => { e.preventDefault(); toDefault(); });
+    h.addEventListener('keydown', (e) => {
+      if (modalOpen() || colDrag || e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
+      const d = Lib.panelKeyDelta(side, e.key, e.shiftKey);
+      if (d === null) return;
+      e.preventDefault(); e.stopPropagation();
+      const cur = colsApplied(); const rg = Lib.panelRange(side, side === 'left' ? cur.right : cur.left, window.innerWidth);
+      if (d === 'default') toDefault(); else setColWidth(side, d === 'min' ? rg.min : d === 'max' ? rg.max : cur[side] + d, true);
+    });
+  }
+  window.addEventListener('resize', applyCols);
 
   // ---- 작업 공간 목록 ----
   let wsSeq = 0; let wsKey = null; const shownWsNotes = new Set();
@@ -1912,6 +2007,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' && modalOpen()) { trapTab(e); return; }
     if (e.key !== 'Escape') return;
+    if (colDrag) return; // 패널 경계를 끄는 중의 Esc 는 끌기 취소만 한다(상세·메뉴를 함께 닫지 않는다)
     if (wsEdit && document.activeElement === wsEdit.input) return; // 이름 입력칸이 Esc 를 직접 처리한다(취소)
     if (wsMenu) { e.preventDefault(); e.stopPropagation(); closeWsMenu(true); return; }
     if (modalOpen()) {
@@ -2343,6 +2439,7 @@
       if (init.uiDoneOpen === true) doneOpen = true; // 시험 전용(MARU_APP_DONE=open)
     }
     applyStatic();
+    initCols(init);
     if (homeNotice) { $('home-warn').textContent = T('home.warn.' + homeNotice); $('home-warn').hidden = false; }
     renderBusy('none');
     tickClock(); setInterval(tickClock, 15000);

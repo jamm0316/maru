@@ -2507,7 +2507,7 @@ ipcMain.handle('meet:start', async (e, id) => {
   } finally { meetBusy = false; }
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
-  uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDoneOpen: !app.isPackaged && process.env.MARU_APP_DONE === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null, uiDayOpen: FAKE_DAY && !app.isPackaged && process.env.MARU_APP_DAY_OPEN === '1',
+  cols: DEV_COLS, colsStore: !SMOKE && !TEST_UI && !TEST_FX && !DEV_COLS, uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDoneOpen: !app.isPackaged && process.env.MARU_APP_DONE === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null, uiDayOpen: FAKE_DAY && !app.isPackaged && process.env.MARU_APP_DAY_OPEN === '1',
   homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,
 } : null));
 // patch: { name?: string, lang?: 'ko'|'en' } 만 허용. 이름은 main 이 다시 정리·검증한다. 첫 저장에는 name 이 필요하다.
@@ -2587,6 +2587,7 @@ ipcMain.on('app:rendered', (e) => {
 
 // ---- 창 ----
 const DEV_SIZE = !app.isPackaged && /^(\d{3,4})x(\d{3,4})$/.exec(process.env.MARU_APP_WINSIZE || ''); // 시험 전용: 화면 크기(예: 900x560)
+const DEV_COLS = app.isPackaged ? null : L.parseColsEnv(process.env.MARU_APP_COLS); // 시험 전용: 시작 때 좌우 패널 너비(저장하지 않음). 패키징 빌드에서는 무시
 const DEV_W = DEV_SIZE ? Number(DEV_SIZE[1]) : 0; const DEV_H = DEV_SIZE ? Number(DEV_SIZE[2]) : 0;
 function createWindow() {
   win = new BrowserWindow({

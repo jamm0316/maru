@@ -22,9 +22,9 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family
 .sys{display:flex;align-items:center;gap:18px;font-size:13px;color:var(--soft);flex-wrap:wrap}
 .sys-item{display:flex;align-items:center;gap:6px}
 .clock{font-family:var(--mono);color:var(--ink)}
-.cols{flex:1 1 auto;min-height:0;display:flex;gap:16px;padding:16px}
-.left{flex:0 0 220px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;min-height:0}
-.right-col{flex:0 0 340px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;min-height:0}
+.cols{--left-w:220px;--right-w:340px;flex:1 1 auto;min-height:0;display:flex;gap:16px;padding:16px}
+.left{flex:0 0 var(--left-w);display:flex;flex-direction:column;gap:16px;overflow-y:auto;min-height:0}
+.right-col{flex:0 0 var(--right-w);display:flex;flex-direction:column;gap:16px;overflow-y:auto;min-height:0}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px;flex:none}
 .card.core{flex-direction:row;align-items:center;gap:16px;padding:16px}
 .eyebrow{margin:0;font-size:12px;letter-spacing:2px;color:var(--mute);font-weight:500}
@@ -138,7 +138,7 @@ button.todo:hover,button.todo:focus-visible{border-color:var(--or);background:va
 .id-list{margin:0;padding-left:18px;font-size:13px;color:var(--soft)}
 .id-list.risk li{color:var(--or2)}
 @keyframes pulse{0%,100%{opacity:.55}50%{opacity:1}}
-@media (max-width:1100px){.left{flex-basis:150px}.left .card:not(.ws-card):not(.proj-card){display:none}.userbar{flex-direction:column;align-items:stretch}.ws .s,.ws .st{display:none}.ws-main{padding:8px}}
+@media (max-width:1100px){.left{flex-basis:150px}.col-handle.l{display:none}.left .card:not(.ws-card):not(.proj-card){display:none}.userbar{flex-direction:column;align-items:stretch}.ws .s,.ws .st{display:none}.ws-main{padding:8px}}
 .left,.right-col{scrollbar-width:thin;scrollbar-color:#3A2A1C transparent}
 ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:#3A2A1C;border-radius:4px}::-webkit-scrollbar-track{background:transparent}
 
@@ -600,3 +600,10 @@ html[lang="en"] #dlg-sub .hint{word-break:normal}
 .sb-notify .tog{font-size:13px;color:var(--ink)}
 .sb-notify .hint{padding-left:22px}
 #sb-team .cs-k{margin-bottom:6px}
+
+/* 좌우 패널 너비 손잡이: 열 사이 간격(16px) 가운데 8px. 평소엔 거의 안 보이고 올리면·포커스·끌 때 주황 선 */
+.col-handle{position:fixed;width:8px;z-index:5;cursor:col-resize;touch-action:none;outline:none}
+.col-handle::after{content:'';position:absolute;top:0;bottom:0;left:3px;width:2px;border-radius:1px;background:var(--or);opacity:0;transition:opacity .12s}
+.col-handle:hover::after,.col-handle:focus-visible::after,.col-handle.active::after{opacity:.85}
+body.col-drag,body.col-drag *{cursor:col-resize!important;user-select:none!important;-webkit-user-select:none!important}
+body.col-drag #terminal,body.col-drag .proj-detail{pointer-events:none}
