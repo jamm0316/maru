@@ -56,6 +56,7 @@ run_env() {
     MARU_SQUADS_BUILTIN="$B" TMPDIR="$T" FAKE_OUT="$T/claude.args" ${extra[@]+"${extra[@]}"} "$@" 2>&1
 }
 SQ() { run_env -- "$REAL_PY" -I "$REPO/scripts/squads.py" "$@"; }
+SQen() { run_env MARU_LANG=en -- "$REAL_PY" -I "$REPO/scripts/squads.py" "$@"; }
 SQrc() { local o; o=$(SQ "$@"); LASTRC=$?; LAST=$o; }
 jget() { "$REAL_PY" -I -c 'import json,sys
 d=json.load(sys.stdin)
@@ -81,7 +82,7 @@ out=$(SQ json); rc=$?
 check "json 종료 0" [ $rc -eq 0 ]
 js=$(printf '%s' "$out" | tail -n 1)
 check "json 이 한 줄" [ "$(printf '%s\n' "$js" | wc -l | tr -d ' ')" = 1 ]
-check "에이전트 이름 규칙 sq-<slug>-lead/<role>" [ "$(printf '%s' "$js" | names_of)" = "sq-alpha-helper sq-alpha-lead sq-alpha-worker" ]
+check "에이전트 이름 규칙 sq-<slug>-lead/session/<role>" [ "$(printf '%s' "$js" | names_of)" = "sq-alpha-helper sq-alpha-lead sq-alpha-session sq-alpha-worker" ]
 check "총괄 tools 에 Agent 추가(앞)" [ "$(printf '%s' "$js" | jget 'print(",".join(d["sq-alpha-lead"]["tools"]))')" = "Agent,Read,Grep" ]
 check "팀원 tools 에서 Agent 제거·허용 밖 도구(mcp__, Nope)는 그 도구만 제외" [ "$(printf '%s' "$js" | jget 'print(",".join(d["sq-alpha-worker"]["tools"]))')" = "Read,Bash" ]
 check "tools 비면 팀원은 Read,Grep,Glob" [ "$(printf '%s' "$js" | jget 'print(",".join(d["sq-alpha-helper"]["tools"]))')" = "Read,Grep,Glob" ]
@@ -98,7 +99,7 @@ checkall "고정 머리말이 본문보다 앞" [ "${wp%%맡은 일만 해라.*}
 check "팀원 설명에 총괄 전용 표시" has "$(printf '%s' "$js" | jget 'print(d["sq-alpha-worker"]["description"])')" "총괄 전용"
 # 파일 안의 name 은 무시(이름은 셸이 만든다)
 printf '%s\n' '---' 'name: evil-name' 'description: x' 'model: haiku' 'tools: Read' '---' '본문' > "$B/alpha/extra.md"
-check "파일 안 name 키는 무시되고 이름은 셸이 만듦" [ "$(SQ json | tail -n 1 | names_of)" = "sq-alpha-extra sq-alpha-helper sq-alpha-lead sq-alpha-worker" ]
+check "파일 안 name 키는 무시되고 이름은 셸이 만듦" [ "$(SQ json | tail -n 1 | names_of)" = "sq-alpha-extra sq-alpha-helper sq-alpha-lead sq-alpha-session sq-alpha-worker" ]
 rm -f "$B/alpha/extra.md"
 rm -rf "$B/alpha"
 check "스쿼드가 없으면 {}" [ "$(SQ json)" = "{}" ]
@@ -110,9 +111,10 @@ checkall "meta 종료 0·한 줄" [ $mrc -eq 0 ] '&&' [ "$(printf '%s\n' "$mo" |
 check "meta 모양: slug·source·lead.agent/model·members" [ "$(printf '%s' "$mo" | jget 's={x["slug"]:x for x in d["squads"]};m=s["m1"];print(m["name"],m["source"],s["m2"]["source"],m["lead"]["agent"],m["lead"]["model"],[(x["role"],x["agent"],x["model"]) for x in m["members"]])')" = "메타 팀 builtin personal sq-m1-lead sonnet [('helper', 'sq-m1-helper', 'inherit'), ('worker', 'sq-m1-worker', 'haiku')]" ]
 check "meta 에 거부된 스쿼드는 skipped(slug·reason)" [ "$(printf '%s' "$mo" | jget 'print([x["slug"] for x in d["skipped"]], "lead.md" in d["skipped"][0]["reason"])')" = "['mbad'] True" ]
 checkall "meta 에 프롬프트 본문 없음" hasnt "$mo" "나눠 맡겨라" '&&' hasnt "$mo" "고정 규칙"
-check "meta 와 json 이 같은 스쿼드 집합" [ "$(printf '%s' "$mo" | jget 'print(sorted(a["agent"] for x in d["squads"] for a in [x["lead"]]+x["members"]))')" = "$(SQ json | tail -n 1 | jget 'print(sorted(d))')" ]
+check "meta 와 json 이 같은 스쿼드 집합(json 의 세션 진입점 sq-<slug>-session 은 meta 팀원·총괄 줄에 없다)" [ "$(printf '%s' "$mo" | jget 'print(sorted(a["agent"] for x in d["squads"] for a in [x["lead"]]+x["members"]))')" = "$(SQ json | tail -n 1 | jget 'print(sorted(n for n in d if not n.endswith("-session")))')" ]
+check "meta 어디에도 -session 이 없음" hasnt "$mo" "-session"
 rm -rf "$DATA/squads" "$B"/*
-for s in a1 a2 a3; do mksquad "$B/$s"; for f in lead worker helper; do "$REAL_PY" -c 'print("가"*4000)' >> "$B/$s/$f.md"; done; done
+for s in a1 a2 a3; do mksquad "$B/$s"; for f in lead worker helper; do "$REAL_PY" -c 'print("가"*(2000 if "'$f'" == "lead" else 4000))' >> "$B/$s/$f.md"; done; done   # 총괄 본문은 세션 진입점에도 들어가 두 번 센다
 check "meta: 96KB 상한으로 빠진 스쿼드는 skipped" [ "$(SQ meta | jget 'print([x["slug"] for x in d["squads"]],[x["slug"] for x in d["skipped"]])')" = "['a1', 'a2'] ['a3']" ]
 rm -rf "$B"/*
 check "스쿼드 없으면 meta 는 빈 목록" [ "$(SQ meta)" = '{"squads":[],"skipped":[]}' ]
@@ -160,12 +162,38 @@ check "json 은 하나만(개인 것)" [ "$(SQ json | tail -n 1 | jget 'print(d[
 rm "$DATA/squads/dup/lead.md"
 out=$(SQ list); checkall "개인 것이 거부되면 내장을 쓰고 알림" has "$out" "내장 이름" '&&' has "$out" "내장 스쿼드를 씀"
 rm -rf "$DATA/squads"/* "$B"/*
-for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14; do mksquad "$B/s$i"; done
+# (총괄 본문이 세션 진입점에도 들어가 스쿼드 하나가 약 8KB 라, 개수 상한(12)만 보려면 아주 작은 스쿼드를 쓴다)
+for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14; do mkdir -p "$B/s$i"; printf '%s\n' '---' 'name: T' 'description: x' '---' > "$B/s$i/squad.md"; agent "$B/s$i/lead.md" 'l' sonnet 'Read' 'b'; agent "$B/s$i/w.md" 'm' haiku 'Read' 'b'; done
 out=$(SQ list); checkall "스쿼드 13번째부터 제외" has "$out" "최대 12개" '&&' [ "$(SQ json | tail -n 1 | names_of | tr ' ' '\n' | grep -c 'lead$')" = 12 ]
 rm -rf "$B"/*
-# 이름 충돌: 스쿼드 a-b 의 lead 와 스쿼드 a 의 팀원 b-lead
+# 이름 충돌: 스쿼드 a-b 의 lead(sq-a-b-lead)와 스쿼드 a 의 팀원 b-lead 가 같은 이름이 되는 경우는, -lead·-session 으로 끝나는 역할 자체를 거부해 생기지 않게 한다
 mksquad "$B/a-b"; mksquad "$B/a"; agent "$B/a/b-lead.md" 'x' haiku 'Read' 'b'
-out=$(SQ list); check "에이전트 이름 충돌 시 뒤 스쿼드 제외" has "$out" "이름 충돌"
+out=$(SQ list); checkall "역할 b-lead 가 있는 스쿼드 a 는 거부돼 a-b 만 남고 이름 충돌은 생기지 않음" has "$out" "a-b [내장]" '&&' hasnt "$out" "a [내장]" '&&' has "$out" "허용되지 않는 파일 이름"
+for rl in session x-lead x-session; do rm -rf "$B/a"; mksquad "$B/a"; agent "$B/a/$rl.md" 'x' haiku 'Read' 'b'; SQrc check "$B/a"; checkall "예약 역할 거부: $rl" [ "$LASTRC" = 1 ] '&&' has "$LAST" "허용되지 않는 파일 이름"; done
+rm -rf "$B/a"; mksquad "$B/a"; agent "$B/a/leader.md" 'x' haiku 'Read' 'b'; agent "$B/a/sessions.md" 'x' haiku 'Read' 'b'; SQrc check "$B/a"; check "lead·session 을 앞이나 중간에 포함할 뿐인 역할(leader, sessions)은 허용" [ "$LASTRC" = 0 ]
+rm -rf "$B"/*
+# 세션 진입점: tools·model 없음, 설명은 서브에이전트로 부르지 말라고 하며, 본문은 총괄과 같고 고정 머리말은 사용자와 직접 대화하는 메인 세션용
+mksquad "$B/ses" "세션 팀"
+js=$(SQ json | tail -n 1)
+sp=$(printf '%s' "$js" | jget 'print(d["sq-ses-session"]["prompt"])'); lp=$(printf '%s' "$js" | jget 'print(d["sq-ses-lead"]["prompt"])')
+check "세션 에이전트에 tools·model 키가 없고 description 만 있음" [ "$(printf '%s' "$js" | jget 'e=d["sq-ses-session"];print(sorted(e))')" = "['description', 'prompt']" ]
+checkall "세션 설명: 세션 진입점이며 서브에이전트로 부르지 않는다" has "$(printf '%s' "$js" | jget 'print(d["sq-ses-session"]["description"])')" "세션 진입점" '&&' has "$(printf '%s' "$js" | jget 'print(d["sq-ses-session"]["description"])')" "부르지 않는다"
+checkall "세션 머리말: 메인 세션·사용자 직접 대화·세션 폴더·\"마루에게 보고\" 읽는 법·마지막 메시지 전달" has "$sp" "메인 세션" '&&' has "$sp" "직접 대화할 수 있다" '&&' has "$sp" "이 세션의 폴더" '&&' has "$sp" "이 세션에서 사용자에게 알린다" '&&' has "$sp" "자동으로 전달된다" '&&' has "$sp" "sq-ses-worker"
+checkall "세션 머리말: 사용자와 직접 대화하지 않는다는 문구가 없고 공통 규칙·본문은 유지" hasnt "$sp" "직접 대화하지 않는다" '&&' has "$sp" "영구 삭제" '&&' has "$sp" "일을 나눠 맡겨라." '&&' has "$lp" "직접 대화하지 않는다"
+check "세션 본문 끝은 총괄 본문과 같음" [ "${sp##*\[제공 정보 끝*]}" = "${lp##*\[제공 정보 끝*]}" ]
+checkall "총괄 프롬프트는 예전 그대로(마루에게 보고, 세션 머리말 문구 없음)" has "$lp" "마루에게 보고한다" '&&' hasnt "$lp" "메인 세션"
+out=$(SQ list); checkall "list 는 세션 진입점을 팀원처럼 올리지 않음" hasnt "$out" "sq-ses-session" '&&' has "$out" "sq-ses-lead"
+SQrc session-agent ses; checkall "session-agent ses: sq-ses-session, rc=0" [ "$LASTRC" = 0 ] '&&' [ "$LAST" = "sq-ses-session" ]
+SQrc session-agent ghost; checkall "session-agent ghost: 출력 없음, rc=1" [ "$LASTRC" = 1 ] '&&' [ -z "$LAST" ]
+SQrc session-agent "Bad Slug"; checkall "session-agent 잘못된 slug: 출력 없음, rc=1" [ "$LASTRC" = 1 ] '&&' [ -z "$LAST" ]
+SQrc session-agent; check "session-agent 인자 없음: rc=2" [ "$LASTRC" = 2 ]
+mksquad "$B/ses2" "둘째"; mkdir -p "$DATA/squads"; cp -R "$B/ses2" "$DATA/squads/ses3"; rm -rf "$B/ses2"
+SQrc session-agent ses3; checkall "개인 스쿼드도 같은 규칙: sq-ses3-session" [ "$LASTRC" = 0 ] '&&' [ "$LAST" = "sq-ses3-session" ]
+rm -rf "$DATA/squads"/* "$B"/*
+# en: 영어 세션 머리말
+mksquad "$B/ses"; js=$(SQen json | tail -n 1); sp=$(printf '%s' "$js" | jget 'print(d["sq-ses-session"]["prompt"])')
+checkall "en 세션 머리말: main session·talk to you here directly·this session's folder·tell the user in this session" has "$sp" "main session" '&&' has "$sp" "can talk to you here directly" '&&' has "$sp" "this session's folder" '&&' has "$sp" "tell the user in this session" '&&' hasnt "$sp" "do not talk to the user"
+check "en 세션 설명에 tools·model 없음" [ "$(printf '%s' "$js" | jget 'print(sorted(d["sq-ses-session"]))')" = "['description', 'prompt']" ]
 rm -rf "$B"/*
 # 96KB 상한: 스쿼드마다 파일 3개(각 약 12KB) -> 약 36KB, 셋째부터 넘침
 for s in a1 a2 a3 a4; do
@@ -320,9 +348,9 @@ for s in dev research; do
 done
 out=$(unset_b list); js=$(env -i HOME="$FAKE_HOME" PATH="$BASEPATH" MARU_DATA="$DATA" "$REAL_PY" -I "$REPO/scripts/squads.py" json)
 checkall "내장 2개가 모두 목록에 있음" has "$out" "dev [내장]" '&&' has "$out" "research [내장]"
-check "내장 에이전트 이름" [ "$(printf '%s' "$js" | names_of)" = "sq-dev-explore sq-dev-impl sq-dev-lead sq-dev-review sq-research-lead sq-research-search sq-research-verify" ]
+check "내장 에이전트 이름" [ "$(printf '%s' "$js" | names_of)" = "sq-dev-explore sq-dev-impl sq-dev-lead sq-dev-review sq-dev-session sq-research-lead sq-research-search sq-research-session sq-research-verify" ]
 check "dev: review 는 opus·읽기 전용(Edit/Write 없음), impl 은 Edit/Write/Bash" [ "$(printf '%s' "$js" | jget 'r=d["sq-dev-review"];i=d["sq-dev-impl"];print(r["model"],"Edit" in r["tools"],"Write" in r["tools"],all(t in i["tools"] for t in ("Edit","Write","Bash")))')" = "opus False False True" ]
-check "모든 팀원에 Agent 없음, 총괄에는 있음" [ "$(printf '%s' "$js" | jget 'print(all(("Agent" in v["tools"])==n.endswith("-lead") for n,v in d.items()))')" = True ]
+check "모든 팀원에 Agent 없음, 총괄에는 있음, 세션 진입점에는 tools·model 없음" [ "$(printf '%s' "$js" | jget 'print(all(("Agent" in v["tools"])==n.endswith("-lead") for n,v in d.items() if not n.endswith("-session")), all("tools" not in v and "model" not in v for n,v in d.items() if n.endswith("-session")))')" = 'True True' ]
 out=$(unset_b check "$REPO/squads/dev")
 check "내장 dev: 위험 신호는 도구 표시뿐(문구 패턴 없음)" [ -z "$(printf '%s\n' "$out" | grep '^  - ' | grep -v '도구에')" ]
 check "내장 프롬프트에 특정 스택·도구 이름이 없음" [ -z "$(grep -rilE 'gradle|maven|npm|pnpm|yarn|pytest|cargo|jira|kotlin|spring|java|django|rails|webpack|docker' "$REPO/squads" 2>/dev/null)" ]
@@ -360,7 +388,7 @@ if [ "$(id -u)" != 0 ]; then
   chmod 000 "$DATA/squads"
   js=$(SQ json | tail -n 1); mo=$(SQ meta | tail -n 1)
   chmod 755 "$DATA/squads"
-  checkall "개인 폴더를 못 읽어도 json·meta 는 내장을 냄" [ "$(printf '%s' "$js" | names_of)" = "sq-bi1-helper sq-bi1-lead sq-bi1-worker" ] '&&' [ "$(printf '%s' "$mo" | jget 'print([x["slug"] for x in d["squads"]], [x["reason"][:12] for x in d["skipped"]])')" = "['bi1'] ['스쿼드 폴더 읽기 실패']" ]
+  checkall "개인 폴더를 못 읽어도 json·meta 는 내장을 냄" [ "$(printf '%s' "$js" | names_of)" = "sq-bi1-helper sq-bi1-lead sq-bi1-session sq-bi1-worker" ] '&&' [ "$(printf '%s' "$mo" | jget 'print([x["slug"] for x in d["squads"]], [x["reason"][:12] for x in d["skipped"]])')" = "['bi1'] ['스쿼드 폴더 읽기 실패']" ]
 else
   ok "(root 로 실행 중이라 권한 시험 건너뜀)"; ok "(root 로 실행 중이라 권한 시험 건너뜀)"
 fi

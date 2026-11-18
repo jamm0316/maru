@@ -6,10 +6,14 @@
 # 하위 세션(앱이 마루의 요청으로 연 작업 공간): MARU_CHILD_PROMPT_FILE(앱이 $MARU_DATA/state/app/prompts/ 에 둔 초기 프롬프트 파일)이 검증을 통과하면
 # 내용을 읽고 파일을 지운 뒤 `claude … -- <프롬프트>` 로 넘긴다(프롬프트는 셸 명령줄이 아니라 argv 한 개로만 간다).
 # 잘못된 파일이면 stderr 한 줄을 남기고, 빈 세션으로 조용히 뜨지 않게 고정 안내문을 첫 입력으로 넣는다. 이 환경변수는 claude 와 그 자식에게 넘기지 않는다.
+# 하위 세션의 팀(MARU_CHILD_SQUAD=<slug>, 앱이 사용자 확인을 거쳐 정한다): slug 형식이 맞고 `squads.py session-agent <slug>` 가 sq-<slug>-session 을 내줄 때만(그 스쿼드가 JSON 에 실제로 담길 때) `--agent sq-<slug>-session` 을 붙여
+# 세션의 메인 스레드가 그 스쿼드 총괄로 돌게 한다(사용자와 직접 대화하는 메인 세션용 에이전트). 아니면 무시하고 stderr 한 줄만 남긴다(세션은 그대로 뜬다). 이 환경변수도 claude 와 그 자식에게 넘기지 않는다.
 # (MARU_CHILD_ADD_DIR 는 더 이상 쓰지 않는다: 하위 세션은 설계 문서를 세션 시작 컨텍스트로만 받는다. 값이 있어도 무시한다.)
 SCRIPTS=$(cd "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P) || SCRIPTS=""
 pfile=${MARU_CHILD_PROMPT_FILE:-}
 unset MARU_CHILD_PROMPT_FILE
+csq=${MARU_CHILD_SQUAD:-}
+unset MARU_CHILD_SQUAD
 json=""; lib_ok=""
 if [ -n "$SCRIPTS" ] && [ -z "${MARU_NO_SQUADS:-}" ]; then
   # lib.sh 가 python3 를 실제로 실행해 보고(필요하면 폴백 경로를 PATH 앞에 둠) 판정한다. 실패하면 스쿼드 없이 간다.
@@ -46,7 +50,25 @@ if [ -n "$pfile" ]; then
     fi
   fi
 fi
+agent=()
+if [ -n "$csq" ]; then
+  # slug 검사: 문자 범위(a-z)는 로캘에 따라 달라질 수 있어 허용 문자를 그대로 적는다. 1~20자, 첫 글자는 하이픈이 아님
+  case "$csq" in
+    ''|-*|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) csq_ok="" ;;
+    *) csq_ok=1; [ ${#csq} -le 20 ] || csq_ok="" ;;
+  esac
+  sess=""
+  # 어떤 에이전트를 쓸지는 squads.py 가 정한다: 그 slug 가 JSON 에 실제로 담기는 스쿼드일 때만 sq-<slug>-session(메인 스레드용)을 출력한다(아니면 출력 없이 실패).
+  # 래퍼가 JSON 키를 접두로 짐작하지 않는다(다른 스쿼드의 팀원 이름과 겹칠 수 있다). 값은 argv 배열로만 넘긴다.
+  if [ -n "$csq_ok" ] && [ -n "$json" ] && [ -n "$lib_ok" ]; then
+    sess=$(python3 -I "$SCRIPTS/squads.py" session-agent "$csq" </dev/null 2>/dev/null) || sess=""
+    [ "$sess" = "sq-$csq-session" ] || sess=""
+    case "$json" in *"\"$sess\":{"*) ;; *) sess="" ;; esac   # 두 번 읽는 사이에 바뀌었을 때를 대비해 지금 쓰는 JSON 에도 그 키가 있는지 확인
+  fi
+  if [ -n "$sess" ]; then agent=(--agent "$sess")
+  else echo "마루: 요청된 팀을 쓸 수 없어 팀 없이 시작합니다. / Maru: the requested team is not available; starting without a team." >&2; fi
+fi
 case "$json" in
-  "{\"sq-"*) exec claude --agents "$json" "$@" ${post[@]+"${post[@]}"} ;;
+  "{\"sq-"*) exec claude --agents "$json" ${agent[@]+"${agent[@]}"} "$@" ${post[@]+"${post[@]}"} ;;
 esac
 exec claude "$@" ${post[@]+"${post[@]}"}

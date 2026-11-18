@@ -62,7 +62,7 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
@@ -401,21 +401,27 @@ function pythonBin() {
   for (const c of PY_CANDS) { try { fs.accessSync(c, fs.constants.X_OK); if (fs.statSync(c).isFile()) return c; } catch { /* 다음 후보 */ } }
   return null;
 }
-const FAKE_SQUADS = L.parseSquadMeta(JSON.stringify({ squads: [ // 시험 전용(MARU_APP_UI=party)
-  { slug: 'dev', name: '개발', description: '', source: 'builtin', lead: { agent: 'sq-dev-lead', model: 'sonnet' }, members: [
+const fakeSquads = () => { const en = curLang() === 'en'; return L.parseSquadMeta(JSON.stringify({ squads: [ // 시험 전용(MARU_APP_UI=party|squadnew, MARU_APP_CONSENT): 언어에 맞춘 지어낸 스쿼드
+  { slug: 'dev', name: en ? 'Development' : '개발', description: '', source: 'builtin', lead: { agent: 'sq-dev-lead', model: 'sonnet' }, members: [
     { role: 'builder', agent: 'sq-dev-builder', model: 'sonnet' }, { role: 'tester', agent: 'sq-dev-tester', model: 'haiku' }, { role: 'reviewer', agent: 'sq-dev-reviewer', model: 'opus' }] },
-  { slug: 'notes', name: '글쓰기', description: '', source: 'personal', lead: { agent: 'sq-notes-lead', model: 'inherit' }, members: [{ role: 'editor', agent: 'sq-notes-editor', model: 'sonnet' }] },
-] }));
+  { slug: 'notes', name: en ? 'Writing' : '글쓰기', description: '', source: 'personal', lead: { agent: 'sq-notes-lead', model: 'inherit' }, members: [{ role: 'editor', agent: 'sq-notes-editor', model: 'sonnet' }] },
+] })); };
 let squads = []; let squadsBusy = false;
-async function refreshSquads() {
-  if (squadsBusy || TEST_UI === 'party') return;
-  squadsBusy = true;
+const FAKE_SQ_UI = TEST_UI === 'party' || TEST_UI === 'squadnew'; // 시험 전용: 지어낸 스쿼드(디스크를 읽지 않는다)
+// 지금 설치돼 있는 유효한 스쿼드 목록을 squads.py meta 로 직접 읽는다(캐시 아님). 실패하면 빈 목록. 하위 세션 동의 창과 그 답의 검증에 쓴다
+async function readSquadsNow() {
+  if (FAKE_SQ_UI || fakeConsent) return fakeSquads();
   try {
     const script = ROOT ? path.join(ROOT, 'scripts', 'squads.py') : null;
     const py = script && isFileSafe(script) ? pythonBin() : null;
     const out = py ? await run(py, ['-I', script, 'meta'], { timeout: 3000, maxBuffer: L.SQUAD_META_MAX_BYTES, killSignal: 'SIGKILL', env: childEnv() }) : null;
-    squads = out ? L.parseSquadMeta(out) : [];
-  } catch { squads = []; } finally { squadsBusy = false; }
+    return out ? L.parseSquadMeta(out) : [];
+  } catch { return []; }
+}
+async function refreshSquads() {
+  if (squadsBusy || FAKE_SQ_UI) return;
+  squadsBusy = true;
+  try { squads = await readSquadsNow(); } finally { squadsBusy = false; }
 }
 // 작업 공간에서 claude 대신 실행할 래퍼: 저장소 scripts/maru-claude.sh 가 정규 실행 파일(링크 아님, 소유자·쓰기 권한 검사 통과)일 때만
 function claudeWrapper() {
@@ -451,7 +457,7 @@ function panels() {
     battery: cache.battery,
     disk: cache.disk,
     party, // 기본 팀. name null = 앱 이름(i18n app.title)
-    squads: L.squadView(TEST_UI === 'party' ? FAKE_SQUADS : squads, party[0].model), // 스쿼드별 묶음(총괄 + 팀원)
+    squads: L.squadView(FAKE_SQ_UI ? fakeSquads() : squads, party[0].model), // 스쿼드별 묶음(총괄 + 팀원)
     subs: TEST_UI === 'party' ? [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }, { type: 'sq-dev-lead', count: 1 }, { type: 'sq-dev-builder', count: 2 }, { type: 'sq-ghost-lead', count: 1 }] : (wsOf(activeId) ? readSubs(wsOf(activeId)) : []),
     calendar: FAKE_DAY ? fakeMonthEvents(fakeDayStr(0).slice(0, 7))[fakeDayStr(0)].map((x) => ({ day: 'today', ...x })) : profile && profile.calendar && cal.ok ? cal.events : [], // 메모리에만 둔다(디스크·로그 금지)
     updateAvailable: upd.view.status === 'available',
@@ -488,7 +494,7 @@ function spawnPty(w, cols, rows) {
   // MARU_REQ_KEY(요청 인증 키)는 마루가 될 수 있는 작업 공간(최상위·저장소 루트·하위 세션이었던 적 없음)에만, 시작할 때마다 새로 정한다. 부모의 앱 세션 id 는 어떤 하위 세션에도 넘기지 않는다
   const ho = L.promptHandoff({ file: typeof w.childPromptFile === 'string' ? w.childPromptFile : null, wrapperOk: !!claudeWrapper() });
   const reqKey = !w.fx && L.maruEligible(w) ? crypto.randomBytes(32).toString('hex') : null;
-  const env = L.ptyEnv({ host: process.env, ws: w.fx ? null : w.id, parentWs: w.parentId, project: w.project, promptFile: ho.env, reqKey }); // Claude Code 호스트 환경을 물려주지 않는다(로그인 셸이 프로필의 사용자 설정은 다시 읽는다)
+  const env = L.ptyEnv({ host: process.env, ws: w.fx ? null : w.id, parentWs: w.parentId, project: w.project, promptFile: ho.env, reqKey, squad: w.origin === 'child' ? w.squad : null }); // Claude Code 호스트 환경을 물려주지 않는다(로그인 셸이 프로필의 사용자 설정은 다시 읽는다)
   if (ho.deleteFile) dropPromptFile(w); // 승인 뒤 래퍼를 못 쓰게 됐다: 전달 파일은 지우고 같은 내용을 입력줄에(Enter 는 사용자가)
   const sid = L.newSessionId(() => crypto.randomUUID()); // 셸 env 에는 넣지 않고 claude 실행 명령에만 붙인다
   let self;
@@ -624,7 +630,7 @@ function saveWsNow(opts) {
   const order = wsOrder();
   const on = resumeActive();
   if (on) syncHookSids();
-  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, claudeSid: w.claudeSid, claudeSidAt: w.claudeSidAt, prevSid: w.prevSid, transient: !!w.fromTodo, parentId: w.parentId, project: w.project, origin: w.origin })), activeId, on);
+  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, claudeSid: w.claudeSid, claudeSidAt: w.claudeSidAt, prevSid: w.prevSid, transient: !!w.fromTodo, parentId: w.parentId, project: w.project, origin: w.origin, squad: w.squad })), activeId, on);
   if (!keep) return;
   const clean = !!(opts && opts.clean);
   const body = L.workspacesJson(keep.list, keep.active, { cleanExit: clean });
@@ -646,7 +652,7 @@ function addWorkspace(cwd, title, fx, unavailable, extra) {
   const x = extra || {};
   const id = L.validWsId(x.id) && !wss.has(x.id) ? x.id : crypto.randomBytes(8).toString('hex');
   const w = { id, cwd, title: L.uniqueTitle(L.managedWsTitle(title || L.workspaceTitle(cwd, tr('ws.untitled')), cwd, MANAGED && ROOT ? [ROOT, realOrNull(ROOT)] : [], tr('app.title')), [...wss.values()].map((o) => o.title)), term: null, sessionId: null, bracketed: false, seqTail: '', lastOutputAt: 0, exited: false, unavailable: !!unavailable, fx: fx || null,
-    parentId: L.validWsId(x.parentId) ? x.parentId : null, project: L.isProjectKey(x.project) ? x.project : null, origin: x.origin === 'child' || L.validWsId(x.parentId) ? 'child' : null, cwdReal: realOrNull(cwd), inRoot: false, isRoot: false, reqKey: null };
+    parentId: L.validWsId(x.parentId) ? x.parentId : null, project: L.isProjectKey(x.project) ? x.project : null, origin: x.origin === 'child' || L.validWsId(x.parentId) ? 'child' : null, squad: (x.origin === 'child' || L.validWsId(x.parentId)) && typeof x.squad === 'string' && /^[a-z0-9][a-z0-9-]{0,19}$/.test(x.squad) ? x.squad : null, cwdReal: realOrNull(cwd), inRoot: false, isRoot: false, reqKey: null };
   w.inRoot = insideRoot(w.cwdReal); const rr = realOrNull(ROOT); w.isRoot = !!rr && w.cwdReal === rr; // isRoot: 저장소 루트 폴더(마루 세션 후보)
   wss.set(id, w);
   return w;
@@ -671,7 +677,7 @@ function initFakeHierarchy() {
   const maru = addWorkspace(base, tr('app.title')); maru.fakeState = 'idle'; maru.fakeView = { reports: 2, flash: false, cnote: { kind: 'opened', title: 'blog-draft' } };
   const mk = (title, cwd, project, fakeState, view) => { const w = addWorkspace(cwd, title, null, false, { parentId: maru.id, project }); w.fakeState = fakeState; w.fakeView = view; return w; };
   mk('blog-draft', path.join(os.homedir(), 'work', 'blog'), 'blog/draft', 'pending', { state: 'idle', ux: 'turnEnded', reportAt: now - 3 * 60000, loc: null, subs: [], cc: true });
-  mk('api-server', path.join(os.homedir(), 'work', 'api-server'), 'dev/api', 'pending', { state: 'none', ux: 'unknown', loc: 'handlers', subs: [], cc: true });
+  mk('api-server', path.join(os.homedir(), 'work', 'api-server'), 'dev/api', 'pending', { state: 'none', ux: 'unknown', loc: 'handlers', subs: [], cc: true, team: { slug: 'dev', name: fakeSquads()[0].name } });
   mk('ledger', path.join(os.homedir(), 'work', 'ledger'), null, 'busy', { ux: 'busy', loc: null, subs: ['Explore', 'worker'], cc: true });
   const notes = addWorkspace(path.join(os.homedir(), 'notes'), 'notes'); notes.fakeState = 'pending'; notes.fakeView = { ux: 'pending' };
   activeId = maru.id;
@@ -691,7 +697,7 @@ function initWorkspaces() {
     else if (r.status === 'ok' && r.data.list.length) {
       const dec = restoreDecisions(r.data);
       const made = r.data.list.map((e, i) => { // 폴더가 없어도 버리지 않는다. 하위 세션 관계·프로젝트 이름표도 되살린다(프롬프트 파일은 다시 만들지 않는다)
-        const w = addWorkspace(e.cwd, e.title, null, e.unavailable, { id: e.id, parentId: e.parentId, project: e.project, origin: e.origin });
+        const w = addWorkspace(e.cwd, e.title, null, e.unavailable, { id: e.id, parentId: e.parentId, project: e.project, origin: e.origin, squad: e.squad });
         const d = dec[i];
         if (d && d.action === 'resume') { w.pendingResume = d.sid; w.claudeSid = d.sid; w.claudeSidAt = e.claudeSidAt; w.startNote = 'resumed'; } // 알림·입력 없이 실행만: spawnPty 가 --resume 을 붙인다
         else if (d && d.prev) { w.prevSid = d.prev; if (d.note) w.startNote = d.note; } // 새로 시작하지만 "원래 세션 열기" 로 되돌릴 수 있게 포인터를 남긴다
@@ -733,7 +739,7 @@ const wsView = () => {
     const reportAt = reportedAtOf(w);
     const ux = derivedState(w, state);
     const v = { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, ux, bp: w.bracketed, bg: L.bgCount(rec, state, now, SUBS_TTL_MS), note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }),
-      parentId: o.depth === 1 ? w.parentId : null, depth: o.depth, project: w.project || null, loc: L.currentLocation({ recCwd: rec && rec.cwd, cwd: w.cwd, cwdReal: w.cwdReal }),
+      parentId: o.depth === 1 ? w.parentId : null, depth: o.depth, project: w.project || null, team: L.teamChip(w.squad, FAKE_SQ_UI ? fakeSquads() : squads), loc: L.currentLocation({ recCwd: rec && rec.cwd, cwd: w.cwd, cwdReal: w.cwdReal }),
       reports: own ? own.count : 0, reportAt, flash: !!w.flashUntil && w.flashUntil > now, auto: !!w.autoStart && !w.term && !w.exited && !w.unavailable,
       cnote: w.childNote && now - w.childNote.at < CNOTE_MS ? { kind: w.childNote.kind, reason: w.childNote.reason || null, title: w.childNote.title || null } : null,
       subs: w.parentId ? L.childSubNames(readSubs(w)) : [] };
@@ -1558,7 +1564,7 @@ const windowReady = () => L.childWindowReady({ destroyed: !win || win.isDestroye
 // ---- 동의 창: main 이 상태를 가지고 renderer 는 보여 주기만 한다. 답은 한 번만 쓰는 토큰이 붙은 IPC 로만 온다 ----
 const CONSENT_MS = 5 * 60 * 1000;
 let consent = null; // { view, pending: { token, expiresAt, used }, resolve, timer }
-let fakeConsent = TEST_UI === 'hierarchy' && process.env.MARU_APP_CONSENT === '1';
+let fakeConsent = !app.isPackaged && TEST_UI === 'hierarchy' && ['1', '2', '3'].includes(process.env.MARU_APP_CONSENT); // 시험 전용. '2' 는 요청한 팀이 설치돼 있지 않은 경우, '3' 은 설치된 팀이 하나도 없는 경우
 function askConsent(view) {
   return new Promise((resolve) => {
     const c = { view, pending: { token: view.token, expiresAt: Date.now() + CONSENT_MS, used: false }, resolve, timer: null };
@@ -1566,20 +1572,36 @@ function askConsent(view) {
     consent = c; wsChanged(false); // 렌더러가 ws:get 으로 창을 띄운다
   });
 }
-function finishConsent(c, answer) {
+function finishConsent(c, answer, squad) {
   if (!c || consent !== c) return;
   clearTimeout(c.timer); c.pending.used = true; consent = null; wsChanged(false);
-  c.resolve({ answer });
+  c.resolve({ answer, squad: answer === 'open' && typeof squad === 'string' ? squad : null });
 }
-const consentView = () => (fakeConsent ? { token: 'fake', folder: path.join(os.homedir(), 'work', 'a-rather-long-project-folder-name', 'sub-folder-with-a-long-name', 'api-server'), project: 'dev/api', title: 'api-server', paste: false,
+const consentView = () => (fakeConsent ? { ...L.consentView({ token: 'fake', folder: '/', title: 't', prompt: 'x', squads: process.env.MARU_APP_CONSENT === '3' ? [] : fakeSquads(), squad: process.env.MARU_APP_CONSENT === '2' || process.env.MARU_APP_CONSENT === '3' ? 'ghost' : 'notes' }), token: 'fake', folder: path.join(os.homedir(), 'work', 'a-rather-long-project-folder-name', 'sub-folder-with-a-long-name', 'api-server'), project: 'dev/api', title: 'api-server', paste: false,
   ...(() => { const brief = L.cleanPromptText(Array.from({ length: 14 }, (_, i) => (i % 5 === 4 ? '' : '설계 문서(docs/design.md)를 먼저 읽고 항목 ' + (i + 1) + ' 을 리팩터링해 주세요. 공개 API 는 바꾸지 마세요.')).join('\n') + '\n\n끝나면 무엇을 했고 무엇이 남았는지 짧게 보고하세요.'); return { brief, chars: [...brief].length, lines: brief.split('\n').length }; })() } : consent ? consent.view : null);
-ipcMain.handle('child:answer', (e, token, answer) => {
+// squad: 사용자가 고른 팀(slug) 또는 null(팀 없이). 렌더러·요청의 말은 믿지 않고, 답을 받는 이 순간 main 이 직접 읽은 스쿼드 목록과 다시 대조한다.
+// 목록에 없으면 열지 않고 창을 그대로 둔다(새 목록으로 다시 그려 사용자가 다시 고른다)
+ipcMain.handle('child:answer', async (e, token, answer, squad) => {
   if (!fromMain(e)) return { ok: false };
   if (fakeConsent) { fakeConsent = false; wsChanged(false); return { ok: true }; }
-  const r = L.consentAnswer(consent && consent.pending, token, answer, Date.now());
+  const c = consent;
+  const r = L.consentAnswer(c && c.pending, token, answer, Date.now());
   if (r.result === 'invalid') return { ok: false };
-  finishConsent(consent, r.result);
-  return { ok: true };
+  if (r.result === 'cancel') { finishConsent(c, 'cancel'); return { ok: true }; } // 열기를 처리하는 중(squad 다시 읽기를 기다리는 사이)에 와도 취소가 이긴다: finishConsent 가 끝으로 표시하므로 열기 쪽이 깨어나도 시작하지 않는다
+  if (c.answering === true) return { ok: false };
+  c.answering = true;
+  try {
+    const fresh = L.consentChoice(L.squadChoices(await readSquadsNow()), squad === undefined ? null : squad);
+    if (consent !== c || c.pending.used) return { ok: false }; // 기다리는 사이 시간이 다 됐거나 끝났다
+    if (!fresh.ok) { // 그사이 목록이 바뀌었다(또는 렌더러가 이상한 값을 보냈다): 새 목록으로 다시 보이고 팀은 "팀 없이" 로 되돌린다
+      const again = L.squadChoices(await readSquadsNow());
+      if (consent !== c || c.pending.used) return { ok: false }; // 다시 읽는 사이에 취소됐으면 창을 되살리지 않는다
+      c.view = { ...c.view, squads: again, squad: null, squadMissing: false, squadChanged: true }; wsChanged(false);
+      return { ok: false, reason: 'squad' };
+    }
+    finishConsent(c, 'open', fresh.squad);
+    return { ok: true };
+  } finally { c.answering = false; }
 });
 
 let childAccepted = []; // 받아들인 시각(단조 시계 ms)
@@ -1597,20 +1619,22 @@ async function handleChildRequest(item) {
   const parentId = d.parentId;
   if (!wsOf(parentId) || !claudeFound()) { refuseChild('start', item.name, parentId); return; }
   // 매번 동의를 받는다: 폴더·제목·맡길 내용 전체를 보여 주는 창이 유일한 관문이다(자동 시작도 "묻지 않기"도 없다)
-  const ans = await askConsent(L.consentView({ token: crypto.randomBytes(16).toString('hex'), folder: d.real, project: d.req.project, title: d.req.title, prompt: d.req.prompt, paste: !claudeWrapper() }));
+  const wrapperOk = !!claudeWrapper();
+  const teams = wrapperOk ? await readSquadsNow() : []; // 래퍼를 못 쓰면 팀을 적용할 수 없으니 고르는 칸을 보이지 않는다
+  const ans = await askConsent(L.consentView({ token: crypto.randomBytes(16).toString('hex'), folder: d.real, project: d.req.project, title: d.req.title, prompt: d.req.prompt, paste: !wrapperOk, squads: teams, squad: d.req.squad }));
   if (ans.answer !== 'open') { childLog('cancelled', 'trust-cancel', item.name); setChildNote(wsOf(parentId), { kind: 'cancel' }); return; }
   // 동의를 기다리는 사이 바뀌었을 수 있다(앱 종료·창·부모·자리·링크 바꿔치기). 마루 pty 가 다시 시작됐어도 같은 작업 공간이면 계속한다(요청의 키는 이미 검증을 마쳤다)
   const par = wsOf(parentId);
   const why = L.childLaunchCheck({ quitting, windowOk: windowReady(), parentAlive: L.parentUsable({ exists: !!par, eligible: !!par && L.maruEligible(par) }), children: totalChildren(), wsCount: wss.size, realNow: realDir(d.req.cwd), approvedReal: d.real });
   if (why) { refuseChild(why, item.name, parentId); return; }
-  launchChild(par, d.req, d.real, item.name);
+  launchChild(par, d.req, d.real, item.name, ans.squad);
 }
 // 하위 세션을 만들고(마루 뒤에 들여써서) 시작한다. 래퍼를 쓸 수 있으면 프롬프트 파일(래퍼가 읽고 지운다), 아니면 입력줄에만 채우고 Enter 는 사용자가 누른다
-function launchChild(parent, req, real, name) {
+function launchChild(parent, req, real, name, squad) {
   let file = null;
   if (claudeWrapper()) file = L.writeChildPromptFile({ dir: PROMPT_DIR(), text: L.childPromptText(curLang(), req.prompt), rand: () => crypto.randomBytes(8).toString('hex'), fsx: fs, uid: process.getuid() });
   if (!file && claudeWrapper()) childLog('warn', 'prompt-file', name);
-  const w = addWorkspace(real, req.title, null, false, { parentId: parent.id, project: req.project, origin: 'child' });
+  const w = addWorkspace(real, req.title, null, false, { parentId: parent.id, project: req.project, origin: 'child', squad: claudeWrapper() ? squad : null }); // 래퍼를 못 쓰는 경우(입력줄에만 채움)에는 팀을 적용할 수 없다
   w.expectClaude = true; w.autoStart = true; w.childPromptFile = file; w.childBrief = req.prompt; // childBrief: 시작 순간 래퍼를 못 쓰게 되면 같은 내용을 입력줄에 채우려고 시작 전까지만 들고 있는다
   if (wsCollapsed().includes(parent.id)) setWsCollapsed(L.expandParent(wsCollapsed(), parent.id)); // 하위 세션은 숨긴 채 시작하지 않는다
   setBudget(L.recordLaunch(budget.list, Date.now()));
@@ -1912,6 +1936,29 @@ ipcMain.handle('inbox:request-skill', (e, id, slug) => inboxAction(e, async () =
   if (wsOf(id) !== w || w.id !== activeId) return { ok: false, reason: 'inactive' }; // 묻는 동안 바뀌었을 수 있다
   return writePrompt(w, text);
 }));
+// "스쿼드 만들기" 요청: 앱은 스쿼드 파일을 쓰지 않는다. 사용자가 적은 일(정리·검사를 통과한 한 줄)을 고정 문장에 끼워 마루 작업 공간의 입력줄에 채울 뿐이다(Enter 는 보내지 않는다).
+// 대상은 마루 세션(저장소 루트, 하위 세션 아님)이고 준비 조건은 스킬 "설치 요청" 과 같다: pty 가 있고, 셸이 전경이 아니고, 붙여넣기 모드(bracketed)가 켜져 있다. 렌더러는 글만 준다(작업 공간 id·경로는 받지 않는다)
+let squadAsking = false;
+ipcMain.handle('squads:request-create', (e, text) => {
+  if (!fromMain(e)) return { ok: false, reason: 'invalid' };
+  const ask = L.cleanSquadAsk(text);
+  if (!ask) return { ok: false, reason: 'invalid' };
+  if (squadAsking || picking || closing || quitAsking || restarting) return { ok: false, reason: 'busy' };
+  squadAsking = true;
+  try {
+    const maru = [wsOf(activeId), ...wsOrder()].filter((w, i, a) => w && !w.fx && a.indexOf(w) === i && L.maruEligible(w) && isMaruWs(w)); // 활성 탭이 마루면 그것부터
+    if (!maru.length) return { ok: false, reason: 'no-maru' };
+    const w = maru.find((x) => x.term);
+    if (!w) return { ok: false, reason: 'no-term' };
+    if (!w.bracketed) return { ok: false, reason: 'not-ready' };
+    if (agentBusy(w)) return { ok: false, reason: 'agent-busy' }; // 마루가 일하는 중이면 입력줄을 건드리지 않는다
+    const line = tr('squadnew.askLine', { ask });
+    const r = writePrompt(w, line);
+    if (!r.ok) return { ok: false, reason: r.reason === 'no-term' ? 'no-term' : 'not-ready' };
+    activate(w.id); // 그 탭으로 옮긴다(이미 활성이면 아무 일도 없다)
+    return { ok: true, id: w.id };
+  } finally { squadAsking = false; }
+});
 // ---- 기억 보기(읽기 전용) ----
 // 시험 전용(MARU_APP_UI=memory|memgraph): 지어낸 중립 기억 25개. 실제 기억 폴더는 읽지 않는다.
 function fakeMemories() {

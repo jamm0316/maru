@@ -405,7 +405,7 @@ function workspacesToSave(items, activeId, withSid = true) {
   return { list: keep.map((x) => {
     const p = parentOf(x);
     return { cwd: x.cwd, title: x.title, ...(withSid && validSessionUuid(x.claudeSid) ? { claudeSid: x.claudeSid, claudeSidAt: x.claudeSidAt } : {}), ...(withSid && validSessionUuid(x.prevSid) ? { prevSid: x.prevSid } : {}),
-      ...(isProjectKey(x.project) ? { project: x.project } : {}), ...(x.origin === 'child' || p ? { origin: 'child' } : {}), ...(validWsId(x.id) ? { id: x.id } : {}), ...(p ? { parentId: p.id } : {}) };
+      ...(isProjectKey(x.project) ? { project: x.project } : {}), ...(typeof x.squad === 'string' && SQUAD_SLUG_RE.test(x.squad) && (x.origin === 'child' || p) ? { squad: x.squad } : {}), ...(x.origin === 'child' || p ? { origin: 'child' } : {}), ...(validWsId(x.id) ? { id: x.id } : {}), ...(p ? { parentId: p.id } : {}) };
   }), active: a >= 0 ? a : 0 };
 }
 const WS_ID_RE = /^[0-9a-f]{16}$/;
@@ -492,6 +492,10 @@ function isSafeQuestStart(s) { return typeof s === 'string' && s.length > 0 && !
 
 // 터미널 단축키: keydown 이벤트 -> pty 에 보낼 시퀀스(없으면 null). IME 조합 중에는 가로채지 않는다.
 // Shift+Enter(다른 보조키 없음)인지. keydown 뿐 아니라 keypress·keyup 도 같은 판정으로 삼킨다
+// Shift+Enter(다른 보조키 없음). 조합 여부는 보지 않는다: 조합 중이면 렌더러가 줄바꿈을 조합 확정 뒤로 미룬다.
+function isShiftEnter(e) {
+  return !!e && e.key === 'Enter' && !!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey;
+}
 function isNewlineKey(e) {
   return !!e && e.key === 'Enter' && !!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
 }
@@ -626,7 +630,8 @@ const SQUAD_DESC_MAX = 200;
 const SQUAD_META_MAX_BYTES = 256 * 1024;
 const SQUAD_SCAN_MAX = 64; // 앞에서부터 이만큼만 훑는다
 const SQUAD_MODELS = ['haiku', 'sonnet', 'opus', 'inherit'];
-const SQUAD_RESERVED_ROLES = ['lead', 'squad'];
+const SQUAD_RESERVED_ROLES = ['lead', 'session', 'squad']; // squads.py RESERVED_ROLES 와 같다
+const squadRoleReserved = (r) => SQUAD_RESERVED_ROLES.includes(r) || r.endsWith('-lead') || r.endsWith('-session'); // squads.py role_reserved
 const isPlainObject = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
 function squadText(s, max, min) { // 보이지 않는 문자·제어문자가 있거나 앞뒤 공백이 있으면 거부
   if (typeof s !== 'string' || hasBadChars(s) || s !== s.trim()) return null;
@@ -643,7 +648,7 @@ function validSquad(o) {
   if (!Array.isArray(o.members) || o.members.length > SQUAD_MEMBERS_MAX) return null;
   const members = []; const roles = new Set();
   for (const m of o.members) {
-    if (!isPlainObject(m) || typeof m.role !== 'string' || !SQUAD_SLUG_RE.test(m.role) || SQUAD_RESERVED_ROLES.includes(m.role) || roles.has(m.role)) continue;
+    if (!isPlainObject(m) || typeof m.role !== 'string' || !SQUAD_SLUG_RE.test(m.role) || squadRoleReserved(m.role) || roles.has(m.role)) continue;
     if (m.agent !== 'sq-' + o.slug + '-' + m.role || !SQUAD_MODELS.includes(m.model)) continue;
     roles.add(m.role); members.push({ role: m.role, agent: m.agent, model: m.model });
   }
@@ -670,12 +675,21 @@ function squadView(squads, leadModel) {
     rows: [{ agent: q.lead.agent, lead: true, role: null, model: mdl(q.lead.model) }, ...q.members.map((m) => ({ agent: m.agent, lead: false, role: m.role, model: mdl(m.model) }))],
   }));
 }
+// 작업 공간에 저장된 팀(slug)이 지금 설치된(검증을 통과한) 스쿼드 목록에 있을 때만 { slug, name }. 없으면 null: 래퍼가 무시할 팀을 칩으로 내세우지 않는다(순수)
+function teamChip(slug, squads) {
+  if (typeof slug !== 'string' || !SQUAD_SLUG_RE.test(slug)) return null;
+  const q = (Array.isArray(squads) ? squads : []).find((x) => x && x.slug === slug && typeof x.name === 'string' && x.name);
+  return q ? { slug, name: q.name } : null;
+}
+// 하위 세션 진입용 에이전트(sq-<slug>-session)는 서브에이전트로 도는 멤버가 아니다: 임시 줄로 보이지 않게 건너뛴다
+const SESSION_AGENT_RE = /^sq-[a-z0-9][a-z0-9-]*-session$/;
 // 서브에이전트 종류 -> 개수(Map), 알려진 줄에 붙고 남은 것(임시 줄 후보)
 function matchSubs(subs, knownNames) {
   const counts = new Map(); const extra = [];
   const known = new Set(knownNames);
   for (const s of Array.isArray(subs) ? subs : []) {
     if (!s || typeof s.type !== 'string' || !SUB_TYPE_RE.test(s.type) || !Number.isInteger(s.count) || s.count < 1 || s.count > 32) continue;
+    if (SESSION_AGENT_RE.test(s.type)) continue;
     counts.set(s.type, s.count);
     if (!known.has(s.type)) extra.push({ type: s.type, count: s.count });
   }
@@ -1034,6 +1048,7 @@ function normalizeWorkspaces(raw, { exists, max = WS_MAX, fallbackTitle } = {}) 
     if (validSessionUuid(e.prevSid) && e.prevSid !== entry.claudeSid) entry.prevSid = e.prevSid; // 새로 시작하면서 남겨 둔 옛 세션("원래 세션 열기" 용, 하나뿐)
     if (e.origin === 'child') entry.origin = 'child'; // 하위 세션이었던 적이 있다(부모가 닫혀도 마루 세션이 될 수 없다)
     if (isProjectKey(e.project)) entry.project = e.project; // 하위 세션의 프로젝트 이름표(부모가 닫혀도 남는다)
+    if (e.origin === 'child' && typeof e.squad === 'string' && SQUAD_SLUG_RE.test(e.squad)) entry.squad = e.squad; // 하위 세션이 맡은 팀(다시 열 때 같은 팀으로; 없어진 팀이면 래퍼가 무시하고 팀 없이 연다)
     rawIds.push(validWsId(e.id) ? e.id : null); rawParents.push(validWsId(e.parentId) ? e.parentId : null);
     out.list.push(entry);
     origIdx.push(i);
@@ -3083,7 +3098,7 @@ const CHILD_DAY_MAX = 20; const CHILD_DAY_MS = 24 * 3600 * 1000; // 24시간에 
 const REQ_MAX_BYTES = 16384; const REQ_STALE_MS = 60 * 1000; const REQ_FILES_PER_SCAN = 20; const REQ_FUTURE_MS = 2000;
 const REQ_TITLE_MAX = 40; const REQ_PROMPT_MAX = 4000; const REQ_CWD_MAX = 1024;
 const REQ_NAME_RE = /^(\d{13})-([0-9a-f]{8})\.json$/;
-const REQ_KEYS = ['v', 'from', 'cwd', 'title', 'project', 'prompt', 'at', 'mac'];
+const REQ_KEYS = ['v', 'from', 'cwd', 'title', 'project', 'squad', 'prompt', 'at', 'mac'];
 const REQ_KEY_RE = /^[0-9a-f]{64}$/;
 
 // 프롬프트 정리: 줄바꿈(\n)·탭은 남기고(\r 은 \n 으로) 제어·서식·보이지 않는 문자는 지운다. ESC 도 지워지므로 붙여넣기 끝 표지를 만들 수 없다
@@ -3098,9 +3113,12 @@ function validAbsDir(c) { // 정규화된 절대 경로(.·..·빈 조각 없음
 // 주의: 이 키는 같은 사용자(uid) 안에서는 비밀이 아니다(같은 사용자의 프로세스가 ps eww 로 환경을 읽을 수 있다). mac 은 실수·다른 작업 공간의 요청을 거르는 용도이고, 진짜 관문은 매번 뜨는 동의 창이다
 // ---- 인증: 마루 pty 마다 시작할 때 정한 무작위 키(MARU_REQ_KEY, 64 hex = 32바이트). 요청의 mac = HMAC-SHA256(키 바이트, 아래 7줄을 "\n" 으로 이은 UTF-8) ----
 // 줄: v, from, cwd, title, project(없으면 빈 문자열), at, 프롬프트 UTF-8 의 SHA-256(소문자 hex). 값은 파일에 적힌 그대로(정리 전)
+// v=2(스쿼드를 지정한 요청)는 끝에 squad 줄이 하나 더 붙는다(8줄). v=1 은 예전과 바이트까지 같다. v 는 서명 안에 있어 2 -> 1 로 내려 squad 를 서명 밖으로 빼도 맞지 않는다
 function childMacMessage(f) {
   const sha = require('crypto').createHash('sha256').update(String(f.prompt), 'utf8').digest('hex');
-  return [String(f.v), f.from, f.cwd, f.title, f.project === null || f.project === undefined ? '' : f.project, String(f.at), sha].join('\n');
+  const lines = [String(f.v), f.from, f.cwd, f.title, f.project === null || f.project === undefined ? '' : f.project, String(f.at), sha];
+  if (f.v === 2) lines.push(typeof f.squad === 'string' ? f.squad : '');
+  return lines.join('\n');
 }
 function childMac(keyHex, f) {
   return require('crypto').createHmac('sha256', Buffer.from(keyHex, 'hex')).update(childMacMessage(f), 'utf8').digest('hex');
@@ -3129,7 +3147,7 @@ function parseChildRequest(text) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return bad('shape');
   const keys = Object.keys(o);
   if (keys.some((k) => !REQ_KEYS.includes(k)) || !['v', 'from', 'cwd', 'title', 'prompt', 'at', 'mac'].every((k) => hasOwn(o, k))) return bad('shape');
-  if (o.v !== 1) return bad('version');
+  if (o.v !== 1 && o.v !== 2) return bad('version');
   if (!isSessionId(o.from)) return bad('shape');
   if (typeof o.mac !== 'string' || !REQ_KEY_RE.test(o.mac)) return bad('auth');
   if (!validAbsDir(o.cwd)) return bad('cwd');
@@ -3140,8 +3158,12 @@ function parseChildRequest(text) {
   if (Buffer.byteLength(childPromptText('ko', prompt), 'utf8') > PROMPT_FILE_MAX || Buffer.byteLength(childPromptText('en', prompt), 'utf8') > PROMPT_FILE_MAX) return bad('prompt-size'); // 전달 파일(머리말 포함)이 16KB 를 넘으면 조용히 줄이지 않고 거부
   const project = hasOwn(o, 'project') ? o.project : null;
   if (project !== null && !isProjectKey(project)) return bad('project');
+  // squad: v=2 에만, 있어야 한다(엄격한 slug). v=1 에 있으면 거부(서명 밖의 값이 되므로)
+  if (hasOwn(o, 'squad') !== (o.v === 2)) return bad('shape');
+  if (o.v === 2 && !(typeof o.squad === 'string' && SQUAD_SLUG_RE.test(o.squad))) return bad('shape');
+  const squad = o.v === 2 ? o.squad : null;
   if (!Number.isSafeInteger(o.at) || o.at < 1e12 || o.at > 1e14) return bad('shape');
-  return { ok: true, req: { from: o.from, cwd: o.cwd, title, project, prompt, at: o.at }, raw: { v: o.v, from: o.from, cwd: o.cwd, title: o.title, project, at: o.at, prompt: o.prompt, mac: o.mac } };
+  return { ok: true, req: { from: o.from, cwd: o.cwd, title, project, squad, prompt, at: o.at }, raw: { v: o.v, from: o.from, cwd: o.cwd, title: o.title, project, squad, at: o.at, prompt: o.prompt, mac: o.mac } };
 }
 // 예산(앱 전체, 재시작 뒤에도): 24시간에 20개. launches = 실제로 연 시각(ms) 배열
 function budgetOk(launches, nowMs) { // 미래 시각(시계를 되돌린 경우)은 '지금'으로 센다: 되돌려도 예산이 풀리지 않는다
@@ -3306,9 +3328,33 @@ function purgeChildRequests({ dir, fsx, uid }) {
 }
 
 // 동의 창에 보일 값(전체 경로·제목·프로젝트·전체 맡길 내용). 모두 요청에서 온 값이라 renderer 가 textContent 로만 쓴다
-function consentView({ token, folder, project, title, prompt, paste }) {
+// squads: parseSquadMeta 가 검증한 목록(main 이 그 순간 직접 읽은 것). squad: 요청이 말한 slug|null. 목록에 있으면 미리 고르고(suggested), 없으면 "팀 없이" 로 두고 squadMissing 을 켠다
+function consentView({ token, folder, project, title, prompt, paste, squads, squad }) {
   const brief = cleanPromptText(prompt); // 전달하는 것과 같은 문자열(이미 정규화돼 있다). 자르지 않는다
-  return { token, folder, project: project || null, title, brief, chars: cpLen(brief), lines: brief ? brief.split('\n').length : 0, paste: paste === true };
+  const teams = squadChoices(squads);
+  const asked = typeof squad === 'string' && SQUAD_SLUG_RE.test(squad) ? squad : null;
+  const known = asked !== null && teams.some((q) => q.slug === asked);
+  return { token, folder, project: project || null, title, brief, chars: cpLen(brief), lines: brief ? brief.split('\n').length : 0, paste: paste === true,
+    squads: teams, squad: known ? asked : null, squadMissing: asked !== null && !known, squadAsked: asked };
+}
+// 동의 창에 보일 팀 목록(slug·이름·개인 여부만)
+function squadChoices(squads) {
+  return (Array.isArray(squads) ? squads : []).filter((q) => q && typeof q.slug === 'string' && SQUAD_SLUG_RE.test(q.slug) && typeof q.name === 'string' && q.name).slice(0, SQUADS_MAX).map((q) => ({ slug: q.slug, name: q.name, personal: q.personal === true }));
+}
+// 승인과 함께 온 팀 선택(렌더러가 준 값)을 main 이 그 순간 읽은 목록으로 다시 검증한다(순수). choice: null|undefined(= 팀 없이) 또는 slug.
+// -> { ok: true, squad: slug|null } | { ok: false }. 형식이 틀리거나 목록에 없으면 거부(요청·렌더러의 말을 믿지 않는다)
+function consentChoice(squads, choice) {
+  if (choice === null || choice === undefined) return { ok: true, squad: null };
+  if (typeof choice !== 'string' || !SQUAD_SLUG_RE.test(choice)) return { ok: false };
+  return squadChoices(squads).some((q) => q.slug === choice) ? { ok: true, squad: choice } : { ok: false };
+}
+// "스쿼드 만들기" 요청 문구 정리(순수): 문자열만. 제어·서식 문자와 개행은 공백으로, 공백은 하나로, 앞뒤 정리, 1~300 코드포인트. 비면·비밀처럼 보이면(looksSecret) ''
+const SQUAD_ASK_MAX = 300;
+function cleanSquadAsk(s) {
+  if (typeof s !== 'string') return '';
+  const t = s.replace(BAD_CHARS_G, ' ').replace(/\s+/g, ' ').trim();
+  const n = [...t].length;
+  return n >= 1 && n <= SQUAD_ASK_MAX && !looksSecret(t) ? t : '';
 }
 
 // ---- 프롬프트 전달: 셸에 글을 쓰지 않고 파일로 건넨다(래퍼가 읽고 지운다) ----
@@ -3372,20 +3418,21 @@ function cleanStalePromptFiles({ dir, nowMs, fsx, uid, ttlMs = PROMPT_STALE_MS }
   return n;
 }
 // 하위 세션 pty 환경변수(sanitizeHostEnv 를 거친 환경에 얹는다): 고정 작업 공간 id(모든 작업 공간)·부모의 고정 id·프로젝트·프롬프트 파일. 부모의 앱 세션 id·인증 키는 넣지 않는다
-function childEnvVars({ ws, parentWs, project, promptFile }) {
+function childEnvVars({ ws, parentWs, project, promptFile, squad }) {
   const out = {};
   if (validStableId(ws)) out.MARU_WS = ws; // 모든 작업 공간: 재시작·재실행에도 변하지 않는 id(보고 폴더의 키)
   if (validStableId(parentWs)) out.MARU_PARENT_WS = parentWs; // 하위 세션: 부모의 고정 id(저장된 parentId 에서; 부모 pty 가 아직 안 떠 있어도 된다)
   if (isProjectKey(project)) out.MARU_PROJECT = project; // 설계 문서 폴더(--add-dir)는 넘기지 않는다: 하위 세션이 고치려면 Claude Code 의 보통 권한 확인을 거친다
   if (typeof promptFile === 'string' && validAbsDir(promptFile) && promptFile.length <= 1024) out.MARU_CHILD_PROMPT_FILE = promptFile;
+  if (typeof squad === 'string' && SQUAD_SLUG_RE.test(squad)) out.MARU_CHILD_SQUAD = squad; // 하위 세션에만 main 이 넘긴다. 래퍼가 JSON 에 총괄이 있을 때만 --agent 를 붙인다
   return out;
 }
 // 작업 공간 pty 의 환경(순수): 호스트 환경을 정리하고, 앱이 정한 값만 얹는다. 물려받은 MARU_APP*·MARU_WS·MARU_PARENT_*·MARU_PROJECT·MARU_CHILD_*·MARU_REQ_KEY 는 모두 지운다.
 // reqKey 는 마루가 될 수 있는 작업 공간(maruEligible)에만 넘긴다. 다른 작업 공간(하위 세션 포함)에는 어떤 경우에도 키가 없다
-function ptyEnv({ host, ws, parentWs, project, promptFile, reqKey }) {
+function ptyEnv({ host, ws, parentWs, project, promptFile, reqKey, squad }) {
   const env = { ...sanitizeHostEnv(host), TERM: 'xterm-256color', COLORTERM: 'truecolor' };
   for (const k of Object.keys(env)) if (k.startsWith('ELECTRON_') || k.startsWith('MARU_APP') || k === 'MARU_WS' || k.startsWith('MARU_PARENT_') || k === 'MARU_PROJECT' || k.startsWith('MARU_CHILD_') || k.startsWith('MARU_REQ')) delete env[k];
-  Object.assign(env, childEnvVars({ ws, parentWs, project, promptFile }));
+  Object.assign(env, childEnvVars({ ws, parentWs, project, promptFile, squad }));
   if (typeof reqKey === 'string' && REQ_KEY_RE.test(reqKey)) env.MARU_REQ_KEY = reqKey;
   return env;
 }
@@ -3500,7 +3547,7 @@ function reportFlash({ prev, next, active, lastFlashAt, nowMs }) {
 function childLogLine(kind, reason, name) { return String(kind).replace(/[^a-z-]/g, '').slice(0, 12) + ' ' + String(reason).replace(/[^a-z-]/g, '').slice(0, 20) + ' ' + (typeof name === 'string' && REQ_NAME_RE.test(name) ? name : '-'); }
 
 const api = {
-  CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
+  CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, consentChoice, squadChoices, cleanSquadAsk, SQUAD_ASK_MAX, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
   macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, promptHandoff, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
   hierarchyOrder, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
   MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, parseOnboarded, firstMeetingGate, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
@@ -3510,13 +3557,13 @@ const api = {
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isShiftEnter, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
   SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth,
   DIARY_FILE_MAX_BYTES, DIARY_FILES_MAX, DIARY_TITLE_MAX, DIARY_BODY_MAX, parseDiaryText, readDiaries, parseYm, shiftYm, shiftDay, monthLayout, buildMonthSummary, buildDayGroups,
-  SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, matchSubs, squadOpen, claudeLaunchCommand,
+  SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, teamChip, matchSubs, squadOpen, claudeLaunchCommand,
   TODO_DONE_MAX, TODO_DONE_MAX_BYTES, fitTodoDone, todoMarkKey, TODO_DONE_KEEP_SEC, TODO_DONE_HIDE_SEC, titleKey, todoTitleRecordable, validTodoDoneEntry, makeTodoDone, todoMarkable, formatTodoDone, parseTodoDone, pruneTodoDone, addTodoDone, removeTodoDone, filterTodos, readTodoDoneFile, saveTodoDone, projectOpenTodos,
   confirmClose, confirmRestart, closeRequestAction, lookupWs, ringFrameInterval, readWorkspacesFile, backupCorruptFile,
   WS_MAX, WS_STATES, workspaceTitle, managedWsTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,

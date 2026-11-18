@@ -520,3 +520,28 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 .trust-path{font-family:var(--mono);font-size:12px;color:var(--soft);overflow-wrap:anywhere;min-width:0}
 .rep-none{color:var(--mute);font-style:italic}
 .su-body p,.su-row .how,.su-body .hint{word-break:keep-all}
+
+/* 스쿼드 만들기 창·동의 창의 팀 고르기·작업 공간 줄의 팀 이름표 */
+#sn-text{font:inherit;font-size:14px;line-height:1.5;color:var(--ink);background:#0E0B08;border:1px solid #3A2A1C;border-radius:10px;padding:10px 12px;resize:vertical;min-height:84px;max-height:200px;width:100%;box-sizing:border-box}
+#sn-text:focus{border-color:var(--or);outline:none;box-shadow:0 0 0 2px rgba(255,138,42,.25)}
+.sn-meta{display:flex;flex-direction:column;gap:6px}
+.sn-chips{display:flex;flex-direction:column;gap:6px}
+.sn-chip{font:inherit;font-size:12px;line-height:1.4;text-align:left;color:var(--soft);background:transparent;border:1px solid #4A3A2C;border-radius:8px;padding:5px 10px;cursor:pointer;overflow-wrap:anywhere}
+.sn-chip:hover,.sn-chip:focus-visible{border-color:var(--or);color:var(--ink);outline:none}
+.sn-chip:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
+#sn-count{align-self:flex-end}
+.cs-teams{display:flex;flex-direction:column;gap:4px}
+.cs-teams[hidden]{display:none}
+.cs-opt{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--soft);padding:5px 8px;border:1px solid var(--line);border-radius:8px;cursor:pointer;min-width:0}
+.cs-opt:hover,.cs-opt:focus-within{border-color:#4A3A2C}
+.cs-opt.on{border-color:var(--or);background:var(--sel);color:var(--ink)}
+.cs-opt input{accent-color:var(--or);flex:none;margin:0}
+.cs-opt .nm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-opt .tag{flex:none;font-size:10px;line-height:15px;padding:0 6px;border-radius:999px;border:1px solid #4A3A2C;color:var(--mute);white-space:nowrap}
+.cs-opt .tag.sug{color:var(--or2);border-color:#5A4630}
+.cs-team-note{color:var(--or2);min-height:0}
+.cs-team-note:empty{display:none}
+.ws .chip.team{max-width:110px;color:var(--soft)}
+#dlg-squadnew .hint,#dlg-consent .hint{word-break:keep-all}
+html[lang="en"] #dlg-squadnew .hint,html[lang="en"] #dlg-consent .hint{word-break:normal}
+.cs-team .hint{margin-top:4px}

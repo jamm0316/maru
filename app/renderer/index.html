@@ -167,7 +167,8 @@
       </section>
 
       <section class="card">
-        <h2 class="eyebrow" data-i18n="squad.eyebrow">스쿼드</h2>
+        <div class="head"><h2 class="eyebrow" data-i18n="squad.eyebrow">스쿼드</h2>
+          <button type="button" class="ws-add" id="squad-add" data-i18n-aria="squad.add.aria" data-i18n-title="squad.add.aria" aria-label="스쿼드 만들기" title="스쿼드 만들기">+</button></div>
         <div id="party" class="stack gap10"></div>
       </section>
 
@@ -235,6 +236,19 @@
   </div>
 </div>
 
+<!-- 모달: 스쿼드 만들기(마루에게 초안을 요청) -->
+<div class="backdrop" id="dlg-squadnew" hidden>
+  <div class="dialog narrow" role="dialog" aria-modal="true" aria-labelledby="sn-title">
+    <h2 class="dlg-title serif" id="sn-title"></h2>
+    <label class="field"><span class="lbl" id="sn-label" for="sn-text"></span>
+      <textarea id="sn-text" rows="4" maxlength="300" spellcheck="false" aria-describedby="sn-count sn-hint sn-err"></textarea></label>
+    <div class="sn-meta"><div class="sn-chips" id="sn-chips" role="group" aria-labelledby="sn-label"></div><span class="hint" id="sn-count"></span></div>
+    <div class="hint" id="sn-hint"></div>
+    <div class="err" id="sn-err" role="alert"></div>
+    <div class="btn-row"><button type="button" class="btn ghost" id="sn-cancel" data-i18n="common.cancel">취소</button><button type="button" class="btn primary" id="sn-ok"></button></div>
+  </div>
+</div>
+
 <!-- 모달: 프로젝트 이름 바꾸기 / 합치기 -->
 <div class="backdrop" id="dlg-proj" hidden>
   <div class="dialog narrow" role="dialog" aria-modal="true" aria-labelledby="pj-title">
@@ -257,6 +271,12 @@
     <div class="cs-k" id="cs-what-k"></div><div class="cs-what" id="cs-what"></div>
     <div class="cs-k" id="cs-brief-k"></div><pre class="out cs-brief" id="cs-brief" tabindex="0"></pre>
     <div class="cs-count hint" id="cs-count"></div>
+    <div class="cs-team" id="cs-team" hidden>
+      <div class="cs-k" id="cs-team-k"></div>
+      <div class="cs-teams" id="cs-teams" role="radiogroup" aria-labelledby="cs-team-k" aria-describedby="cs-team-hint"></div>
+      <div class="hint" id="cs-team-hint"></div>
+      <div class="hint cs-team-note" id="cs-team-note" role="status"></div>
+    </div>
     <div class="hint" id="cs-go"></div>
     <div class="hint cs-scroll" id="cs-scroll" role="status"></div>
     <div class="btn-row"><button type="button" class="btn ghost" id="cs-cancel"></button><button type="button" class="btn primary" id="cs-ok"></button></div>

@@ -16,6 +16,7 @@ FAIL=0; N=0
 ok()   { N=$((N+1)); echo "  ok   $*"; }
 bad()  { N=$((N+1)); FAIL=$((FAIL+1)); echo "  FAIL $*"; }
 check() { local name=$1; shift; if "$@"; then ok "$name"; else bad "$name"; fi; }
+not() { ! "$@"; }
 has() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 hasnt() { case "$1" in *"$2"*) return 1;; *) return 0;; esac; }
 checkall() { local name=$1 a okk=1; shift; local cur=(); for a in "$@" "&&"; do if [ "$a" = "&&" ]; then if [ ${#cur[@]} -gt 0 ]; then "${cur[@]}" || okk=0; fi; cur=(); else cur+=("$a"); fi; done; if [ $okk = 1 ]; then ok "$name"; else bad "$name"; fi; }
@@ -123,7 +124,7 @@ lines = [str(d["v"]), d["from"], d["cwd"], d["title"], d.get("project") or "", s
 want = hmac.new(key, "\n".join(lines).encode("utf-8"), hashlib.sha256).hexdigest()
 sys.exit(0 if d["mac"] == want and len(d["mac"]) == 64 and d["mac"] == d["mac"].lower() else 1)' "$1" "$2"; }
 check "mac = 독립 계산한 HMAC-SHA256(키, v/from/cwd/title/project/at/sha256(prompt))" mac_ok "$REQ/$F" "$KEY"
-check "다른 키로 계산한 값과는 다름" sh -c '! "$@"' _ mac_ok "$REQ/$F" "$(printf '00%.0s' $(seq 1 32))"
+check "다른 키로 계산한 값과는 다름" not mac_ok "$REQ/$F" "$(printf '00%.0s' $(seq 1 32))"
 check "키 원문이 파일·출력에 없음" sh -c '! grep -q "$1" "$2" && ! printf "%s" "$3" | grep -q "$1"' _ "$KEY" "$REQ/$F" "$out"
 check "JSON 모양(프로젝트 없음: 키 정확히 v·from·cwd·title·prompt·at·mac 7개, project 키 없음)" "$REAL_PY" -I -c '
 import json, sys, os
@@ -176,6 +177,40 @@ reject "제목이 제어 문자뿐" 2 x "$T/w/plain" --title "$(printf '\001\002
 mkdir -p "$T/w/real"; ln -s "$T/w/real" "$T/w/lnk"
 out=$(printf 'x' | open_run "$PA" "$T/w/lnk"); F=$(ls "$REQ" | head -1)
 check "폴더 심볼릭 링크는 realpath 로 풀려 cwd 에 실제 경로가 들어감" [ "$(jget "$REQ/$F" 'd["cwd"]')" = "$T/w/real" ]
+rm -rf "$REQ"
+
+echo "== maru open: --squad(팀 지정; 서명에 squad 가 들어간다)"
+# 독립 구현: v=2 는 v=1 의 7줄 뒤에 squad 줄이 하나 더 붙는다
+mac2_ok() { "$REAL_PY" -I -c '
+import hashlib, hmac, json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8")); key = bytes.fromhex(sys.argv[2])
+lines = [str(d["v"]), d["from"], d["cwd"], d["title"], d.get("project") or "", str(d["at"]), hashlib.sha256(d["prompt"].encode("utf-8")).hexdigest(), d["squad"]]
+want = hmac.new(key, "\n".join(lines).encode("utf-8"), hashlib.sha256).hexdigest()
+sys.exit(0 if d["mac"] == want else 1)' "$1" "$2"; }
+out=$(printf 'x' | open_run "$PA" "$T/w/plain" --squad dev); rc=$?; F=$(ls "$REQ" | head -1)
+checkall "--squad dev: rc=0, v=2, squad 키, 키 8개(project 없음), mac 이 squad 를 포함해 독립 계산과 같음" [ "$rc" -eq 0 ] '&&' [ "$(jget "$REQ/$F" 'd["v"]')" = 2 ] '&&' [ "$(jget "$REQ/$F" 'd["squad"]')" = dev ] '&&' [ "$(jget "$REQ/$F" 'len(d)')" = 8 ] '&&' mac2_ok "$REQ/$F" "$KEY"
+# 서명 변조: squad 를 바꾸면 독립 계산이 맞지 않는다(앱도 같은 계산으로 거부한다)
+cp "$REQ/$F" "$T/tamper.json"; "$REAL_PY" -I -c '
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8")); d["squad"]="research"; json.dump(d,open(sys.argv[1],"w",encoding="utf-8"),ensure_ascii=False)' "$T/tamper.json"
+check "squad 값을 바꾼 요청은 mac 이 맞지 않음" not mac2_ok "$T/tamper.json" "$KEY"
+cp "$REQ/$F" "$T/tamper2.json"; "$REAL_PY" -I -c '
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8")); d["v"]=1; json.dump(d,open(sys.argv[1],"w",encoding="utf-8"),ensure_ascii=False)' "$T/tamper2.json"
+check "v 를 1 로 내려도(squad 는 서명 밖으로 못 뺌) 7줄 계산과 맞지 않음" not mac_ok "$T/tamper2.json" "$KEY"
+rm -rf "$REQ"
+printf 'x' | open_run "$PA" "$T/w/plain" --squad my-team2 --project t/alpha >/dev/null; F=$(ls "$REQ" | head -1)
+checkall "--squad + --project: 키 9개, mac 맞음" [ "$(jget "$REQ/$F" 'len(d)')" = 9 ] '&&' mac2_ok "$REQ/$F" "$KEY" '&&' [ "$(jget "$REQ/$F" 'd["project"]')" = "t/alpha" ]
+rm -rf "$REQ"
+printf 'x' | open_run "$PA" "$T/w/plain" >/dev/null; F=$(ls "$REQ" | head -1)
+checkall "--squad 없이: 예전과 같은 v=1·squad 키 없음·7줄 mac" [ "$(jget "$REQ/$F" 'd["v"]')" = 1 ] '&&' [ "$(jget "$REQ/$F" 'len(d)')" = 7 ] '&&' mac_ok "$REQ/$F" "$KEY"
+rm -rf "$REQ"
+for bs in "Dev" "-dev" "dev/x" "a_b" "$(printf 'a%.0s' $(seq 1 21))" "" ".." "dev dev" "한글"; do
+  reject "--squad 형식 오류('$bs')" 2 x "$T/w/plain" --squad "$bs"
+done
+reject "--squad 값 없음" 2 x "$T/w/plain" --squad
+printf 'x' | open_run "$PA" "$T/w/plain" --squad "$(printf 'a%.0s' $(seq 1 20))" >/dev/null; F=$(ls "$REQ" | head -1)
+check "slug 정확히 20자는 허용" [ -n "$F" ]
 rm -rf "$REQ"
 
 echo "== maru open: 크기·속도 제한·심볼릭 링크"
@@ -327,6 +362,45 @@ rm -f "$DATA/profile.json"; out=$(wrap MARU_CHILD_PROMPT_FILE="$PD/pen.txt.missi
 rm -f "$PD/pen.txt"
 
 # ============================================================== Part C: 보고(쓰기)
+echo "== maru-claude.sh: MARU_CHILD_SQUAD(하위 세션의 팀)"
+# 진짜 스쿼드 JSON(저장소의 내장 dev·research)을 쓴다: MARU_NO_SQUADS 를 주지 않는다. 가짜 claude 가 argv 와 MARU_CHILD_* 환경변수만 기록한다.
+wrapq() { rm -f "$STUB_OUT" "$STUB_OUT.env"; run_env STUB_OUT="$STUB_OUT" "$@" -- bash "$WR" ${WARGS[@]+"${WARGS[@]}"}; }
+has_agent() { argv_json | "$REAL_PY" -I -c 'import json,sys; a=json.load(sys.stdin); sys.exit(0 if "--agent" in a else 1)'; }
+agent_is() { argv_json | "$REAL_PY" -I -c 'import json,sys; a=json.load(sys.stdin); i=a.index("--agent"); sys.exit(0 if a[i+1]==sys.argv[1] and a.count("--agent")==1 else 1)' "$1"; }
+WARGS=(--resume 11111111-2222-3333-4444-555555555555)
+out=$(wrapq MARU_CHILD_SQUAD=dev); rc=$?
+checkall "유효한 slug + 그 스쿼드가 JSON 에 있음: --agents 와 --agent sq-dev-session, 받은 인자는 그대로" [ "$rc" -eq 0 ] '&&' agent_is sq-dev-session '&&' has "$(argv_json)" '"--agents"' '&&' has "$(argv_json)" '"--resume", "11111111-2222-3333-4444-555555555555"' '&&' hasnt "$out" "팀 없이"
+check "MARU_CHILD_SQUAD 는 claude 환경에 넘기지 않음" [ ! -s "$STUB_OUT.env" ]
+out=$(wrapq MARU_CHILD_SQUAD=research); check "research 도 같음" agent_is sq-research-session
+out=$(wrapq MARU_CHILD_SQUAD=ghost); rc=$?
+checkall "형식은 맞지만 JSON 에 없는 slug: --agent 없음, stderr 한 줄, 세션은 뜸" [ "$rc" -eq 0 ] '&&' not has_agent '&&' has "$out" "팀 없이 시작" '&&' [ ! -s "$STUB_OUT.env" ]
+for bad in "Dev" "-dev" "dev lead" "dev;x" "../dev" "$(printf 'a%.0s' $(seq 1 21))" 'dev"' "dev
+x"; do
+  out=$(wrapq MARU_CHILD_SQUAD="$bad"); rc=$?
+  checkall "잘못된 slug('$(printf '%s' "$bad" | tr '\n' '~')')는 무시: --agent 없음, 세션은 뜸, 환경 안 넘김" [ "$rc" -eq 0 ] '&&' [ -f "$STUB_OUT" ] '&&' not has_agent '&&' has "$out" "팀 없이 시작" '&&' [ ! -s "$STUB_OUT.env" ]
+done
+out=$(wrapq MARU_CHILD_SQUAD=); checkall "빈 값: 조용히(스텁 claude 가 실제로 실행됨, --agent 없음, 안내도 없음)" [ -f "$STUB_OUT" ] '&&' not has_agent '&&' [ -z "$out" ]
+out=$(wrapq); checkall "변수 없음: 스텁 claude 가 실제로 실행됨, --agent 없음, 안내 없음" [ -f "$STUB_OUT" ] '&&' not has_agent '&&' hasnt "$out" "팀 없이 시작"
+out=$(wrapq MARU_NO_SQUADS=1 MARU_CHILD_SQUAD=dev); checkall "스쿼드를 못 붙이는 환경(MARU_NO_SQUADS)이면 --agent 도 없음(안내만, 스텁 claude 는 실행됨)" [ -f "$STUB_OUT" ] '&&' not has_agent '&&' has "$out" "팀 없이 시작" '&&' [ ! -s "$STUB_OUT.env" ]
+# 개인 스쿼드가 검증에서 빠지면(제외) JSON 에 없으므로 붙지 않는다
+mkdir -p "$DATA/squads/broken"; printf 'x' > "$DATA/squads/broken/squad.md"
+out=$(wrapq MARU_CHILD_SQUAD=broken); check "검증에 실패해 제외된 스쿼드는 --agent 없음" not has_agent
+rm -rf "$DATA/squads/broken"
+# 다른 스쿼드의 팀원 이름(a 의 b-lead -> sq-a-b-lead)을 slug 로 줘도 붙지 않는다: 그런 역할 자체가 거부된다(squads.py), 래퍼는 squads.py 의 판정만 따른다
+mkdir -p "$DATA/squads/a"; printf -- '---\nname: A\ndescription: x\n---\n' > "$DATA/squads/a/squad.md"
+printf -- '---\ndescription: l\ntools: Agent, Read\n---\nL\n' > "$DATA/squads/a/lead.md"; printf -- '---\ndescription: m\ntools: Read\n---\nM\n' > "$DATA/squads/a/b-lead.md"
+out=$(wrapq MARU_CHILD_SQUAD=a-b); checkall "slug a-b: 다른 스쿼드의 b-lead 팀원과 겹쳐도 --agent 없음(스텁 실행됨)" [ -f "$STUB_OUT" ] '&&' not has_agent '&&' has "$out" "팀 없이 시작"
+out=$(wrapq MARU_CHILD_SQUAD=a); checkall "역할 b-lead 를 가진 스쿼드는 검증에서 제외돼 --agent 없음" not has_agent '&&' has "$out" "팀 없이 시작"
+rm -rf "$DATA/squads/a"
+# 래퍼가 쓰는 squads.py session-agent 의 직접 확인(출력은 sq-<slug>-session 하나)
+out=$(run_env -- "$REAL_PY" -I "$R/scripts/squads.py" session-agent dev); rc=$?; checkall "session-agent dev: sq-dev-session 출력, rc=0" [ "$rc" -eq 0 ] '&&' [ "$out" = sq-dev-session ]
+out=$(run_env -- "$REAL_PY" -I "$R/scripts/squads.py" session-agent ghost); rc=$?; checkall "session-agent ghost: 출력 없음, rc!=0" [ "$rc" -ne 0 ] '&&' [ -z "$out" ]
+# 초기 프롬프트와 함께여도 같은 규칙(프롬프트는 argv 맨 끝 -- 뒤)
+mkprompt 'hello' pq2.txt 2>/dev/null; out=$(wrapq MARU_CHILD_SQUAD=dev MARU_CHILD_PROMPT_FILE="$PD/pq2.txt")
+checkall "프롬프트 파일 + 팀: --agent 와 -- 프롬프트 둘 다" agent_is sq-dev-session '&&' has "$(argv_json)" '"--"' '&&' [ ! -s "$STUB_OUT.env" ]
+WARGS=()
+echo
+
 echo "== 자식 보고: journal-tick.sh 쓰기"
 TICK=$R/scripts/journal-tick.sh
 RP=$DATA/state/app/reports/$WSP
@@ -779,7 +853,9 @@ out=$(run_env -- "$MARU" hist design log --format=%s)
 checkall "골격 생성이 이력에 남음" has "$out" "design: t/gamma" '&&' has "$out" "design: t/eps"
 check "design 이력은 design.md 만 추적" sh -c '"$1" --git-dir="$2/design-history.git" ls-tree -r --name-only HEAD | grep -v "design.md$" | wc -l | tr -d " " | grep -q "^0$"' _ "$REAL_GIT" "$DATA"
 out=$(run_env -- "$MARU" hist design checkout main 2>&1); rc=$?; check "hist design 도 읽기 전용(checkout 거부)" [ "$rc" -eq 2 ]
-out=$(run_env -- "$MARU" hist log --format=%s 2>&1 | head -3); check "기존 hist(기억 이력)는 그대로 동작" sh -c '[ $? -eq 0 ]'
+# 이력이 비어 있는 시험 환경에서 hist log 는 git 이 128("커밋 없음")로 끝나는 것이 정상이라, 읽기 전용 하위 명령 중 빈 이력에서도 0 인 status 로 종료 코드를 확인한다
+out=$(run_env -- "$MARU" hist status 2>&1); rc=$?; check "기존 hist(기억 이력)는 그대로 동작(hist status 종료 코드 0)" [ "$rc" -eq 0 ]
+out=$(run_env -- "$MARU" hist log --format=%s 2>&1); rc=$?; checkall "빈 이력에서 hist log 는 허용 거부(rc 2)가 아니라 git 의 '커밋 없음'(128)으로 끝남" [ "$rc" -eq 128 ] '&&' has "$out" "does not have any commits"
 
 echo "== 설계 문서: 검증 설치(회고는 현재 상태·다음 할 일만 바꿀 수 있다)"
 INS() { MARU_DATA="$DATA" run_env MARU_LANG="${LANGX:-ko}" -- "$REAL_PY" -I "$R/scripts/designdoc.py" install "$@"; }

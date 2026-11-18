@@ -72,7 +72,8 @@ contextBridge.exposeInMainWorld('maru', {
   getReports: (id) => ipcRenderer.invoke('reports:get', String(id)),
   setWsCollapsed: (id, on) => ipcRenderer.invoke('ws:set-collapsed', String(id), on === true),
   // 동의 창 답: 한 번만 쓰는 토큰과 'open'|'cancel' 만. main 이 토큰·보낸 창을 다시 검증한다
-  answerChildConsent: (token, answer) => ipcRenderer.invoke('child:answer', String(token).slice(0, 64), answer === 'open' ? 'open' : 'cancel'),
+  answerChildConsent: (token, answer, squad) => ipcRenderer.invoke('child:answer', String(token).slice(0, 64), answer === 'open' ? 'open' : 'cancel', typeof squad === 'string' ? squad.slice(0, 40) : null), // squad: 고른 팀 slug 또는 null(팀 없이). main 이 설치된 목록과 다시 대조한다
+  requestSquadCreate: (text) => ipcRenderer.invoke('squads:request-create', typeof text === 'string' ? text.slice(0, 2000) : ''), // 글만 보낸다(작업 공간·경로는 main 이 정한다)
   resumePrevious: (id) => ipcRenderer.invoke('ws:resume-prev', String(id)),
   setResume: (on) => ipcRenderer.invoke('resume:set', on === true),
   getSettings: (recheckCalendar) => ipcRenderer.invoke('settings:get', recheckCalendar === true),

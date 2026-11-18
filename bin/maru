@@ -39,7 +39,7 @@ maru — 개인 에이전트 마루 런처
   maru log [reflect|dream]   로그 마지막 줄 보기(기본 reflect)
   maru project list    열린 프로젝트 목록 / maru project add <태그> <슬러그> <제목>: 프로젝트 등록(인자 정확히 3개)
   maru project doc <태그/슬러그> [--show]   설계 문서 경로·상태(골격인지) / 내용 보기 / maru project docs: 열린 프로젝트의 문서 현황
-  maru open <폴더> [--project <태그/슬러그>] [--title <제목>]   앱에 하위 세션 열기를 요청(앱 작업 공간 안에서만; 브리핑은 표준입력)
+  maru open <폴더> [--project <태그/슬러그>] [--title <제목>] [--squad <slug>]   앱에 하위 세션 열기를 요청(앱 작업 공간 안에서만; 브리핑은 표준입력; --squad 는 맡을 팀, 확인 창에서 사용자가 바꿀 수 있음)
   maru hist ...        기억 변경 이력(읽기 전용: log show diff status ls-files). maru hist design ...: 설계 문서 이력
   maru doctor          읽기 전용 점검
   maru help            이 도움말

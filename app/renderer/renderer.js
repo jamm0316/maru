@@ -54,7 +54,7 @@
   function trapTab(e) {
     const top = modals[modals.length - 1];
     if (!top) return;
-    const f = [...top.el.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"]), pre[tabindex]')].filter((n) => !n.disabled && !n.hidden && n.offsetParent !== null);
+    const f = [...top.el.querySelectorAll('button, input, textarea, [tabindex]:not([tabindex="-1"]), pre[tabindex]')].filter((n) => !n.disabled && !n.hidden && n.offsetParent !== null);
     if (!f.length) { e.preventDefault(); return; }
     const first = f[0]; const last = f[f.length - 1];
     if (e.shiftKey && (document.activeElement === first || !top.el.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
@@ -82,8 +82,25 @@
     const fit = new window.FitAddon.FitAddon();
     term.loadAddon(fit);
     term.options.disableStdin = modalOpen();
+    // 한글처럼 조합 중인 글자가 있을 때 Shift+Enter 를 누르면 줄바꿈이 조합 글자보다 먼저 나가 순서가 뒤집힌다.
+    // 조합 중이면 줄바꿈을 미뤄 두었다가, 조합이 끝나 글자가 pty 로 나간 직후에 보낸다(글자가 안 오면 짧은 대기 뒤에 보낸다).
+    // endedAt: 조합이 끝났지만 그 글자가 아직 pty 로 나가지 않은 동안의 시각(xterm 은 조합 글자를 한 박자 늦게 보낸다). 글자가 나가면 0.
+    let composing = false; let pendNl = null; let pendTimer = null; let nlAt = 0; let endedAt = 0;
+    const justEnded = () => endedAt !== 0 && Date.now() - endedAt < 200;
+    const flushNl = () => { if (pendNl === null) return; const s = pendNl; pendNl = null; clearTimeout(pendTimer); nlAt = Date.now(); if (!modalOpen()) window.maru.ptyWrite(id, s); };
+    host.addEventListener('compositionstart', () => { composing = true; endedAt = 0; }, true);
+    host.addEventListener('compositionend', () => { composing = false; endedAt = Date.now(); if (pendNl !== null) { clearTimeout(pendTimer); pendTimer = setTimeout(flushNl, 60); } }, true);
     term.attachCustomKeyEventHandler((e) => {
       if (modalOpen()) return false;
+      if (Lib.isShiftEnter(e)) {
+        if (composing || e.isComposing || e.keyCode === 229 || pendNl !== null || justEnded()) {
+          if (e.type === 'keydown' && pendNl === null && !e.repeat) { pendNl = '\x1b\r'; pendTimer = setTimeout(flushNl, composing ? 300 : 60); }
+          // 조합이 이미 끝난 뒤의 일반 Enter 는 기본 동작(입력란에 줄바꿈 삽입)을 막는다. 아직 조합 중이면 막지 않는다: 입력기가 조합을 확정해야 글자가 나온다
+          if (!composing && !e.isComposing && e.keyCode !== 229) e.preventDefault();
+          return false;
+        }
+        if (e.type === 'keydown' && Date.now() - nlAt < 50) { e.preventDefault(); return false; } // 확정 직후 같은 키가 한 번 더 오는 입력기: 줄바꿈 두 번 방지
+      }
       const alt = term.buffer.active.type === 'alternate'; // vim 등 alternate screen 에서는 Cmd+←/→ 를 그대로 둔다. 단 Claude Code(fullscreen 렌더러도 alternate screen)는 예외
       if (e.type === 'keydown' && e.key === 'Escape' && e.isTrusted && !e.isComposing && e.keyCode !== 229 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.repeat) window.maru.ptyEsc(id); // 중단 감지용 알림만(키는 그대로 pty 로 간다)
       const cc = !!(wsList.find((x) => x.id === id) || {}).cc;
@@ -92,7 +109,16 @@
       if (e.type === 'keydown') { e.preventDefault(); window.maru.ptyWrite(id, seq); }
       return false;
     });
-    term.onData((d) => { if (!modalOpen()) window.maru.ptyWrite(id, d); });
+    term.onData((d) => {
+      const send = (s) => { if (s && !modalOpen()) window.maru.ptyWrite(id, s); };
+      if (pendNl !== null && !composing) {
+        // 조합에서 나온 글자면 글자 → 줄바꿈 순서로(입력란에 끼어든 줄바꿈 문자는 뗀다). 조합과 무관한 입력이면 미뤄 둔 줄바꿈을 먼저 보낸다
+        if (justEnded()) { endedAt = 0; send(d.replace(/[\r\n]+$/, '')); flushNl(); } else { flushNl(); send(d); }
+        return;
+      }
+      if (!composing) endedAt = 0;
+      send(d);
+    });
     const e = { id, term, fit, host, gl: null, opened: false, started: false, starting: false, failed: false, noted: false };
     terms.set(id, e);
     return e;
@@ -240,7 +266,7 @@
       }
       const main = el('button', 'ws-main'); main.type = 'button';
       if (on) main.setAttribute('aria-current', 'true');
-      main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }));
+      main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }) + (w.team && w.team.name ? ' · ' + T('ws.team.aria', { name: w.team.name }) : ''));
       const c = el('span', 'col'); const num = nums.get('workspace:' + w.id);
       const l1 = el('span', 'l1'); const nm = el('span', 'nm'); nm.append(el('span', 'n', w.title));
       l1.append(nm, el('span', 'st ' + k, T('agent.' + k)));
@@ -248,6 +274,7 @@
       c.append(l1, l2);
       const extra = [];
       if (w.project) extra.push(el('span', 'chip', w.project)); // 프로젝트 이름표는 둘째 줄에(제목이 잘리지 않게)
+      if (w.team && typeof w.team.name === 'string' && w.team.name) { const tg = el('span', 'chip team', w.team.name); tg.title = T('ws.team.aria', { name: w.team.name }); extra.push(tg); } // 이 하위 세션은 그 팀의 총괄로 돌아간다
       if (w.loc) extra.push(el('span', 'loc', T('ws.loc', { name: w.loc }))); // 훅이 알려 준 현재 위치(다를 때만)
       if (Array.isArray(w.subs) && w.subs.length) extra.push(el('span', 'subs', T('ws.sub', { names: w.subs.join(', ') })));
       if (kid && Number.isFinite(w.reportAt)) extra.push(el('span', 'rep', T('ws.kid.rep', { time: fmtClock(w.reportAt) })));
@@ -329,10 +356,11 @@
   document.addEventListener('keydown', (e) => { if (repOpenId && e.key === 'Escape' && !modalOpen()) { e.preventDefault(); closeReports(true); } });
   // ---- 하위 세션 동의 창: main 이 상태를 가진다(토큰은 한 번만 유효). 폴더·제목·맡길 내용 전체를 textContent 로만 보여 준다 ----
   let consentTok = null;
+  let consentAnswering = null; // 답을 main 에 보냈고 아직 돌아오지 않은 토큰
   function syncConsent(v) {
     const dlg = $('dlg-consent');
     if (!v || typeof v.token !== 'string' || typeof v.folder !== 'string' || typeof v.brief !== 'string') { if (consentTok) { consentTok = null; closeModal(dlg); } return; }
-    if (consentTok === v.token) return;
+    if (consentTok === v.token || consentAnswering === v.token) return; // 방금 답한 토큰은 IPC 가 돌아올 때까지 다시 열지 않는다(main 이 팀 목록을 다시 읽는 사이 ws:changed 가 와도)
     consentTok = v.token;
     $('cs-title').textContent = T('consent.title');
     $('cs-folder-k').textContent = T('consent.folder'); $('cs-folder').textContent = v.folder;
@@ -340,6 +368,7 @@
     $('cs-brief-k').textContent = T('consent.brief'); $('cs-brief').textContent = v.brief; // 자르지 않는다(검증이 이미 4000자로 제한했고 전달하는 것과 같은 문자열)
     $('cs-go').textContent = T(v.paste === true ? 'consent.paste' : 'consent.go');
     $('cs-cancel').textContent = T('consent.cancel'); $('cs-ok').textContent = T('consent.open');
+    paintTeams(v);
     $('cs-count').textContent = T('consent.count', { n: Number.isInteger(v.chars) ? v.chars : [...v.brief].length, m: Number.isInteger(v.lines) ? v.lines : v.brief.split('\n').length });
     const box = $('cs-brief'); box.scrollTop = 0;
     $('cs-ok').disabled = true; $('cs-scroll').textContent = '';
@@ -349,14 +378,77 @@
     openModal(dlg, $('cs-cancel'), { closable: () => true, close: () => answerConsent('cancel') }); // 처음 포커스는 취소(실수로 Enter 를 눌러도 열리지 않는다)
     sync(); // 모달이 보인 뒤에 크기를 잰다
   }
+  // 맡을 팀: "팀 없이" + main 이 보낸 설치된 스쿼드(이름은 textContent 로만). 고른 값은 승인과 함께 보내고 main 이 설치된 목록과 다시 대조한다
+  let consentSquad = null;
+  function paintTeams(v) {
+    const box = $('cs-teams'); const row = $('cs-team'); box.replaceChildren();
+    const teams = Array.isArray(v.squads) ? v.squads.filter((q) => q && typeof q.slug === 'string' && SQUAD_SLUG.test(q.slug) && typeof q.name === 'string') : [];
+    consentSquad = typeof v.squad === 'string' && teams.some((q) => q.slug === v.squad) ? v.squad : null;
+    const none = teams.length === 0;
+    const asked = typeof v.squadAsked === 'string' && SQUAD_SLUG.test(v.squadAsked);
+    // 고를 팀이 없는 경우의 안내는 "다시 골라 주세요" 가 아니라 팀 없이 열린다는 것을 말한다(래퍼를 못 쓰는 환경이면 그 이유로)
+    const note = none && v.paste === true && asked ? T('consent.team.nowrapper')
+      : none && v.squadChanged === true ? T('consent.team.gone')
+      : v.squadMissing === true && asked ? T('consent.team.missing', { slug: v.squadAsked })
+      : v.squadChanged === true ? T('consent.team.changed') : '';
+    $('cs-team-note').textContent = note;
+    row.hidden = none && !note; // 고를 팀이 없어도 안내(요청한 팀이 없다·목록이 바뀌었다)가 있으면 줄은 보인다: 팀 없이 열린다는 것을 알려야 한다
+    for (const id of ['cs-team-k', 'cs-teams', 'cs-team-hint']) $(id).hidden = none; // 목록 없이 안내만 보일 때는 제목·목록·설명을 숨긴다
+    if (none) { consentSquad = null; return; }
+    $('cs-team-k').textContent = T('consent.team'); $('cs-team-hint').textContent = T('consent.team.hint');
+    const opts = [{ slug: null, name: T('consent.team.none'), personal: false }, ...teams];
+    for (const q of opts) {
+      const lab = el('label', 'cs-opt' + (q.slug === consentSquad ? ' on' : ''));
+      const r = el('input'); r.type = 'radio'; r.name = 'cs-team'; r.checked = q.slug === consentSquad;
+      r.addEventListener('change', () => { consentSquad = q.slug; for (const n of box.children) n.classList.toggle('on', n === lab); });
+      lab.append(r, el('span', 'nm', q.name));
+      if (q.personal) lab.append(el('span', 'tag', T('squad.personal')));
+      if (q.slug !== null && q.slug === v.squad) lab.append(el('span', 'tag sug', T('consent.team.suggested')));
+      box.append(lab);
+    }
+  }
   async function answerConsent(ans) {
     const tok = consentTok; if (!tok) return;
-    consentTok = null; closeModal($('dlg-consent'));
-    try { await window.maru.answerChildConsent(tok, ans); } catch (x) { /* main 이 만료시킨다 */ }
+    const sq = ans === 'open' ? consentSquad : null;
+    consentTok = null; consentAnswering = tok; closeModal($('dlg-consent'));
+    try { await window.maru.answerChildConsent(tok, ans, sq); } catch (x) { /* main 이 만료시킨다 */ }
+    consentAnswering = null; // 돌아온 뒤에야 같은 토큰의 창(팀 목록이 바뀌어 다시 고르게 하는 경우)이 다시 열릴 수 있다
     syncWs();
   }
   $('cs-ok').addEventListener('click', () => { if (!$('cs-ok').disabled) answerConsent('open'); });
   $('cs-cancel').addEventListener('click', () => answerConsent('cancel'));
+  // ---- 스쿼드 만들기: 글을 받아 main 에 넘기면 main 이 정리·검사해 마루 입력줄에 채운다(파일은 쓰지 않는다). Enter 는 사용자가 누른다 ----
+  let snBusy = false;
+  const SN_MAX = 300;
+  function snCount() { const n = [...$('sn-text').value].length; $('sn-count').textContent = T('squadnew.count', { n, m: SN_MAX }); }
+  function openSquadNew() {
+    snBusy = false;
+    $('sn-title').textContent = T('squadnew.title'); $('sn-label').textContent = T('squadnew.label'); $('sn-hint').textContent = T('squadnew.hint'); $('sn-ok').textContent = T('squadnew.ok');
+    $('sn-text').value = ''; $('sn-err').textContent = ''; $('sn-ok').disabled = false; snCount();
+    const chips = $('sn-chips'); chips.replaceChildren(); chips.setAttribute('aria-label', T('squadnew.ex.aria'));
+    for (const k of ['squadnew.ex1', 'squadnew.ex2', 'squadnew.ex3']) {
+      const c = el('button', 'sn-chip', T(k)); c.type = 'button';
+      c.addEventListener('click', () => { $('sn-text').value = T(k); snCount(); $('sn-err').textContent = ''; $('sn-text').focus(); });
+      chips.append(c);
+    }
+    openModal($('dlg-squadnew'), $('sn-text'), { closable: () => !snBusy });
+  }
+  async function submitSquadNew() {
+    if (snBusy) return;
+    const text = $('sn-text').value;
+    if (![...text.trim()].length) { $('sn-err').textContent = T('squadnew.err.invalid'); $('sn-text').focus(); return; }
+    snBusy = true; $('sn-ok').disabled = true; $('sn-err').textContent = '';
+    let res = null; try { res = await window.maru.requestSquadCreate(text); } catch (x) { res = null; }
+    snBusy = false; $('sn-ok').disabled = false;
+    if (res && res.ok) { closeModal($('dlg-squadnew')); await syncWs(); focusTerm(); flashNote(T('squadnew.note.ok')); return; } // 닫으면 모달 앞의 포커스로 돌아가므로 그 뒤에 터미널로 옮긴다
+    const reason = res && typeof res.reason === 'string' ? res.reason : 'fail';
+    $('sn-err').textContent = T(['invalid', 'no-maru', 'not-ready', 'agent-busy', 'busy'].includes(reason) ? 'squadnew.err.' + reason : reason === 'no-term' || reason === 'shell' ? 'squadnew.err.not-ready' : 'squadnew.err.fail');
+  }
+  $('squad-add').addEventListener('click', openSquadNew);
+  $('sn-ok').addEventListener('click', submitSquadNew);
+  $('sn-cancel').addEventListener('click', () => { if (!snBusy) closeModal($('dlg-squadnew')); });
+  $('sn-text').addEventListener('input', snCount);
+  $('sn-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitSquadNew(); } }); // Enter 는 줄바꿈(어차피 공백으로 바뀐다), 제출은 Cmd/Ctrl+Enter
   async function newWs() { try { await window.maru.newWorkspace(); } catch (x) { /* 무시 */ } syncWs(); }
   $('ws-add').addEventListener('click', newWs);
   $('term-empty-new').addEventListener('click', newWs);
@@ -1974,6 +2066,7 @@
     else if (init && init.uiOpen === 'menu') openMenu();
     else if (init && init.uiOpen === 'settings') openSettings();
     else if (init && init.uiOpen === 'update') openUpdate();
+    else if (init && init.uiOpen === 'squadnew') openSquadNew(); // 시험 전용(MARU_APP_UI=squadnew): 화면 확인용
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
     syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') showDay(init.uiDay, 'title'); if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);

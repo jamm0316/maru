@@ -141,10 +141,10 @@ SQ() { run_env "$@" -- "$REAL_PY" -I "$REPO/scripts/squads.py" "${SQARGS[@]}"; }
 SQARGS=(json); JEN=$(SQ MARU_LANG=en); JKO=$(SQ MARU_LANG=ko)
 checkall "en: 영어 머리말·영어 총괄 본문, 한국어 머리말 없음" has "$JEN" 'Squad fixed rules' '&&' has "$JEN" 'End of fixed rules' '&&' has "$JEN" 'You are the development squad lead' '&&' hasnt "$JEN" '스쿼드 고정 규칙' '&&' hasnt "$JEN" '너는 개발 스쿼드 총괄이다'
 checkall "ko: 한국어 머리말·본문 그대로, 영어 머리말 없음" has "$JKO" '스쿼드 고정 규칙' '&&' has "$JKO" '너는 개발 스쿼드 총괄이다' '&&' hasnt "$JKO" 'Squad fixed rules'
-check "에이전트 이름 집합이 ko/en 에서 동일" "$REAL_PY" -I -c '
+check "에이전트 이름 집합이 ko/en 에서 동일(총괄·팀원 7 + 세션 진입점 2)" "$REAL_PY" -I -c '
 import json, sys
 a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2])
-sys.exit(0 if sorted(a) == sorted(b) and len(a) == 7 else 1)' "$JEN" "$JKO"
+sys.exit(0 if sorted(a) == sorted(b) and len(a) == 9 and sum(k.endswith("-session") for k in a) == 2 else 1)' "$JEN" "$JKO"
 check "en JSON 도 96KB 이하" [ "${#JEN}" -lt 98304 ]
 # 영어 변형이 없는 slug 는 한국어 내장을 그대로 쓴다
 mkdir -p "$T/b/onlyko" "$T/b-en/dev"
@@ -167,7 +167,7 @@ check "meta(en)는 json(en)과 같은 스쿼드 집합" "$REAL_PY" -I -c '
 import json, sys
 m = json.loads(sys.argv[1]); j = json.loads(sys.argv[2])
 agents = sorted(a for s in m["squads"] for a in [s["lead"]["agent"]] + [x["agent"] for x in s["members"]])
-sys.exit(0 if agents == sorted(j) and not m["skipped"] else 1)' "$M" "$JEN"
+sys.exit(0 if agents == sorted(k for k in j if not k.endswith("-session")) and not m["skipped"] else 1)' "$M" "$JEN"
 SQARGS=(check --json "$REPO/squads-en/dev"); CJ=$(SQ MARU_LANG=en)
 check "check --json(영어 내장): ok, existsBuiltin" "$REAL_PY" -I -c '
 import json, sys

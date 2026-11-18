@@ -105,6 +105,9 @@ t('keyToSeq 단축키', () => {
   assert.strictEqual(L.isNewlineKey({ type: 'keypress', key: 'Enter', shiftKey: true }), true);
   assert.strictEqual(L.isNewlineKey({ type: 'keypress', key: 'Enter' }), false);
   assert.strictEqual(L.isNewlineKey({ type: 'keydown', key: 'Enter', shiftKey: true, isComposing: true }), false);
+  assert.strictEqual(L.isShiftEnter({ type: 'keydown', key: 'Enter', shiftKey: true, isComposing: true, keyCode: 229 }), true); // 조합 중에도 참(렌더러가 줄바꿈을 미룬다)
+  assert.strictEqual(L.isShiftEnter({ type: 'keydown', key: 'Enter' }), false);
+  assert.strictEqual(L.isShiftEnter({ type: 'keydown', key: 'Enter', shiftKey: true, metaKey: true }), false);
 });
 t('keyToSeq Cmd+←/→: 줄 맨 앞/끝', () => {
   const k = (key, o) => L.keyToSeq({ type: 'keydown', key, ...o });
@@ -1486,6 +1489,17 @@ t('squadView·matchSubs·squadOpen: 모델 상속, 활동 매칭, 임시 줄, �
   assert.deepStrictEqual([...m.counts], [['worker', 2], ['sq-dev-coder', 1], ['sq-ghost-lead', 3]]); assert.deepStrictEqual(m.extra, [{ type: 'sq-ghost-lead', count: 3 }]);
   assert.strictEqual(L.squadOpen(undefined, false), false); assert.strictEqual(L.squadOpen(undefined, true), true);
   assert.strictEqual(L.squadOpen(false, true), false); assert.strictEqual(L.squadOpen(true, false), true); // 사용자가 정한 것을 존중
+});
+t('parseSquadMeta·matchSubs·teamChip: session 예약 역할·-lead/-session 끝 역할 거부, 세션 진입 에이전트는 임시 줄이 아님, 없는 팀은 칩 없음', () => {
+  const mem = (role) => ({ role, agent: 'sq-dev-' + role, model: 'haiku' });
+  const m = L.parseSquadMeta(JSON.stringify({ squads: [SQ({ members: [mem('ok'), mem('session'), mem('b-lead'), mem('x-session'), mem('lead')] })] }));
+  assert.deepStrictEqual(m[0].members.map((x) => x.role), ['ok']); // 표시용 팀원 줄에 진입점이 끼지 않는다
+  const r = L.matchSubs([{ type: 'sq-dev-session', count: 1 }, { type: 'sq-dev-ok', count: 2 }, { type: 'sq-ghost-session', count: 1 }, { type: 'sq-ghost-x', count: 1 }], ['sq-dev-ok']);
+  assert.deepStrictEqual([...r.counts], [['sq-dev-ok', 2], ['sq-ghost-x', 1]]); assert.deepStrictEqual(r.extra, [{ type: 'sq-ghost-x', count: 1 }]);
+  const list = L.parseSquadMeta(JSON.stringify({ squads: [SQ()] }));
+  assert.deepStrictEqual(L.teamChip('dev', list), { slug: 'dev', name: '개발' });
+  for (const bad of ['ghost', '', null, undefined, 5, 'Dev', 'dev ']) assert.strictEqual(L.teamChip(bad, list), null, String(bad));
+  assert.strictEqual(L.teamChip('dev', []), null); assert.strictEqual(L.teamChip('dev', null), null);
 });
 t('claudeLaunchCommand: 래퍼가 있으면 인용해 exec, 없거나 이상하면 claude', () => {
   const sid = 'abcd1234-aaaa';
@@ -2986,7 +3000,8 @@ t('main 의 자식 프로세스 환경은 모두 sanitizeHostEnv 를 거친다(p
 const CH_NOW = 1.8e12; const CH_FROM = 'sess-maru-0001'; const CH_OK_NAME = CH_NOW - 1000 + '-0a1b2c3d.json';
 const crypto = require('crypto'); const CH_KEY = 'ab'.repeat(32);
 // mac 은 L.childMac 이 아니라 명세대로 독립 계산한다: HMAC-SHA256(키 32바이트, "v\nfrom\ncwd\ntitle\nproject|''\nat\nsha256hex(prompt)")
-const chMac = (r, key = CH_KEY) => crypto.createHmac('sha256', Buffer.from(key, 'hex')).update([String(r.v), r.from, r.cwd, r.title, r.project || '', String(r.at), crypto.createHash('sha256').update(r.prompt, 'utf8').digest('hex')].join('\n'), 'utf8').digest('hex');
+// v=2(스쿼드 지정)면 끝에 squad 줄이 하나 더(8줄)
+const chMac = (r, key = CH_KEY) => crypto.createHmac('sha256', Buffer.from(key, 'hex')).update([String(r.v), r.from, r.cwd, r.title, r.project || '', String(r.at), crypto.createHash('sha256').update(r.prompt, 'utf8').digest('hex'), ...(r.v === 2 ? [r.squad] : [])].join('\n'), 'utf8').digest('hex');
 const chReq = (o = {}, key = CH_KEY) => { const r = { v: 1, from: CH_FROM, cwd: '/Users/x/work/blog', title: '블로그 정리', project: null, prompt: '설계 문서를 읽고\n초안을 다듬어 주세요.', at: CH_NOW - 1000, ...o }; return 'mac' in o ? r : { ...r, mac: chMac(r, key) }; };
 const chFacts = () => [
   { id: 'ws-maru', sessionId: CH_FROM, hasTerm: true, proc: 'node', isRoot: true, parentId: null, origin: null, key: CH_KEY },
@@ -3038,7 +3053,7 @@ t('decideChildRequest: 거부 경로마다 이유(이름·크기·오래됨·미
   assert.strictEqual(why({ mtimeMs: CH_NOW - 60001 }), 'stale'); assert.strictEqual(why({}, chReq({ at: CH_NOW - 60001 })), 'stale'); assert.strictEqual(why({}, chReq({ at: CH_NOW + 2001 })), 'stale'); assert.strictEqual(why({ mtimeMs: CH_NOW + 2001 }), 'stale'); // 미래 시각(F1)
   assert.strictEqual(why({ mtimeMs: CH_NOW - 60000 }), 'ok'); assert.strictEqual(why({ mtimeMs: CH_NOW + 2000 }), 'ok'); assert.strictEqual(why({}, chReq({ at: CH_NOW + 2000 })), 'ok'); // 경계
   assert.strictEqual(why({ text: '{' }), 'json'); assert.strictEqual(why({ text: '[]' }), 'shape'); assert.strictEqual(why({ text: 'null' }), 'shape'); assert.strictEqual(why({ text: '"x"' }), 'shape');
-  assert.strictEqual(why({}, chReq({ v: 2 })), 'version'); assert.strictEqual(why({}, chReq({ v: '1' })), 'version');
+  assert.strictEqual(why({}, chReq({ v: 3 })), 'version'); assert.strictEqual(why({}, chReq({ v: '1' })), 'version');
   assert.strictEqual(why({}, chReq({ from: 'nobody-0000001' })), 'from'); assert.strictEqual(why({}, chReq({ from: 5 })), 'shape'); assert.strictEqual(why({}, chReq({ from: 'sess-dead-001' })), 'from'); // pty 없는 세션
   assert.strictEqual(why({}, chReq({ from: 'sess-shell-01' })), 'not-claude'); // 셸만 떠 있다
   assert.strictEqual(why({}, chReq({ from: 'sess-kid-0001' })), 'child'); assert.strictEqual(why({}, chReq({ from: 'sess-exkid-01' })), 'child');
@@ -3074,7 +3089,87 @@ t('동의 창 토큰: 한 번만 쓰고, 다른 토큰·만료·다른 답은 in
   assert.strictEqual(L.consentAnswer(p, 'ab12cd34ab12cd34ab12cd34ab12cd35', 'open', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer(p, 'short', 'open', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer(p, 5, 'open', 500).result, 'invalid');
   assert.strictEqual(L.consentAnswer(p, p.token, 'yes', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer(null, p.token, 'open', 500).result, 'invalid'); assert.strictEqual(L.consentAnswer({}, p.token, 'open', 500).result, 'invalid');
   const long = '가\n'.repeat(1500); const v = L.consentView({ token: 't', folder: '/a/very/long/path', project: 'a/b', title: '제목', prompt: long, paste: true });
-  assert.strictEqual(v.brief, long.trim()); assert.strictEqual(v.paste, true); assert.deepStrictEqual(Object.keys(v).sort(), ['brief', 'chars', 'folder', 'lines', 'paste', 'project', 'title', 'token']); assert.strictEqual(v.chars, [...long.trim()].length); assert.strictEqual(v.lines, 1500); assert.strictEqual(L.consentView({ token: 't', folder: '/a', title: 'x', prompt: 'p' }).project, null);
+  assert.strictEqual(v.brief, long.trim()); assert.strictEqual(v.paste, true); assert.deepStrictEqual(Object.keys(v).sort(), ['brief', 'chars', 'folder', 'lines', 'paste', 'project', 'squad', 'squadAsked', 'squadMissing', 'squads', 'title', 'token']); assert.strictEqual(v.chars, [...long.trim()].length); assert.strictEqual(v.lines, 1500); assert.strictEqual(L.consentView({ token: 't', folder: '/a', title: 'x', prompt: 'p' }).project, null);
+});
+// ---- 하위 세션의 팀(스쿼드) ----
+const SQ_LIST = L.parseSquadMeta(JSON.stringify({ squads: [
+  { slug: 'dev', name: 'Dev', description: '', source: 'builtin', lead: { agent: 'sq-dev-lead', model: 'sonnet' }, members: [{ role: 'builder', agent: 'sq-dev-builder', model: 'sonnet' }] },
+  { slug: 'notes', name: 'Notes', description: '', source: 'personal', lead: { agent: 'sq-notes-lead', model: 'inherit' }, members: [{ role: 'editor', agent: 'sq-notes-editor', model: 'sonnet' }] },
+] }));
+t('cleanSquadAsk: 문자열만, 제어·개행은 공백으로 모아 1~300자, 비면·비밀처럼 보이면 거부', () => {
+  assert.strictEqual(L.cleanSquadAsk('  여행 일정을\n조사하는\t\u0007 팀  '), '여행 일정을 조사하는 팀');
+  assert.strictEqual(L.cleanSquadAsk('a\u202Eb\u200Bc\r\nd'), 'a b c d');
+  assert.strictEqual(L.cleanSquadAsk('가'.repeat(300)), '가'.repeat(300)); assert.strictEqual(L.cleanSquadAsk('가'.repeat(301)), '');
+  assert.strictEqual(L.cleanSquadAsk('😀'.repeat(300)), '😀'.repeat(300)); assert.strictEqual(L.cleanSquadAsk('😀'.repeat(301)), ''); // 코드 포인트 기준
+  for (const bad of ['', '   ', '\n\t\u0001', 'sk-abcdefghijklmnopqrstuvwx', 'token ' + 'a1'.repeat(20), 5, null, undefined, {}, ['a']]) assert.strictEqual(L.cleanSquadAsk(bad), '', String(bad));
+  assert.ok(!/[\r\n\u0000-\u001f]/.test(L.cleanSquadAsk('a\nb\rc\u0000d\u001be')));
+  assert.strictEqual(L.cleanSquadAsk('a\n\n\n   b'), 'a b'); // 공백 하나로
+});
+t('child 요청: squad 없는 v=1 은 예전 그대로, squad 가 있는 v=2 는 서명에 들어가고 값·버전을 바꾸면 거부', () => {
+  const why = (r, o = {}) => { const d = L.decideChildRequest(chCtx(o, r)); return d.ok ? 'ok' : d.reason; };
+  const old = L.decideChildRequest(chCtx()); assert.strictEqual(old.ok, true); assert.strictEqual(old.req.squad, null); // 옛 요청: 그대로 통과
+  const v2 = chReq({ v: 2, squad: 'dev' }); const d = L.decideChildRequest(chCtx({}, v2));
+  assert.strictEqual(d.ok, true); assert.strictEqual(d.req.squad, 'dev'); assert.strictEqual(L.childMac(CH_KEY, { ...JSON.parse(JSON.stringify(v2)), project: null }), v2.mac); // 구현과 독립 계산이 같다
+  assert.strictEqual(L.decideChildRequest(chCtx({}, chReq({ v: 2, squad: 'dev', project: 'blog/draft' }))).req.squad, 'dev');
+  const raw = JSON.parse(JSON.stringify(v2));
+  assert.strictEqual(why({ ...raw, squad: 'notes' }), 'auth'); // squad 를 바꾸면 mac 이 맞지 않는다
+  const noSq = { ...raw }; delete noSq.squad; assert.strictEqual(why(noSq), 'shape'); // v=2 인데 squad 가 없다
+  assert.strictEqual(why({ ...raw, v: 1 }), 'shape'); // v=1 에 squad 가 붙어 있다(서명 밖의 값)
+  const dn = { ...raw }; delete dn.squad; dn.v = 1; assert.strictEqual(why(dn), 'auth'); // squad 를 떼고 v 를 내려도 mac 이 맞지 않는다
+  assert.strictEqual(why({ ...raw, v: 3 }), 'version');
+  for (const bad of ['Dev', '-x', 'a'.repeat(21), '', 'a b', 'a/b', '한글', null, 5, ['dev'], {}]) assert.strictEqual(why(chReq({ v: 2, squad: bad })), 'shape', String(bad)); // 서명이 맞아도 slug 형식이 틀리면 거부
+  assert.strictEqual(why(chReq({ v: 2, squad: 'a'.repeat(20) })), 'ok'); assert.strictEqual(why(chReq({ v: 2, squad: '0-9' })), 'ok');
+});
+t('동의 창 팀 고르기: 요청한 팀이 설치돼 있으면 미리 고름, 없으면 팀 없이 + 안내 표지, 목록은 slug·이름·개인 여부만', () => {
+  const a = L.consentView({ token: 't', folder: '/a', title: 'x', prompt: 'p', squads: SQ_LIST, squad: 'notes' });
+  assert.deepStrictEqual(a.squads, [{ slug: 'dev', name: 'Dev', personal: false }, { slug: 'notes', name: 'Notes', personal: true }]); assert.strictEqual(a.squad, 'notes'); assert.strictEqual(a.squadMissing, false);
+  const b = L.consentView({ token: 't', folder: '/a', title: 'x', prompt: 'p', squads: SQ_LIST, squad: 'ghost' });
+  assert.strictEqual(b.squad, null); assert.strictEqual(b.squadMissing, true); assert.strictEqual(b.squadAsked, 'ghost');
+  const c = L.consentView({ token: 't', folder: '/a', title: 'x', prompt: 'p', squads: SQ_LIST }); assert.strictEqual(c.squad, null); assert.strictEqual(c.squadMissing, false);
+  const e = L.consentView({ token: 't', folder: '/a', title: 'x', prompt: 'p', squads: 'x', squad: 'BAD' }); assert.deepStrictEqual(e.squads, []); assert.strictEqual(e.squadMissing, false); // 형식이 틀린 요청은 없는 것과 같다
+  assert.deepStrictEqual(L.squadChoices([null, { slug: 'Bad', name: 'x' }, { slug: 'ok', name: '' }, { slug: 'ok', name: 'Ok', personal: true }]), [{ slug: 'ok', name: 'Ok', personal: true }]);
+});
+t('동의 답의 팀 검증: 팀 없이(null/undefined)는 통과, 설치된 slug 만 통과, 모르는 slug·형식 오류·다른 타입은 거부', () => {
+  assert.deepStrictEqual(L.consentChoice(SQ_LIST, null), { ok: true, squad: null }); assert.deepStrictEqual(L.consentChoice(SQ_LIST, undefined), { ok: true, squad: null });
+  assert.deepStrictEqual(L.consentChoice([], null), { ok: true, squad: null }); // 목록을 못 읽어도 "팀 없이" 는 된다
+  assert.deepStrictEqual(L.consentChoice(SQ_LIST, 'dev'), { ok: true, squad: 'dev' }); assert.deepStrictEqual(L.consentChoice(SQ_LIST, 'notes'), { ok: true, squad: 'notes' });
+  for (const bad of ['ghost', 'Dev', '', 'dev ', 'dev\n', '../dev', 'sq-dev-lead', 5, {}, ['dev'], true]) assert.deepStrictEqual(L.consentChoice(SQ_LIST, bad), { ok: false }, String(bad));
+  assert.deepStrictEqual(L.consentChoice([], 'dev'), { ok: false }); assert.deepStrictEqual(L.consentChoice(null, 'dev'), { ok: false }); // 목록에 없으면(읽기 실패 포함) 거부
+});
+t('MARU_CHILD_SQUAD: 유효한 slug 일 때만 환경에 넣고, 물려받은 값은 항상 지운다', () => {
+  const host = { PATH: '/usr/bin', MARU_CHILD_SQUAD: 'inherited' };
+  const kid = L.ptyEnv({ host, ws: 'abcd0123abcd0123', parentWs: '0123456789abcdef', squad: 'dev' }); assert.strictEqual(kid.MARU_CHILD_SQUAD, 'dev');
+  assert.ok(!('MARU_CHILD_SQUAD' in L.ptyEnv({ host, ws: 'abcd0123abcd0123', parentWs: '0123456789abcdef' }))); // 물려받은 값은 지워지고 새로 넣지 않는다
+  for (const bad of ['Dev', '', 'a'.repeat(21), 'a b', '-a', 'a;b', 5, null, {}]) assert.ok(!('MARU_CHILD_SQUAD' in L.ptyEnv({ host: {}, ws: 'abcd0123abcd0123', parentWs: '0123456789abcdef', squad: bad })), String(bad));
+  assert.deepStrictEqual(L.childEnvVars({ ws: 'abcd0123abcd0123', squad: 'my-team' }), { MARU_WS: 'abcd0123abcd0123', MARU_CHILD_SQUAD: 'my-team' }); assert.deepStrictEqual(L.childEnvVars({ ws: 'abcd0123abcd0123' }), { MARU_WS: 'abcd0123abcd0123' });
+});
+t('작업 공간 기록의 squad: 하위 세션만 저장·복원, 형식이 틀리면 값만 버림, 최상위·옛 파일은 그대로', () => {
+  const P = '0123456789abcdef'; const C = 'fedcba9876543210';
+  const items = [{ id: P, cwd: '/m', title: 'M', squad: 'dev' }, { id: C, cwd: '/k', title: 'K', parentId: P, origin: 'child', squad: 'notes' }, { id: 'aaaaaaaaaaaaaaaa', cwd: '/x', title: 'X', origin: 'child', squad: 'dev' }, { id: 'bbbbbbbbbbbbbbbb', cwd: '/y', title: 'Y', origin: 'child', squad: 'Bad Slug' }];
+  const sv = L.workspacesToSave(items, P);
+  assert.ok(!('squad' in sv.list[0])); // 마루(최상위·하위 아님)에는 쓰지 않는다
+  assert.strictEqual(sv.list[1].squad, 'notes'); assert.strictEqual(sv.list[2].squad, 'dev'); assert.ok(!('squad' in sv.list[3]));
+  const back = L.normalizeWorkspaces(JSON.parse(JSON.stringify({ workspaces: sv.list, active: 0 })), { exists: () => true });
+  assert.strictEqual(back.list[1].squad, 'notes'); assert.strictEqual(back.list[1].parentId, P); assert.strictEqual(back.list[2].squad, 'dev'); assert.ok(!('squad' in back.list[0]) && !('squad' in back.list[3]));
+  const r = L.normalizeWorkspaces({ workspaces: [{ cwd: '/a', origin: 'child', squad: 'x'.repeat(21) }, { cwd: '/b', origin: 'child', squad: 5 }, { cwd: '/c', squad: 'dev' }, { cwd: '/d', origin: 'child', squad: 'ok-1' }] }, { exists: () => true });
+  assert.deepStrictEqual(r.list.map((x) => x.squad), [undefined, undefined, undefined, 'ok-1']); // 잘못된 값·하위 세션이 아닌 항목의 값은 버리고 작업 공간은 남긴다
+  assert.deepStrictEqual(L.normalizeWorkspaces({ workspaces: [{ cwd: '/h/a', origin: 'child' }] }, { exists: () => true }).list, [{ cwd: '/h/a', title: 'a', origin: 'child' }]); // 예전 하위 세션 기록
+});
+t('팀 기능의 main·preload 배선(원문 검사): 보낸 이를 확인하고 글만 받는다, 답은 그 순간 읽은 목록으로 다시 검증, 시험용 스위치는 패키징 빌드에서 꺼진다', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  const h = main.slice(main.indexOf("ipcMain.handle('squads:request-create'"), main.indexOf("ipcMain.handle('squads:request-create'") + 1800);
+  assert.ok(/ipcMain\.handle\('squads:request-create', \(e, text\) => \{\n  if \(!fromMain\(e\)\)/.test(main)); // 렌더러는 글만 준다(id·경로 인자 없음)
+  assert.ok(/L\.cleanSquadAsk\(text\)/.test(h) && /L\.maruEligible\(w\) && isMaruWs\(w\)/.test(h) && /!w\.bracketed/.test(h) && /writePrompt\(w, line\)/.test(h) && !/\\r|\\n.*term\.write/.test(h)); // 마루 세션만, 준비 조건, Enter 는 보내지 않는다
+  assert.ok(!/fs\.(write|mkdir|copy)/.test(h)); // 스쿼드 파일을 쓰지 않는다
+  assert.ok(/requestSquadCreate: \(text\) => ipcRenderer\.invoke\('squads:request-create', typeof text === 'string'/.test(pre));
+  const a = main.slice(main.indexOf("ipcMain.handle('child:answer'"), main.indexOf("ipcMain.handle('child:answer'") + 1800);
+  assert.ok(/fromMain\(e\)/.test(a) && /readSquadsNow\(\)/.test(a) && /L\.consentChoice\(/.test(a) && /finishConsent\(c, 'open', fresh\.squad\)/.test(a));
+  assert.ok(/const TEST_UI = !app\.isPackaged && \[[^\]]*'squadnew'/.test(main) && /let fakeConsent = !app\.isPackaged && TEST_UI === 'hierarchy'/.test(main));
+  assert.ok(/squad: w\.origin === 'child' \? w\.squad : null/.test(main) && /launchChild\(par, d\.req, d\.real, item\.name, ans\.squad\)/.test(main));
+  assert.ok(/textContent/.test(rd) && !/innerHTML/.test(rd.slice(rd.indexOf('function paintTeams'), rd.indexOf('async function answerConsent'))));
+  for (const k of ['squad.add.aria', 'squadnew.title', 'squadnew.label', 'squadnew.hint', 'squadnew.ok', 'squadnew.askLine', 'consent.team', 'consent.team.none', 'consent.team.suggested', 'consent.team.hint', 'ws.team.aria']) for (const lg of ['ko', 'en']) assert.ok(I.t(lg, k) !== k, lg + ' ' + k);
+  assert.strictEqual(I.t('ko', 'squadnew.title'), '스쿼드 만들기'); assert.strictEqual(I.t('en', 'squad.add.aria'), 'Create a squad'); assert.strictEqual(I.t('ko', 'squad.add.aria'), '스쿼드 만들기');
+  assert.strictEqual(I.t('ko', 'squadnew.askLine', { ask: '여행 팀' }), '다음 일을 맡을 스쿼드 초안을 만들어 줘: 여행 팀'); assert.ok(L.isSafeQuestStart(I.t('en', 'squadnew.askLine', { ask: 'x' })));
 });
 t('시작 직전 재확인(F3·D7): 앱 종료·창 안 보임·부모 없음·자리 없음·링크 바꿔치기는 거부, 숨은 창에서는 요청을 받지 않는다', () => {
   const ok = { quitting: false, windowOk: true, parentAlive: true, children: 3, wsCount: 5, realNow: '/a', approvedReal: '/a' };

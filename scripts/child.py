@@ -21,6 +21,7 @@ SESSION_RE = re.compile(r"[A-Za-z0-9-]{8,64}")   # MARU_APP_SESSION(요청 파�
 WS_RE = re.compile(r"[A-Za-z0-9_-]{4,64}")        # MARU_WS / MARU_PARENT_WS(보고 폴더의 키: 앱의 안정적인 작업 공간 id)
 KEY_RE = re.compile("[" + TAG_CHARS + "]{1,12}/[" + SLUG_CHARS + "]{1,24}")
 HEXKEY_RE = re.compile(r"[0-9a-f]{64}")
+SQUAD_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,19}")   # 스쿼드 slug(squads.py 의 SLUG_RE 와 같다)
 REQ_MAX_BYTES = 16384
 PROMPT_MAX = 4000
 TITLE_MAX = 40
@@ -101,9 +102,12 @@ def clean_prompt(raw):
     return "".join(out).strip()
 
 
-def request_mac(key_hex, v, frm, cwd, title, project, at, prompt):
-    """HMAC-SHA256(키 = 32바이트 원문, 메시지 = v·from·cwd·title·project(없으면 빈 문자열)·at·sha256(prompt) 16진수를 \\n 으로 이은 UTF-8)."""
-    msg = "\n".join([str(v), frm, cwd, title, project or "", str(at), hashlib.sha256(prompt.encode("utf-8")).hexdigest()])
+def request_mac(key_hex, v, frm, cwd, title, project, at, prompt, squad=None):
+    """HMAC-SHA256(키 = 32바이트 원문, 메시지 = v·from·cwd·title·project(없으면 빈 문자열)·at·sha256(prompt) 16진수를 \\n 으로 이은 UTF-8).
+    v=2(스쿼드 지정 요청)면 끝에 squad 줄이 하나 더 붙는다. v=1 은 예전과 바이트까지 같다(스쿼드 없는 요청은 그대로 검증된다)."""
+    parts = [str(v), frm, cwd, title, project or "", str(at), hashlib.sha256(prompt.encode("utf-8")).hexdigest()]
+    if v >= 2: parts.append(squad or "")
+    msg = "\n".join(parts)
     return hmac.new(bytes.fromhex(key_hex), msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
@@ -116,20 +120,23 @@ def cmd_open(data, args):
     if not HEXKEY_RE.fullmatch(key):
         say_err(T("하위 세션은 마루 세션만 열 수 있습니다(요청 서명 키가 없거나 올바르지 않음).", "Only the Maru session can open child sessions (the request signing key is missing or invalid)."))
         return 3
-    usage = T("사용법: maru open <폴더> [--project <태그/슬러그>] [--title <제목>]  (브리핑은 표준입력으로)",
-              "Usage: maru open <folder> [--project <tag/slug>] [--title <text>]  (brief on stdin)")
-    folder, project, title = None, None, None
+    usage = T("사용법: maru open <폴더> [--project <태그/슬러그>] [--title <제목>] [--squad <slug>]  (브리핑은 표준입력으로)",
+              "Usage: maru open <folder> [--project <tag/slug>] [--title <text>] [--squad <slug>]  (brief on stdin)")
+    folder, project, title, squad = None, None, None, None
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--project", "--title"):
+        if a in ("--project", "--title", "--squad"):
             if i + 1 >= len(args): say_err(usage); return 2
             if a == "--project": project = args[i + 1]
+            elif a == "--squad": squad = args[i + 1]
             else: title = args[i + 1]
             i += 2; continue
         if a.startswith("-") or folder is not None: say_err(usage); return 2
         folder = a; i += 1
     if not folder: say_err(usage); return 2
+    if squad is not None and not SQUAD_RE.fullmatch(squad):
+        say_err(T("거부: --squad 는 스쿼드 slug 여야 합니다([a-z0-9][a-z0-9-]{0,19}).", "Rejected: --squad must be a squad slug ([a-z0-9][a-z0-9-]{0,19}).")); return 2
     if has_bad(folder) or "|" in folder or "\x00" in folder:
         say_err(T("거부: 폴더 경로에 제어 문자나 | 가 있습니다.", "Rejected: the folder path contains control characters or |.")); return 2
     try:
@@ -173,9 +180,11 @@ def cmd_open(data, args):
     if len(prompt) > PROMPT_MAX:
         say_err(T("거부: 브리핑이 %d자를 넘습니다(%d자). 줄여서 다시 보내 주세요." % (PROMPT_MAX, len(prompt)), "Rejected: the brief is longer than %d characters (%d). Shorten it and resend." % (PROMPT_MAX, len(prompt)))); return 2
     now_ms = int(time.time() * 1000)
-    d = {"v": 1, "from": sess, "cwd": cwd, "title": title, "prompt": prompt, "at": now_ms}
+    ver = 2 if squad else 1   # 스쿼드를 지정한 요청만 v=2(서명에 squad 가 들어간다). 아니면 예전 v=1 그대로
+    d = {"v": ver, "from": sess, "cwd": cwd, "title": title, "prompt": prompt, "at": now_ms}
     if project: d["project"] = project   # 프로젝트가 없으면 키 자체를 뺀다
-    d["mac"] = request_mac(key, 1, sess, cwd, title, project, now_ms, prompt)
+    if squad: d["squad"] = squad
+    d["mac"] = request_mac(key, ver, sess, cwd, title, project, now_ms, prompt, squad)
     body = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
     if len(body.encode("utf-8")) > REQ_MAX_BYTES:
         say_err(T("거부: 요청이 16KB 를 넘습니다(4바이트 문자가 많거나 경로가 깁니다). 브리핑을 줄여 주세요.", "Rejected: the request exceeds 16 KB (many 4-byte characters or a long path). Shorten the brief.")); return 2
