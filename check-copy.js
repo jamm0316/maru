@@ -7,6 +7,8 @@ const used = new Set();
 for (const m of html.matchAll(/data-i18n="([^"]+)"/g)) used.add(m[1]);
 for (const m of html.matchAll(/data-i18n-attr="([^"]+)"/g)) m[1].split(';').forEach(p => used.add(p.slice(p.indexOf(':') + 1).trim()));
 for (const m of html.matchAll(/data-link="[^"]+"[^>]*data-i18n="([^"]+)"/g)) used.add(m[1] + '.soon');
+// The by-role demo is built in main.js from structured copy: every quoted 'demo.…' key in main.js counts as used.
+for (const m of fs.readFileSync(__dirname + '/main.js', 'utf8').matchAll(/'(demo\.[\w.]+)'/g)) used.add(m[1]);
 ['try.p1', 'try.p2', 'try.p3', 'meta.title', 'meta.description', 'soon', 'video.play', 'video.pause', 'install.copied'].forEach(k => used.add(k));
 let bad = 0;
 for (const l of ['en', 'ko']) {
