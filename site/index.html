@@ -13,7 +13,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://jamm0316.github.io/maru/assets/poster.png">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 <script>document.documentElement.classList.add('js');</script>
 </head>
 <body>
@@ -65,6 +65,45 @@
     <p class="sr-only" data-i18n="try.sr"></p>
     <p class="small" data-i18n="hero.small"></p>
     <noscript><div class="noscript"><p><strong>Many agents. One conversation.</strong></p><p>Maru is a chief of staff for your agents. It hands the work out, remembers who did what, and answers you as one.</p><p class="mono">macOS 15 or later · Apple Silicon · Claude Code installed · a Claude subscription</p></div></noscript>
+  </div>
+  <div class="wrap wrap-wide demo">
+    <section aria-labelledby="demo-h">
+      <h2 class="demo-h" id="demo-h" data-i18n="demo.h"></h2>
+      <p class="demo-sub" data-i18n="demo.sub"></p>
+      <div class="demo-tabs" role="tablist" data-i18n-attr="aria-label:demo.tabs.aria">
+        <button type="button" role="tab" id="dt-dev" aria-controls="dm-panel" aria-selected="true" tabindex="0" data-i18n="demo.dev.tab"></button>
+        <button type="button" role="tab" id="dt-mkt" aria-controls="dm-panel" aria-selected="false" tabindex="-1" data-i18n="demo.mkt.tab"></button>
+        <button type="button" role="tab" id="dt-pm" aria-controls="dm-panel" aria-selected="false" tabindex="-1" data-i18n="demo.pm.tab"></button>
+        <button type="button" role="tab" id="dt-res" aria-controls="dm-panel" aria-selected="false" tabindex="-1" data-i18n="demo.res.tab"></button>
+      </div>
+      <div class="demo-panel" id="dm-panel" role="tabpanel" aria-labelledby="dt-dev">
+        <div class="dm">
+          <div class="dm-bar"><i></i><i></i><i></i><span class="dm-title">Maru</span><span class="dm-ex" data-i18n="demo.example"></span></div>
+          <div class="dm-body" id="dm-body">
+            <div class="dm-left"><p class="dm-h" data-i18n="demo.ws"></p><ul class="dm-list" id="dm-ws"></ul></div>
+            <div class="dm-main"><p class="dm-sum" id="dm-sum"></p><div class="dm-flow" id="dm-flow"></div></div>
+            <div class="dm-right"><p class="dm-h"><span data-i18n="demo.squads"></span><span class="dm-plus" id="dm-plus" aria-hidden="true">+</span></p><ul class="dm-list" id="dm-sq"></ul></div>
+          </div>
+        </div>
+        <div class="demo-steps">
+          <ol class="demo-dots" id="dm-dots" data-i18n-attr="aria-label:demo.steps.aria">
+            <li><button type="button" class="demo-dot"><span class="n" aria-hidden="true">1</span><span class="l"></span></button></li>
+            <li><button type="button" class="demo-dot"><span class="n" aria-hidden="true">2</span><span class="l"></span></button></li>
+            <li><button type="button" class="demo-dot"><span class="n" aria-hidden="true">3</span><span class="l"></span></button></li>
+            <li><button type="button" class="demo-dot"><span class="n" aria-hidden="true">4</span><span class="l"></span></button></li>
+            <li><button type="button" class="demo-dot"><span class="n" aria-hidden="true">5</span><span class="l"></span></button></li>
+          </ol>
+          <div class="demo-nav">
+            <button type="button" class="demo-btn" id="dm-prev" aria-disabled="true" data-i18n="demo.prev"></button>
+            <span class="demo-count mono" id="dm-count" aria-hidden="true"></span>
+            <button type="button" class="demo-btn demo-btn-next" id="dm-next"></button>
+          </div>
+          <p class="sr-only" id="dm-live" aria-live="polite" role="status"></p>
+        </div>
+        <p class="demo-take" id="dm-take"></p>
+      </div>
+      <p class="small demo-cap" data-i18n="demo.caption"></p>
+    </section>
   </div>
   <div class="wrap wrap-wide">
     <figure class="film">
@@ -341,7 +380,7 @@
   </div>
 </footer>
 
-<script src="copy.js?v=5"></script>
-<script src="main.js?v=5"></script>
+<script src="copy.js?v=6"></script>
+<script src="main.js?v=6"></script>
 </body>
 </html>
