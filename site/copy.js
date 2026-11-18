@@ -16,6 +16,7 @@ window.MARU_COPY = {
     "nav.trust": "Trust",
     "nav.faq": "FAQ",
     "nav.install": "Install",
+    "nav.github": "Maru on GitHub",
 
     "hero.eyebrow": "A chief of staff for your agents",
     "hero.h1a": "Many agents.",
@@ -380,6 +381,7 @@ window.MARU_COPY = {
     "nav.trust": "안심하고 쓰기",
     "nav.faq": "자주 묻는 질문",
     "nav.install": "설치",
+    "nav.github": "GitHub 저장소",
 
     "hero.eyebrow": "에이전트들의 총괄 비서",
     "hero.h1a": "에이전트는 여럿,",
