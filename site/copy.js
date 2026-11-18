@@ -66,6 +66,8 @@ window.MARU_COPY = {
     "s2.diagram": "A diagram of three layers: now, today and for good, joined by a line. A moon marked 03:30 sits between today and for good.",
     "s2.doc.t": "One reference document per project.",
     "s2.doc.b": "Goals, decisions, open questions and current state live in one document that Maru and every project session read, so they work from the same facts. It is a plain Markdown file, so you can read and edit it too.",
+    "s2.day.t": "A calendar to look back through.",
+    "s2.day.b": "Pick a day and see what was done, decided and left open, grouped by project. Overnight, Maru also writes a short note for recent days, built only from that day's journal. If you turn on Calendar access, that day's events sit beside it; they stay in memory and are never saved.",
     "s2.foot": "The structure borrows from how human memory is described — working, short-term and long-term memory, and consolidation during sleep — and from published research on agent memory.",
 
     "s3.label": "03 — What you get",
@@ -220,6 +222,8 @@ window.MARU_COPY = {
     "s2.diagram": "세 층의 도식: 지금, 오늘, 오래가 선으로 이어져 있고, 오늘과 오래 사이에 03:30이 적힌 달이 있습니다.",
     "s2.doc.t": "프로젝트마다 기준 문서 하나.",
     "s2.doc.b": "목표, 결정, 아직 정하지 않은 것, 현재 상태가 한 문서에 담기고, Maru와 모든 프로젝트 세션이 그 문서를 읽습니다. 그래서 모두 같은 사실을 바탕으로 일합니다. 일반 Markdown 파일이라 직접 읽고 고칠 수도 있습니다.",
+    "s2.day.t": "달력으로 돌아보기.",
+    "s2.day.b": "날짜를 고르면 그날 한 일, 결정, 남은 일이 프로젝트별로 보입니다. 밤사이에는 최근 며칠의 하루 회고를 짧은 글로 적어 둡니다. 그날 일지에 적힌 것만 근거로 씁니다. 캘린더 접근을 켜면 그날 일정도 함께 보이고, 일정은 메모리에만 두고 저장하지 않습니다.",
     "s2.foot": "이 구조는 사람의 기억을 설명하는 방식(작업 기억, 단기 기억, 장기 기억, 수면 중 정리)과 에이전트 기억에 관한 공개 연구에서 빌려 왔습니다.",
 
     "s3.label": "03 — 할 수 있는 일",

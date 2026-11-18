@@ -236,3 +236,4 @@ details p{padding:0 40px 22px 0;color:#3F382F;font-size:17px}
 .alt-body p{padding:0;margin:0 0 10px;font-size:16.5px}
 .alt-body ol{margin:0 0 18px;padding-left:22px}
 .alt-body li{margin:0 0 6px;padding-left:4px}
+.refdoc+.refdoc{margin-top:16px}

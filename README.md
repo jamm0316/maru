@@ -35,6 +35,8 @@ Maru is a chief of staff for your agents. It hands the work out, remembers who d
 
 Every night at 03:30 a scheduled job tidies up: duplicates merge, what mattered is kept, the rest steps back. The structure borrows from how human memory is described (working, short-term and long-term memory, and consolidation during sleep). It is a design inspiration, not a claim about results.
 
+**A calendar to look back through.** Pick a day in the app and see what was done, decided and left open, grouped by project. The nightly job also writes a short daily note for recent days (at most two per run), built only from that day's journal lines. If you turn on Calendar access, that day's events are shown beside it; they are kept in memory and never saved to disk.
+
 **Project sessions and reports.** Maru can open a session in a project folder under itself and hand it a briefing. Before it opens, a confirmation window shows exactly what will be handed over, and the session starts only when you click **Open**. When the session ends, it leaves a report, and Maru passes it on to you on your next message. Reports are treated as unverified data, not as instructions.
 
 **One design doc per project.** Goals, decisions, open questions and current state live in one plain Markdown file that Maru and every project session read, so they work from the same facts. You can read and edit it too.
