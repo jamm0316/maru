@@ -362,6 +362,56 @@ rm -f "$DATA/profile.json"; out=$(wrap MARU_CHILD_PROMPT_FILE="$PD/pen.txt.missi
 rm -f "$PD/pen.txt"
 
 # ============================================================== Part C: 보고(쓰기)
+echo "== maru-claude.sh: 마루 폴더 밖 세션의 상태 훅(--settings)"
+OUTD="$T/out side"; mkdir -p "$OUTD"
+wrap_in() { local d=$1; shift; rm -f "$STUB_OUT" "$STUB_OUT.env"; ( cd "$d" && run_env MARU_NO_SQUADS=1 STUB_OUT="$STUB_OUT" "$@" -- bash "$WR" ${WARGS[@]+"${WARGS[@]}"} ); }
+hooks_ok() { "$REAL_PY" -I -c '
+import json, shlex, sys
+raw = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
+a = [x.decode() for x in raw]
+assert a[0] == "--settings", a[:1]
+h = json.loads(a[1])["hooks"]
+want = {"UserPromptSubmit": "busy", "PostToolUse": "busy", "Stop": "idle", "StopFailure": "idle", "Notification": "waiting", "SubagentStart": "sub-start", "SubagentStop": "sub-stop"}
+assert set(h) == set(want), sorted(h)
+for k, v in want.items():
+    assert len(h[k]) == 1 and len(h[k][0]["hooks"]) == 1
+    c = shlex.split(h[k][0]["hooks"][0]["command"])
+    assert c == [sys.argv[2], v], c
+assert h["Notification"][0]["matcher"] == "permission_prompt|elicitation_dialog"
+assert a[2:] == sys.argv[3:], a[2:]
+' "$STUB_OUT" "$R/scripts/agent-state.sh" "$@"; }
+WARGS=(); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 >/dev/null
+check "저장소 밖 + MARU_APP_SESSION: --settings 로 상태 훅 7종(공백 있는 폴더에서도)" hooks_ok
+WARGS=(--resume 11111111-2222-3333-4444-555555555555); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 >/dev/null
+check "받은 인자는 --settings 뒤에 그대로" hooks_ok --resume 11111111-2222-3333-4444-555555555555
+check "붙였으면 표지 파일(<id>.hooked)을 남긴다" [ -f "$DATA/state/app/outside-12345.hooked" ]
+rm -f "$DATA/state/app/outside-12345.hooked"
+WARGS=(); wrap_in "$OUTD" >/dev/null; check "MARU_APP_SESSION 없음(앱 밖 실행): 붙이지 않음" argv_is '[]'
+WARGS=(); wrap_in "$R" MARU_APP_SESSION=outside-12345 >/dev/null; check "저장소 폴더 안: 붙이지 않음(프로젝트 설정의 훅이 이미 돈다)" argv_is '[]'
+mkdir -p "$R/sub/dir"; wrap_in "$R/sub/dir" MARU_APP_SESSION=outside-12345 >/dev/null; check "저장소의 하위 폴더: 붙인다(프로젝트 설정은 시작한 폴더에서만 읽힌다)" hooks_ok
+mkdir -p "${R}x"; wrap_in "${R}x" MARU_APP_SESSION=outside-12345 >/dev/null; check "이름만 저장소로 시작하는 형제 폴더는 밖이다" hooks_ok; rmdir "${R}x"
+rm -f "$DATA/state/app/"*.hooked
+WARGS=(); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 MARU_TOOL_DIRS= PATH="$T/stub:/bin" >/dev/null; check "python3 가 없으면 붙이지 않고 그대로 실행" argv_is '[]'
+check "python3 가 없으면 표지도 남기지 않음" [ ! -e "$DATA/state/app/outside-12345.hooked" ]
+WARGS=(); wrap_in "$OUTD" MARU_APP_SESSION='bad id!' >/dev/null; check "id 형식이 틀리면 표지를 만들지 않음" [ -z "$(ls "$DATA/state/app" | grep hooked)" ]
+WARGS=(); mkprompt 'hello' ph.txt; wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 MARU_CHILD_PROMPT_FILE="$PD/ph.txt" >/dev/null
+check "초기 프롬프트와 함께: --settings 가 앞, -- <프롬프트> 가 맨 뒤" hooks_ok -- hello
+# 저장소 경로에 공백·따옴표·$·백틱이 있어도 훅 명령이 그 경로 그대로 인용된다
+R2="$T/we'ird \$x \`y\` \"q\" repo"; mkdir -p "$R2"; cp -R "$R/scripts" "$R2/scripts"
+rm -f "$STUB_OUT"; ( cd "$OUTD" && run_env MARU_NO_SQUADS=1 STUB_OUT="$STUB_OUT" MARU_APP_SESSION=outside-12345 -- bash "$R2/scripts/maru-claude.sh" ) >/dev/null
+R_SAVE=$R; R=$R2; check "특수문자가 든 저장소 경로도 안전하게 인용" hooks_ok; R=$R_SAVE
+qcmd=$("$REAL_PY" -I -c 'import json,sys; a=open(sys.argv[1],"rb").read().split(b"\0"); print(json.loads(a[1])["hooks"]["Stop"][0]["hooks"][0]["command"])' "$STUB_OUT")
+( cd "$OUTD" && printf '{}' | run_env MARU_APP_SESSION=outside-12345 -- bash -c "$qcmd" ) >/dev/null
+check "그 훅 명령을 셸로 실행하면 그 저장소의 data 에 상태가 쓰인다" grep -q '"state":"idle"' "$R2/data/state/app/outside-12345.json"
+rm -rf "$R2"
+# 훅 명령을 실제로 실행해 본다: 복사본의 data/state/app 에 상태 파일이 생긴다(실제 저장소의 data 는 건드리지 않는다)
+WARGS=(); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 >/dev/null
+stopcmd=$("$REAL_PY" -I -c 'import json,sys; a=open(sys.argv[1],"rb").read().split(b"\0"); print(json.loads(a[1])["hooks"]["Stop"][0]["hooks"][0]["command"])' "$STUB_OUT")
+rm -f "$DATA/state/app/outside-12345.json"
+( cd "$OUTD" && printf '{"cwd":"%s"}' "$OUTD" | run_env MARU_APP_SESSION=outside-12345 -- bash -c "$stopcmd" ) >/dev/null
+check "붙인 Stop 훅이 상태 파일을 쓴다(idle)" grep -q '"state":"idle"' "$DATA/state/app/outside-12345.json"
+rm -f "$DATA/state/app/outside-12345.json"
+
 echo "== maru-claude.sh: MARU_CHILD_SQUAD(하위 세션의 팀)"
 # 진짜 스쿼드 JSON(저장소의 내장 dev·research)을 쓴다: MARU_NO_SQUADS 를 주지 않는다. 가짜 claude 가 argv 와 MARU_CHILD_* 환경변수만 기록한다.
 wrapq() { rm -f "$STUB_OUT" "$STUB_OUT.env"; run_env STUB_OUT="$STUB_OUT" "$@" -- bash "$WR" ${WARGS[@]+"${WARGS[@]}"}; }

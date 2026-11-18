@@ -133,7 +133,7 @@ Optional flags: `--with-cli` links `bin/maru` into `~/.local/bin` (or `$MARU_BIN
 - **It uses your subscription's usage.** Reflection after a session and the nightly tidy-up each make Claude calls that count toward your usage. There is no setting to tune them yet; to stop them, run `./uninstall.sh`, which removes the hooks and the nightly job. If your login expires, reflection fails until you log in again.
 - **Subscription terms may change.** Check for yourself that automated calls (hooks and a scheduled job) fit your plan's terms.
 - **Built-in squads:** only `dev` and `research`. Any other squad is one Maru drafts (from a sentence you give it in the app, or as a suggestion after reflection) or one you write yourself, and it is installed only after you approve it.
-- **Status is unknown outside the Maru folder.** Sessions started outside the Maru folder show their status as unknown.
+- **Status can be unknown outside the Maru folder.** For a session the app opens in another folder, Maru attaches its status hooks to that session only (your global settings are not changed). If they cannot be attached, for example when you start `claude` yourself in that terminal, the status shows as unknown.
 - **Prompt injection is not fully preventable.** Text from the web or a pasted document can end up in a session. Reflection runs with a restricted permission list and keeps a change history so you can check and undo, but do not share your memory folder publicly.
 - **Claude only, macOS only.** It needs Claude Code and a Claude subscription, on macOS with Apple Silicon.
 

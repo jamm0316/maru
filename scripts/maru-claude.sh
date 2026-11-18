@@ -68,7 +68,46 @@ if [ -n "$csq" ]; then
   if [ -n "$sess" ]; then agent=(--agent "$sess")
   else echo "마루: 요청된 팀을 쓸 수 없어 팀 없이 시작합니다. / Maru: the requested team is not available; starting without a team." >&2; fi
 fi
+# 상태 훅(마루 폴더 밖 세션): 앱이 띄운 세션(MARU_APP_SESSION)이 마루 저장소 밖 폴더에서 돌면 저장소의 프로젝트 설정(.claude/settings.json)이 실리지 않아
+# 앱이 상태를 알 수 없다. 그 세션에만 `--settings <JSON>` 으로 agent-state.sh 훅을 붙인다(전역 설정은 건드리지 않는다. 그 폴더의 자체 설정·훅과는 합쳐진다).
+# 저장소 루트 폴더에서는 프로젝트 설정의 훅이 이미 돌므로 붙이지 않는다. 그 밖의 모든 폴더(저장소의 하위 폴더 포함: Claude Code 는 시작한 폴더의 .claude/settings.json 만 읽는다)에 붙인다.
+# python3 가 없거나 JSON 을 못 만들면 붙이지 않고 그대로 실행한다. 붙였으면 data/state/app/<id>.hooked 표지를 남겨 앱이 훅이 붙은 세션임을 알게 한다(표지가 없으면 앱은 예전처럼 상태 알 수 없음으로 본다).
+sset=()
+if [ -n "${MARU_APP_SESSION:-}" ] && [ -n "$SCRIPTS" ] && [ -f "$SCRIPTS/agent-state.sh" ] && [ ! -L "$SCRIPTS/agent-state.sh" ] && [ -x "$SCRIPTS/agent-state.sh" ] && [ -z "${MARU_NO_STATE_HOOKS:-}" ]; then
+  sroot=${SCRIPTS%/*}; shere=$(pwd -P 2>/dev/null) || shere=""
+  case "$shere" in
+    ""|"$sroot") ;;
+    *)
+      spy=$(find_py)
+      sj=""
+      [ -n "$spy" ] && sj=$("$spy" -I -c '
+import json, shlex, sys
+p = shlex.quote(sys.argv[1])
+def h(a, m=None):
+    e = {"hooks": [{"type": "command", "command": p + " " + a}]}
+    if m:
+        e["matcher"] = m
+    return [e]
+print(json.dumps({"hooks": {
+    "UserPromptSubmit": h("busy"), "PostToolUse": h("busy"), "Stop": h("idle"), "StopFailure": h("idle"),
+    "Notification": h("waiting", "permission_prompt|elicitation_dialog"),
+    "SubagentStart": h("sub-start"), "SubagentStop": h("sub-stop")}}, separators=(",", ":")))
+' "$SCRIPTS/agent-state.sh" 2>/dev/null) || sj=""
+      case "$sj" in
+        '{"hooks":{'*)
+          sset=(--settings "$sj")
+          # 표지: id 형식(agent-state.sh 와 같은 규칙)이 맞고 폴더가 링크가 아닐 때만. 실패해도 세션은 그대로 뜬다
+          sid=$MARU_APP_SESSION; sdir=$sroot/data/state/app
+          case "$sid" in *[!A-Za-z0-9-]*) sid="" ;; esac
+          if [ -n "$sid" ] && [ "${#sid}" -ge 8 ] && [ "${#sid}" -le 64 ] && [ ! -L "$sdir" ] && mkdir -p "$sdir" 2>/dev/null && [ ! -L "$sdir" ] && [ ! -L "$sdir/$sid.hooked" ]; then
+            : > "$sdir/$sid.hooked" 2>/dev/null || :
+          fi
+          ;;
+      esac
+      ;;
+  esac
+fi
 case "$json" in
-  "{\"sq-"*) exec claude --agents "$json" ${agent[@]+"${agent[@]}"} "$@" ${post[@]+"${post[@]}"} ;;
+  "{\"sq-"*) exec claude --agents "$json" ${agent[@]+"${agent[@]}"} ${sset[@]+"${sset[@]}"} "$@" ${post[@]+"${post[@]}"} ;;
 esac
-exec claude "$@" ${post[@]+"${post[@]}"}
+exec claude ${sset[@]+"${sset[@]}"} "$@" ${post[@]+"${post[@]}"}

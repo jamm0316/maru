@@ -113,7 +113,14 @@ const STATE_DIR = () => path.join(ROOT, 'data', 'state', 'app');
 const PROMPT_DIR = () => path.join(ROOT, 'data', 'state', 'app', 'prompts');
 const REQUEST_DIR = () => path.join(ROOT, 'data', 'state', 'app', 'requests');
 const stateFile = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.json') : null);
-function removeStateFile(w) { w.lastTranscript = null; w.lastModel = null; const f = stateFile(w); if (f) try { fs.unlinkSync(f); } catch { /* 없음 */ } clearSubs(w); }
+function removeStateFile(w) { w.lastTranscript = null; w.lastModel = null; w.hooked = false; const f = stateFile(w); if (f) { try { fs.unlinkSync(f); } catch { /* 없음 */ } try { fs.unlinkSync(f.replace(/\.json$/, '.hooked')); } catch { /* 없음 */ } } clearSubs(w); }
+// 래퍼(maru-claude.sh)가 이 세션에 상태 훅을 붙였다는 표지(<id>.hooked, 일반 파일). 한 번 보면 그 세션 동안 기억한다(오래된 파일 정리가 표지를 지워도 유지)
+function sessionHooked(w) {
+  if (w.hooked) return true;
+  const f = stateFile(w); if (!f) return false;
+  try { if (fs.lstatSync(f.replace(/\.json$/, '.hooked')).isFile()) w.hooked = true; } catch { /* 없음 */ }
+  return w.hooked === true;
+}
 // ---- 서브에이전트: <id>.subs/<agent_id> 파일 하나가 실행 중 하나(내용: agent_type). 정규 파일만, 최대 32개, 30분 넘으면 지운다 ----
 const SUBS_MAX = 32; const SUBS_SCAN_MAX = 512; const SUBS_TTL_MS = 30 * 60 * 1000;
 const subsDir = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.subs') : null);
@@ -198,7 +205,7 @@ function cleanOldStateFiles() {
   try {
     if (fs.lstatSync(dir).isSymbolicLink()) return;
     for (const name of fs.readdirSync(dir)) {
-      if (!(name.startsWith('.') || name.endsWith('.json') || name.endsWith('.subs'))) continue;
+      if (!(name.startsWith('.') || name.endsWith('.json') || name.endsWith('.subs') || name.endsWith('.hooked'))) continue;
       try { // 항목마다 따로 감싸 하나가 실패해도 나머지를 계속한다
         const f = path.join(dir, name);
         const st = fs.lstatSync(f);
@@ -734,7 +741,7 @@ const REPORT_FLASH_MS = 6000; const CNOTE_MS = 15000;
 const reportedAtOf = (w) => { const ps = w.parentId ? reportSum.get(w.parentId) : null; return ps && ps.lastAt[w.id] ? ps.lastAt[w.id] : null; }; // 이 하위 세션이 읽히지 않은 보고를 남긴 마지막 시각
 // 목록·트레이·종료 확인이 함께 쓰는 표시 상태: 훅이 도는 저장소 밖에서는 'unknown'(보고가 있으면 'turnEnded')
 function derivedState(w, state) {
-  const outside = !!ROOT && !w.inRoot && !w.fx && !SMOKE && !TEST_FX && !w.unavailable;
+  const outside = !!ROOT && !w.isRoot && !sessionHooked(w) && !w.fx && !SMOKE && !TEST_FX && !w.unavailable; // 훅이 도는 곳: 저장소 루트(프로젝트 설정) 또는 래퍼가 훅을 붙인 세션(표지). 그 밖은 '상태 알 수 없음'
   return L.stateDisplay({ state, hasTerm: !!w.term, outsideRoot: outside, reportedAt: reportedAtOf(w), lastOutputAt: w.lastOutputAt });
 }
 const wsView = () => {
