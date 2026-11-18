@@ -22,7 +22,7 @@ macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인)
 ./uninstall.sh           # 설치한 것만 되돌림 (data/ 와 기억은 남김). --dry-run 지원
 ./install.sh --with-cli --with-cmux   # 선택: maru 명령 링크 + cmux Dock 설정 (아래 설명)
 ```
-설치가 하는 일(경로에 공백이 있어도 동작): `data/`와 기억 폴더 생성 / `~/.claude/settings.json`의 SessionEnd에 훅 1개 등록(수정 전 `data/backups/`에 타임스탬프 백업. 파일 전체를 JSON으로 읽어 다시 쓰므로 **파일이 재작성된다**: 키 순서·알 수 없는 필드·다른 훅의 위치는 보존하고 들여쓰기 형식을 유지하며 임시 파일 + rename으로 원자적으로 쓰지만, 주석처럼 JSON 밖의 서식은 보존되지 않는다) / launchd 작업 `com.maru.dream` 등록 / `recall` 스킬을 `~/.claude/skills/recall`에 복사(`.maru` 표식 파일을 넣고, 표식 없는 기존 `recall`은 건드리지 않음) / `.claude/settings.local.json`에 홈 디렉터리 접근 허용 / `~/.claude/CLAUDE.md`에 `<!-- maru:begin -->`…`<!-- maru:end -->` 블록 유지.
+설치가 하는 일(경로에 공백이 있어도 동작): `data/`와 기억 폴더 생성 / `~/.claude/settings.json`에 훅 4개 등록: SessionEnd(회고) · SessionStart(최근 일지 로드) · Stop/PreCompact(세션 도중 일지) (수정 전 `data/backups/`에 타임스탬프 백업. 파일 전체를 JSON으로 읽어 다시 쓰므로 **파일이 재작성된다**: 키 순서·알 수 없는 필드·다른 훅의 위치는 보존하고 들여쓰기 형식을 유지하며 임시 파일 + rename으로 원자적으로 쓰지만, 주석처럼 JSON 밖의 서식은 보존되지 않는다) / launchd 작업 `com.maru.dream` 등록 / `recall` 스킬을 `~/.claude/skills/recall`에 복사(`.maru` 표식 파일을 넣고, 표식 없는 기존 `recall`은 건드리지 않음) / `.claude/settings.local.json`에 홈 디렉터리 접근 허용 / `~/.claude/CLAUDE.md`에 `<!-- maru:begin -->`…`<!-- maru:end -->` 블록 유지.
 
 제거(`uninstall.sh`)는 설치가 한 일만 되돌립니다: 훅 항목, launchd 작업, `~/.claude/CLAUDE.md`의 maru 블록(블록 밖은 건드리지 않음), `.maru` 표식이 있는 전역 recall, `.claude/settings.local.json`의 홈 접근 항목, `~/.maru-work`. **`data/`(개인 데이터·변경 이력·백업)와 기억 폴더는 남깁니다.**
 
@@ -131,8 +131,14 @@ scripts/telegram.sh stop                 # claude·bun 폴러·caffeinate 까지
 - 마루 저장소 밖의 프로젝트는 일을 시작하기 전에 그 프로젝트의 지침(CLAUDE.md·AGENTS.md·`.claude/`·README·CI 설정)을 직접 읽고 요점을 팀원에게 전달합니다. 프로젝트 지침이 마루 기본값보다 우선하되 안전 규칙·사용자 지시가 더 위이며, 프로젝트 자체 팀이 있으면 그것을 씁니다. 오래 걸리는 일은 그 프로젝트 폴더에서 세션을 여는 편이 낫습니다.
 - 테스트·빌드 명령은 저장소(README·CI 설정 등)에서 찾으며, 못 찾으면 추측하지 않고 묻습니다.
 
+## 앱의 달력과 프로젝트 목록
+- **달력**: 왼쪽 패널의 달력에서 날짜를 누르면 그날 화면이 열립니다. 그날의 기록(한 일·결정·남은 일)이 프로젝트별로 묶여 나오고 묶음마다 접을 수 있으며, 하루 회고가 있으면 함께 보입니다.
+- **캘린더 일정**: 설정에서 캘린더 접근을 켜면 그날의 일정이 같이 나오고, 일정을 누르면 시간·캘린더·장소·메모가 펼쳐집니다. 일정은 메모리에만 두고 디스크에 저장하지 않습니다. 설치된 앱은 EventKit 도우미(`app/native/maru-cal.swift`, `npm run build:native` 로 빌드)로 읽고, 소스에서 실행할 때는 `MARU_APP_CAL_HELPER=1` 을 주지 않으면 더 느린 AppleScript 방식으로 읽습니다.
+- **프로젝트 목록**: 진행 중인 프로젝트는 카테고리(태그)별로 묶입니다. 프로젝트 줄은 같은 카테고리 안에서, 카테고리 이름표는 카테고리끼리 끌어서(또는 ⌥↑/⌥↓) 순서를 바꿉니다. 프로젝트를 다른 카테고리로 옮길 수는 없습니다.
+- **분류 안 된 작업 · 완료**: 프로젝트 슬러그가 없는 옛 기록은 「분류 안 된 작업」 한 묶음으로 접혀 있습니다. 「완료」를 펼치면 끝낸 프로젝트가 카테고리 묶음 없이 한 줄씩, 카테고리와 끝낸 날이 붙어 나옵니다.
+
 ## maru 명령과 cmux Dock
-- `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru ui`, `maru suggest [번호]`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 런처 자체는 아무것도 설치·수정하지 않습니다. PATH 등록은 `./install.sh --with-cli` 로 합니다(심볼릭 링크를 따라 저장소 위치를 계산).
+- `bin/maru` 런처: `maru`(저장소에서 claude 실행), `maru app`(데스크톱 앱 열기), `maru ui`, `maru suggest [번호]`, `maru todo [번호]`, `maru status`, `maru log [reflect|dream]`, `maru hist ...`, `maru doctor`(읽기 전용 점검), `maru help`. 스쿼드(`maru squad …`), 프로젝트(`maru project …`), 하위 세션(`maru open …`) 명령은 각 절에서 설명합니다. 런처 자체는 아무것도 설치·수정하지 않습니다. PATH 등록은 `./install.sh --with-cli` 로 합니다(심볼릭 링크를 따라 저장소 위치를 계산).
 - `maru ui`(`scripts/maru_ui.py`, 파이썬 표준 라이브러리 curses, 네트워크·포트 없음): 40~60열 좁은 폭용 상황판. 탭 1 상태(30초 자동 갱신, `r`) / 2 기억(Enter 본문, `/` 필터) / 3 로그(`l` reflect·dream 전환) / 4 제안 / 5 추천. `--once`는 상태를 평문으로 출력하고 `--selftest`는 임시 디렉터리에서 로직을 검증합니다.
 - 제안 설치는 제안 탭에서 보기를 열고 설치될 `SKILL.md`(PROPOSAL.md 보다 먼저 표시)를 끝까지 스크롤한 뒤 `i`, 정확히 `yes` 를 입력해야만 진행됩니다. 보기를 열 때 `SKILL.md` 를 한 번 읽어 스냅샷으로 고정하고 표시·설치는 그 바이트만 쓰며, 설치 직전 디스크의 sha256 이 다르면 거부합니다. 읽기는 `O_NOFOLLOW`+일반 파일·링크 수 1·100KB 이하만 허용합니다. 이름 정규식(전체 일치)·frontmatter `name` 이 디렉터리 이름과 같을 것·`name`/`description`/`argument-hint`(한 줄·100자 이하·제어 문자 없음일 때만) 외 frontmatter 키 거부(파싱 불가도 거부)·저장소 `.claude/skills` 이름 충돌 거부·기존 스킬 덮어쓰기 거부·숨김/제어 문자·잘못된 UTF-8 거부를 거치며 `SKILL.md` 만 복사합니다. `maru hist` 는 `--output`·`--ext-diff`·`--textconv`·`-c`·`-C`·`--git-dir`·`--work-tree`·`--exec-path` 인자를 거부합니다. `x` 는 삭제 없이 `data/skill-proposals/.rejected/` 로 옮깁니다. 제안 내용은 신뢰할 수 없는 데이터로 표시만 합니다.
 - 오늘 할 일: 모델이 stage 폴더에 `todos.txt`(`태그|중요도|제목|프롬프트`, 최대 7줄)를 쓰면 `apply_todos` 가 검증·정렬해 `data/todos.txt` 로 교체하고 프롬프트로 `data/suggestions.txt` 를 다시 만듭니다. `maru todo [번호]` 로 보고 복사합니다(전송 안 함).

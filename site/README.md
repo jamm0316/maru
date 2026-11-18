@@ -11,11 +11,11 @@ Open the address it prints (port 8000 by default).
 
 ## Set the links
 
-Edit `copy.js`, the `MARU_LINKS` object at the top:
-
-    window.MARU_LINKS = { download: "", github: "" };
+The links live in `copy.js`, in the `MARU_LINKS` object at the top (`download` and `github`). Both are set to the current release and repository.
 
 While a link is empty, its button shows the quiet "Coming soon" style and has no href.
+
+For a new release build, run `site/set-release.sh <path to dmg> <version>` from the repository root. It pins the version and the dmg's SHA-256 in `install.sh`; update the `download` link in `copy.js` yourself if the file name changed.
 
 ## Video and posters
 

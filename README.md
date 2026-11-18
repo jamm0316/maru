@@ -37,7 +37,7 @@ Every night at 03:30 a scheduled job tidies up: duplicates merge, what mattered 
 
 **A calendar to look back through.** Pick a day in the app and see what was done, decided and left open, grouped by project. The nightly job also writes a short daily note for recent days (at most two per run), built only from that day's journal lines. If you turn on Calendar access, that day's events are shown beside it; they are kept in memory and never saved to disk.
 
-**Project sessions and reports.** Maru can open a session in a project folder under itself and hand it a briefing. Before it opens, a confirmation window shows exactly what will be handed over, and the session starts only when you click **Open**. When the session ends, it leaves a report, and Maru passes it on to you on your next message. Reports are treated as unverified data, not as instructions.
+**Project sessions and reports.** Maru can open a session in a project folder under itself and hand it a briefing. Before it opens, a confirmation window shows exactly what will be handed over, and the session starts only when you click **Open**. Each time the session finishes a turn, it leaves a report, and Maru passes it on to you on your next message. Reports are treated as unverified data, not as instructions.
 
 **One design doc per project.** Goals, decisions, open questions and current state live in one plain Markdown file that Maru and every project session read, so they work from the same facts. You can read and edit it too.
 
@@ -109,7 +109,7 @@ From the repository folder, preview first, then install. Running it again is saf
 ./install.sh
 ```
 
-Optional flags: `--with-cli` links `bin/maru` into `~/.local/bin` (or `$MARU_BIN_DIR`); `--with-cmux` installs a cmux Dock config. Both are off by default.
+Optional flags: `--with-cli` links `bin/maru` into `~/.local/bin` (or `$MARU_BIN_DIR`); `--with-cmux` installs a cmux Dock config; `--with-telegram` registers a login job (`com.maru.telegram`) for the optional Telegram bridge, and only after its one-time setup is done (see the manual). All are off by default.
 
 ## What it changes on your machine
 
@@ -122,17 +122,17 @@ Optional flags: `--with-cli` links `bin/maru` into `~/.local/bin` (or `$MARU_BIN
 - Writes `.claude/settings.local.json` in the repository to give sessions run there access to your home folder.
 - Keeps one marked block (`<!-- maru:begin -->` to `<!-- maru:end -->`) in `~/.claude/CLAUDE.md`.
 
-**To undo it:** `./uninstall.sh` (it also accepts `--dry-run`). It reverses only what the installer did: the hook, the launchd job, the `CLAUDE.md` block, the `recall` copy that carries Maru's marker, the home-access entry, and `~/.maru-work`. It leaves `data/` (your personal data, change history and backups) and the memory folder in place. Delete those yourself if you want them gone.
+**To undo it:** `./uninstall.sh` (it also accepts `--dry-run`). It reverses only what the installer did: the four hooks, the launchd job (and the Telegram login job if you registered it), the `CLAUDE.md` block, the `recall` copy that carries Maru's marker, the home-access entry, and `~/.maru-work`. It leaves `data/` (your personal data, change history and backups) and the memory folder in place. Delete those yourself if you want them gone.
 
 ## Trust and limits
 
-- **Every project session needs your click.** Maru never opens a session on its own. A confirmation window shows what will be handed over, and nothing starts until you click Open. It is not a fully autonomous system.
+- **Every session Maru asks for needs your click.** Maru never opens a session on its own. A confirmation window shows what will be handed over, and nothing starts until you click Open. You can also open a session under Maru yourself from the app. It is not a fully autonomous system.
 - **The dmg is not signed or notarized.** See "First launch on macOS" above.
 - **Not a secret between sessions.** Requests between Maru and its sessions carry a signature, but within the same macOS user account that key is not a secret. The confirmation window is the real safeguard, not the signature.
 - **Nothing installs on its own.** Maru proposes skills; you approve them.
 - **It uses your subscription's usage.** Reflection after a session and the nightly tidy-up each make Claude calls that count toward your usage. There is no setting to tune them yet; to stop them, run `./uninstall.sh`, which removes the hooks and the nightly job. If your login expires, reflection fails until you log in again.
 - **Subscription terms may change.** Check for yourself that automated calls (hooks and a scheduled job) fit your plan's terms.
-- **Built-in squads:** only `dev` and `research`. Further squads are ones you write and approve.
+- **Built-in squads:** only `dev` and `research`. Any other squad is one Maru drafts (from a sentence you give it in the app, or as a suggestion after reflection) or one you write yourself, and it is installed only after you approve it.
 - **Status is unknown outside the Maru folder.** Sessions started outside the Maru folder show their status as unknown.
 - **Prompt injection is not fully preventable.** Text from the web or a pasted document can end up in a session. Reflection runs with a restricted permission list and keeps a change history so you can check and undo, but do not share your memory folder publicly.
 - **Claude only, macOS only.** It needs Claude Code and a Claude subscription, on macOS with Apple Silicon.
