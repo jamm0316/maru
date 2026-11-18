@@ -82,7 +82,8 @@ trap 'rm -rf "$RLOCK" "$DLOCK"; rotate_log "$LOG"' EXIT
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 TXN=$STATE/txn.dream
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
-prompt="$(render_template "$(maru_localized "$MARU_HOME/prompts/consolidate-prompt.md")" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")"
+DIARY_DAYS=$(diary_days_text)   # 하루 회고를 맡길 날짜(셸이 고른다, 최대 2개)
+prompt="$(render_template "$(maru_localized "$MARU_HOME/prompts/consolidate-prompt.md")" MEMORY_DIR="$MEM" STAGE_DIR="$STAGE" DIARY_DAYS="$DIARY_DAYS" RECENT_MARKS="$(recent_marks_text)" OPEN_PROJECTS="$(open_projects_text)")"
 mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { env_fail "작업 폴더를 만들 수 없음: $MARU_WORK"; exit 1; }
 # 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
 txn_begin "$MEM" "$TXN" || { env_fail "기억 폴더 스냅샷 실패 — 정리 건너뜀(MEM 경로·권한 확인)"; txn_end "$TXN"; exit 1; }
@@ -114,6 +115,11 @@ elif ! apply_deletions "$MEM" "$STAGE/delete.txt"; then reason="삭제 목록 �
 elif comm -3 "$TXN.A" "$TXN.B" | grep -Eq ' \./journal(/|$)'; then reason="모델이 journal/ 을 건드림"
 else reason=$(mem_validate "$MEM" "$before_n") || true
 fi
+# 모델이 diary/ 를 직접 썼으면 그 하위만 실행 전 상태로 복원한다(실행 전체는 되돌리지 않는다). 하루 회고는 apply_diary 만 설치한다.
+if [ -z "$reason" ] && comm -3 "$TXN.A" "$TXN.B" | grep -Eq ' \./diary(/|$)'; then
+  txn_restore "$MEM" "$TXN" diary
+  log "모델이 diary/ 를 건드림 — diary/ 만 실행 전 상태로 복원(나머지 변경은 유지)"
+fi
 if [ -n "$reason" ]; then
   txn_restore "$MEM" "$TXN"
   log "되돌림(변경 폐기, 커밋·삭제 없음): $reason"
@@ -122,6 +128,7 @@ else
   # 모델의 journal/ 변조 검사가 끝난 뒤에 셸이 오래된 일지를 archive/ 로 옮긴다(검사에 걸리지 않는 순서). 보관 뒤 스냅샷으로 마커를 기록한다.
   apply_todo_marks   # 사용자가 표시한 완료/안 함을 일지에 한 번만 반영(모델의 journal 변조 검사 뒤, 보관·마커 기록 앞)
   archive_journal 14
+  apply_diary "$STAGE/diary" "$DIARY_DAYS"   # 하루 회고 설치: 모델의 diary/ 변조 검사 뒤(검사에 걸리지 않는 순서), 마커 기록·hist 커밋 앞(lib.sh)
   mem_snap "$MEM" | md5 -q > "$MARKER"
   fail_reset dream
 fi

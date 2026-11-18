@@ -269,12 +269,50 @@ body.mod .kbd{display:inline-block}
 .proj .pt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .proj .cnt{font-size:11px;color:var(--mute);white-space:nowrap;overflow-wrap:normal}
 .proj .cnt.check{color:var(--or2);border:1px solid #5A4630;border-style:dashed;border-radius:999px;padding:1px 8px}
-.proj.unc .pt{color:var(--soft);font-style:italic}
 .proj-toggle{align-self:flex-start;font:inherit;font-size:12px;color:var(--soft);background:transparent;border:0;border-top:1px solid var(--line);width:100%;text-align:left;padding:8px 2px 0;cursor:pointer}
 .proj-toggle::before{content:'\25B8';display:inline-block;width:14px}
 .proj-toggle[aria-expanded=true]::before{content:'\25BE'}
 .proj-toggle:hover,.proj-toggle:focus-visible{color:var(--or);outline:none}
-.proj-toggle[hidden],#projects-done[hidden]{display:none}
+.proj-toggle[hidden],#projects-done[hidden],#projects-unsorted[hidden]{display:none}
+.proj-toggle#proj-unsorted-toggle{margin-top:2px}
+
+/* 달력 카드(왼쪽) */
+.cal-card{gap:8px;padding:12px}
+.cal-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:4px}
+.cal-month{flex:1 1 auto;min-width:max-content;margin:0;font-size:13px;font-weight:600;color:var(--ink);white-space:nowrap}
+.cal-nav{flex:none;font:inherit;font-size:14px;line-height:1;color:var(--soft);background:transparent;border:1px solid #4A3A2C;border-radius:6px;min-width:22px;height:22px;padding:0 5px;cursor:pointer;white-space:nowrap;overflow-wrap:normal}
+.cal-nav.cal-today{font-size:11px;padding:0 7px}
+.cal-nav:hover:not(:disabled),.cal-nav:focus-visible{border-color:var(--or);color:var(--or);outline:none}
+.cal-nav:focus-visible,.cal-d:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
+.cal-nav:disabled{opacity:.4;cursor:default}
+.cal-wds,.cal-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px 0}
+.cal-wd{text-align:center;font-size:10px;color:var(--mute)}
+.cal-d{position:relative;display:flex;align-items:center;justify-content:center;height:26px;min-width:0;padding:0;font:inherit;font-size:12px;color:var(--ink);background:transparent;border:1px solid transparent;border-radius:6px;cursor:pointer}
+.cal-d .n{margin-top:-4px}
+.cal-d .dots{position:absolute;left:0;right:0;bottom:3px;display:flex;justify-content:center;gap:2px;height:4px}
+.cal-d .dots i{display:block;width:4px;height:4px;border-radius:50%;box-sizing:border-box}
+.cal-d .dots i.rec{background:var(--or)}
+.cal-d .dots i.ev{border:1px solid var(--or)}
+.cal-d.today{border-color:var(--or)}
+.cal-d.sel,.cal-d.sel.today{background:var(--or);border-color:var(--or);color:#17110B;font-weight:700} /* 고른 날은 채움, 오늘은 테두리만(둘 다면 채움) */
+.cal-d.sel .dots i.rec{background:#17110B}
+.cal-d.sel .dots i.ev{border-color:#17110B}
+.cal-d.sel:hover,.cal-d.sel:focus-visible{background:var(--or2);border-color:var(--or2)}
+.cal-d:hover,.cal-d:focus-visible{background:var(--sel);outline:none}
+.cal-legend{font-size:11px;margin:0}
+
+/* 하루 보기(가운데) */
+.dv-top{gap:8px}
+.dv-nav{padding:4px 11px;font-size:15px;line-height:1.2}
+.dv-title{flex:1 1 200px;min-width:0;margin-left:6px;font-size:20px}
+.dv-body{display:flex;flex-direction:column;gap:6px}
+.dv-sec{display:flex;flex-direction:column;gap:6px}
+.dv-diary-title{margin:4px 0 0;font-family:var(--serif);font-size:17px;font-weight:700;overflow-wrap:anywhere}
+.dv-p{margin:0 0 .6em;max-width:64ch;line-height:1.7;white-space:pre-wrap;font-size:14px;color:var(--soft)}
+.dv-hint{margin:0}
+.dv-gh{margin:10px 0 2px;font-size:13px;font-weight:600;color:var(--or2)}
+.dv-row .d{min-width:44px}
+.dv-empty{margin:16px 0;font-size:14px;color:var(--mute)}
 #terminal[hidden]{display:none}
 .proj-detail{flex:1 1 auto;min-height:0;overflow-y:auto;padding:16px 22px 18px;display:flex;flex-direction:column;gap:12px;color:var(--ink)}
 .proj-detail[hidden]{display:none}

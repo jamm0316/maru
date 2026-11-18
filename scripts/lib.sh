@@ -83,14 +83,17 @@ mem_snap() { (cd "$1" 2>/dev/null && find . -type f -print0 | xargs -0 md5 -r 2>
 # 알려진 한계: 세션 도중(journal-tick) 회고가 실패해 되돌려질 때, 그 실행 시간대에 다른 살아 있는 세션이 쓴 기억 파일도 함께 되돌려질 수 있다.
 # 한계(남는 경합): A~B 사이 약 수십 초 동안 같은 파일을 다른 세션이 고치면 그 변경도 이번 실행의 것으로 보고 되돌린다.
 # 그 밖의 시간대·다른 파일에 대한 쓰기는 보존된다. 그래서 txn_begin 은 모델 호출 직전에, txn_after 는 직후에 부른다.
-# txn_begin <memdir> <snapdir> / txn_after <memdir> <snapdir> / txn_restore <memdir> <snapdir> / txn_end <snapdir>
+# txn_begin <memdir> <snapdir> / txn_after <memdir> <snapdir> / txn_restore <memdir> <snapdir> [부분경로] / txn_end <snapdir>
+# txn_restore 에 부분경로(예: diary)를 주면 그 하위만 실행 전 상태로 되돌린다(추가된 파일 삭제·바뀐/지워진 파일 복원·빈 폴더 정리). 나머지 변경은 그대로 둔다.
 txn_begin() { rm -rf "$2" "$2.A" "$2.B"; mkdir -p "$2" && cp -Rp "$1/." "$2/" && mem_snap "$1" > "$2.A"; }
 txn_after() { mem_snap "$1" > "$2.B"; }
 txn_restore() {
   [ -f "$2.B" ] || txn_after "$1" "$2"
-  python3 -I - "$1" "$2" <<'PY'
+  python3 -I - "$1" "$2" "${3:-}" <<'PY'
 import os, shutil, sys
-mem, snap = sys.argv[1:3]
+mem, snap, sub = sys.argv[1:4]
+sub = sub.strip("/")
+if sub and os.path.islink(os.path.join(mem, sub)): os.remove(os.path.join(mem, sub))   # 링크로 바꿔 놓았으면 링크만 걷어내고 복원(링크 너머로 쓰지 않는다)
 def load(f):
     d = {}
     for line in open(f, encoding="utf-8", errors="surrogateescape"):
@@ -100,11 +103,18 @@ def load(f):
 A, B = load(snap + ".A"), load(snap + ".B")
 for p in sorted(set(A) | set(B)):
     if A.get(p) == B.get(p): continue
+    if sub and not p.startswith("./" + sub + "/"): continue
     dst, src = os.path.join(mem, p), os.path.join(snap, p)
     if p in A:
         os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy2(src, dst)
     elif os.path.lexists(dst):
         os.remove(dst)
+if sub:   # 모델이 새로 만든 빈 폴더 정리(실행 전에 없던 폴더만)
+    for root, dirs, files in os.walk(os.path.join(mem, sub), topdown=False):
+        rel = os.path.relpath(root, mem)
+        if not os.path.isdir(os.path.join(snap, rel)) and not os.listdir(root):
+            try: os.rmdir(root)
+            except OSError: pass
 PY
 }
 txn_end() { rm -rf "$1" "$1.A" "$1.B"; }
@@ -818,6 +828,127 @@ print("보관 %d개 이동(거부·건너뜀 %d)" % (moved, refused) if moved or
 PY
   )
   [ -z "$res" ] || { type log >/dev/null 2>&1 && log "일지 보관: $res"; }
+  return 0
+}
+
+# ---- 하루 회고(diary): 일지 날짜 파일을 바탕으로 하루치 짧은 글을 `$MEM/diary/YYYY-MM-DD.md` 로 둔다.
+# diary_days_text: 이번 실행에서 모델에게 맡길 날짜를 한 줄에 하나(YYYY-MM-DD)씩 stdout 으로(없으면 빈 출력). 모델이 아니라 셸이 고른다.
+# 조건: journal/ 최상위 날짜 파일(일반 파일·심볼릭 링크 아님·256KB 이하) 중 오늘을 뺀 최근 7일 안이고, 유효한 항목 줄
+# (`- [한 일|결정|남은 일] (1~10) …`)이 하나 이상 있고, diary/<날짜>.md 가 아직 없는 것. 최신 날짜부터 최대 2개. 항상 0.
+diary_days_text() {
+  python3 -I - "$MEM" "$_maru_lib" <<'PY' 2>/dev/null
+import datetime, os, re, stat, sys
+mem = sys.argv[1]
+sys.path.insert(0, sys.argv[2])
+from textclean import strip_bad
+jd, dd = os.path.join(mem, "journal"), os.path.join(mem, "diary")
+ITEM = re.compile(r"^- \[(?:한 일|결정|남은 일)\] \((?:10|[1-9])\) \S")
+NAME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})\.md")
+today = datetime.date.today()
+try:
+    if os.path.islink(jd) or not os.path.isdir(jd): sys.exit(0)
+    names = os.listdir(jd)
+except OSError:
+    sys.exit(0)
+found = []
+for n in names:
+    m = NAME.fullmatch(n)
+    if not m: continue
+    try: d = datetime.date.fromisoformat(m.group(1))
+    except ValueError: continue
+    if not 1 <= (today - d).days <= 7: continue
+    if os.path.lexists(os.path.join(dd, n)): continue
+    p = os.path.join(jd, n)
+    try:
+        st = os.lstat(p)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 262144: continue
+        with open(p, "rb") as f: text = f.read(262145).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        continue
+    if any(ITEM.match(strip_bad(l.rstrip("\r"))) for l in text.split("\n")): found.append(m.group(1))
+for d in sorted(found, reverse=True)[:2]: print(d)
+PY
+  return 0
+}
+
+# apply_diary <stage의 diary 폴더> <이번에 맡긴 날짜 목록(줄바꿈 구분)>
+# 모델이 쓴 `<날짜>.txt`(1줄 제목, 빈 줄, 본문)를 검증해 $MEM/diary/<날짜>.md(`# 제목` + 빈 줄 + 문단들)로 설치한다. 앱이 이 형식을 읽는다.
+# 받는 조건: 이름이 이번에 맡긴 날짜 / 일반 파일(링크 거부)·4KB 이하·UTF-8 / 비밀값처럼 보이는 줄이 없음(있으면 파일 전체 거부) /
+# 줄마다 제어문자 제거 + neutralize_body(백틱 제거, < > [ ] 치환, 앞쪽 # @ 제거) 뒤 제목(첫 비어 있지 않은 줄, 60자)이 비어 있지 않고 본문이 20자 이상(1500자까지).
+# 이미 있는 diary/<날짜>.md 는 덮어쓰지 않는다. diary 가 링크이거나 폴더가 아니면 모두 거부. 임시 파일을 만든 뒤 link 로 놓아 읽는 쪽이 반쪽 파일을 보지 않는다.
+# 이유는 한 줄씩 로그에 남긴다. 거부·없음이 실행을 실패시키지 않는다(항상 0). 호출 쪽이 기억 쓰기 잠금을 쥔 상태에서, 모델의 diary/ 변조 검사가 끝난 뒤에만 부른다(dream.sh).
+apply_diary() {
+  local sdir=$1 offered=${2:-} line res
+  [ -n "${offered//[[:space:]]/}" ] || return 0
+  [ -e "$sdir" ] || [ -L "$sdir" ] || return 0
+  res=$(python3 -I - "$sdir" "$MEM" "$_maru_lib" "$offered" <<'PY' 2>&1
+import os, re, stat, sys, tempfile
+sdir, mem, libdir, offered = sys.argv[1:5]
+sys.path.insert(0, libdir)
+from textclean import strip_bad, neutralize_body, looks_secret
+MAX_BYTES, TITLE_MAX, BODY_MIN, BODY_MAX = 4096, 60, 20, 1500
+days = {d for d in offered.split() if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", d)}
+def clean(line): return neutralize_body(strip_bad(line.replace("\t", " ").rstrip("\r")))
+try:
+    if os.path.islink(sdir) or not os.path.isdir(sdir): print("거부: stage diary 가 링크이거나 폴더가 아님"); sys.exit(0)
+    names = sorted(os.listdir(sdir))
+except OSError as e:
+    print("거부: stage diary 읽기 실패(%s)" % type(e).__name__); sys.exit(0)
+dd = os.path.join(mem, "diary")
+dd_ok = None
+for n in names:
+    m = re.fullmatch(r"([0-9]{4}-[0-9]{2}-[0-9]{2})\.txt", n)
+    if not m: print("거부(이름 형식): %s" % re.sub(r"[^0-9A-Za-z._-]", "?", n)[:40]); continue
+    day = m.group(1)
+    if day not in days: print("거부(이번에 맡기지 않은 날짜): %s" % day); continue
+    p = os.path.join(sdir, n)
+    try:
+        st = os.lstat(p)
+        if not stat.S_ISREG(st.st_mode): print("거부(일반 파일 아님/링크): %s" % day); continue
+        if st.st_size > MAX_BYTES: print("거부(크기 초과 %d바이트): %s" % (st.st_size, day)); continue
+        with open(p, "rb") as f: text = f.read(MAX_BYTES + 1).decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print("거부(읽기 실패 %s): %s" % (type(e).__name__, day)); continue
+    if any(looks_secret(strip_bad(l)) for l in text.split("\n")): print("거부(비밀값처럼 보임): %s" % day); continue
+    first = next((l for l in text.split("\n") if l.strip()), "")
+    if re.fullmatch(r"[#\s]+", first): print("거부(첫 줄이 # 뿐이라 제목이 없음): %s" % day); continue   # 본문 첫 줄이 제목으로 올라가는 것 방지
+    paras, cur, title = [], [], None
+    for raw in text.split("\n"):
+        c = clean(raw)
+        if title is None:
+            if c: title = c[:TITLE_MAX].strip()
+            continue
+        if c: cur.append(c)
+        elif cur: paras.append(" ".join(cur)); cur = []
+    if cur: paras.append(" ".join(cur))
+    body = "\n\n".join(paras)[:BODY_MAX].rstrip()
+    if not title: print("거부(제목 없음): %s" % day); continue
+    if len(body) < BODY_MIN: print("거부(본문 %d자 < %d): %s" % (len(body), BODY_MIN, day)); continue
+    try:
+        if dd_ok is None:
+            if os.path.islink(dd) or (os.path.lexists(dd) and not os.path.isdir(dd)): dd_ok = False
+            else: os.makedirs(dd, mode=0o700, exist_ok=True); os.chmod(dd, 0o700); dd_ok = True
+        if not dd_ok: print("거부(diary 가 링크이거나 폴더가 아님): %s" % day); continue
+        dst = os.path.join(dd, day + ".md")
+        if os.path.lexists(dst): print("건너뜀(이미 있음): %s" % day); continue
+        fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=dd)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(("# %s\n\n%s\n" % (title, body)).encode("utf-8")); f.flush(); os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
+            os.link(tmp, dst)   # 이미 있으면 실패 — 덮어쓰지 않는다
+        finally:
+            if os.path.lexists(tmp): os.unlink(tmp)
+        print("ok 설치: diary/%s.md(제목 %d자, 본문 %d자)" % (day, len(title), len(body)))
+    except FileExistsError:
+        print("건너뜀(이미 있음): %s" % day)
+    except OSError as e:
+        print("거부(쓰기 실패 %s): %s" % (type(e).__name__, day))
+PY
+  )
+  while IFS= read -r line; do
+    [ -n "$line" ] && type log >/dev/null 2>&1 && log "하루 회고: $line"
+  done <<< "$res"
   return 0
 }
 

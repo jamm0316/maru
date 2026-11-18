@@ -47,7 +47,7 @@
   }
   function focusTerm() {
     if (modalOpen()) return;
-    if (detailOpen) { (detailMode === 'inbox' ? $('id-title') : detailMode === 'memory' ? $('mv-title') : $('pd-title')).focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
+    if (detailOpen) { (detailMode === 'inbox' ? $('id-title') : detailMode === 'memory' ? $('mv-title') : detailMode === 'day' ? $('dv-title') : $('pd-title')).focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
     const e = terms.get(activeId); if (e && e.opened) e.term.focus();
   }
   // Tab 순환(모달 안에서만)
@@ -64,7 +64,7 @@
   // ---- 터미널: 작업 공간마다 xterm 하나를 살려 두고 활성만 보인다 ----
   // WebGL 은 활성 터미널에만 붙이고, 숨길 때 dispose 한다(컨텍스트 수 제한 회피). 비활성 터미널은 DOM 렌더러 없이도 버퍼만 유지한다.
   let memView = null; // 기억 보기(memview.js). 가운데 영역을 차지하는 세 번째 상세
-  let detailMode = 'project'; // 'project' | 'inbox': 가운데 상세가 무엇인지(둘 다 detailOpen 으로 터미널을 가린다)
+  let detailMode = 'project'; // 'project' | 'inbox' | 'memory' | 'day': 가운데 상세가 무엇인지(모두 detailOpen 으로 터미널을 가린다)
   let detailOpen = false; let detailKey = null; let detail = null; let detailSig = ''; let detailSeq = 0; // 프로젝트 상세(아래 '프로젝트' 절). 열려 있으면 터미널은 숨기기만 한다
   const terms = new Map(); // id -> { id, term, fit, host, gl, opened, started, starting }
   let activeId = null;
@@ -617,6 +617,8 @@
     if (detailOpen && detailMode === 'project') fetchDetail(false);
     renderInbox(p.inbox);
     if (detailOpen && detailMode === 'inbox') refreshInboxDetail();
+    if (detailOpen && detailMode === 'day') fetchDay(false);
+    refreshCal();
 
     const sk = $('skills'); sk.replaceChildren();
     for (const n of p.skills) sk.append(el('span', 'chip', n));
@@ -739,11 +741,12 @@
 
   // 상세(읽기 전용): 터미널 자리에 보인다. 본문은 <pre> 에 textContent 로만.
   async function openInboxDetail(kind, slug) {
-    detailMode = 'inbox'; detailOpen = true; detailKey = null; detail = null; detailSig = ''; detailSeq++;
+    detailMode = 'inbox'; detailOpen = true; detailKey = null; detail = null; detailSig = ''; detailSeq++; dayKey = null; daySeq++;
     inboxDet = { kind, slug, loading: true }; const my = ++inboxDetSeq;
-    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = false; if (memView) memView.hide();
+    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = false; $('day-view').hidden = true; if (memView) memView.hide();
     $('id-note').textContent = '';
     if (lastPanels) renderProjects(lastPanels.projects);
+    renderCal(); // 고른 날 강조·aria-pressed 를 바로 지운다
     renderInboxDetail(true);
     let d = null; try { d = await window.maru.inboxDetail(kind, slug); } catch (x) { d = null; }
     if (my !== inboxDetSeq || !detailOpen || detailMode !== 'inbox') return;
@@ -809,12 +812,13 @@
 
   // ---- 프로젝트: 왼쪽 목록(카테고리 > 프로젝트)과 가운데 상세 ----
   // 모든 문구는 textContent 로만 넣는다. 키는 main 의 목록에서 온 값이고, 상태 변경·이어서 하기는 main 이 키를 다시 대조한다.
-  let projView = { open: [], done: [], doneCount: 0, collapsed: [] };
+  let projView = { open: [], done: [], doneCount: 0, unsorted: [], collapsed: [] };
   let doneOpen = false; // "완료" 목록 펼침은 저장하지 않는다(카테고리 접힘은 main 이 data/project-ui.json 에 저장)
+  let unsortedOpen = false; // "분류 안 된 작업" 펼침도 저장하지 않는다
   let dragState = null; let pendingPv = null; let projHintWs = -1; let projNoteTimer = null;
   const DRAG_TYPE = 'application/x-maru-reorder'; // 파일 drop('Files')과 섞이지 않게 자체 타입만 쓴다
   const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
-  function projTitle(it) { return it.kind === 'unclassified' ? T('proj.unclassified') : it.title; }
+  function projTitle(it) { return it.kind === 'unclassified' ? it.tag : it.title; } // 분류 안 된 줄의 이름은 태그
   // ⌘숫자 힌트: main 메뉴와 같은 Lib.numberTargets 로 센다(작업 공간 먼저, 이어서 접히지 않은 진행 중 프로젝트 줄). 'kind:id' -> 번호
   function numberMap() {
     const m = new Map();
@@ -827,7 +831,7 @@
     clearTimeout(projNoteTimer); projNoteTimer = setTimeout(() => { n.textContent = ''; }, 4000);
   }
   function projRow(it, num, canDrag) {
-    const b = el('button', 'proj' + (it.kind === 'unclassified' ? ' unc' : '') + (it.key === detailKey ? ' on' : '')); b.type = 'button'; b.dataset.key = it.key; b.dataset.tag = it.tag;
+    const b = el('button', 'proj' + (it.key === detailKey ? ' on' : '')); b.type = 'button'; b.dataset.key = it.key; b.dataset.tag = it.tag;
     const name = projTitle(it);
     let cnt;
     if (it.status === 'done') cnt = el('span', 'cnt', it.doneAt || '');
@@ -839,7 +843,7 @@
     if (it.key === detailKey) b.setAttribute('aria-current', 'true');
     b.setAttribute('aria-label', T('proj.row.aria', { title: name, state: cnt.textContent }));
     if (num) b.setAttribute('aria-keyshortcuts', 'Meta+' + num);
-    if (canDrag && it.kind === 'project') { b.draggable = true; b.dataset.drag = 'proj'; } // "분류 안 됨" 줄은 맨 아래 고정
+    if (canDrag && it.kind === 'project') { b.draggable = true; b.dataset.drag = 'proj'; } // 분류 안 된 작업 줄은 끌 수 없다
     b.addEventListener('click', () => openDetail(it.key));
     return b;
   }
@@ -872,14 +876,20 @@
   function renderProjects(pv) {
     if (dragState) { pendingPv = pv; return; } // 끄는 동안 DOM 을 바꾸면 dragend 가 오지 않을 수 있다. 끝난 뒤 그린다
     pendingPv = null;
-    projView = pv && Array.isArray(pv.open) && Array.isArray(pv.done) ? pv : { open: [], done: [], doneCount: 0, collapsed: [] };
+    projView = pv && Array.isArray(pv.open) && Array.isArray(pv.done) ? { unsorted: [], ...pv } : { open: [], done: [], doneCount: 0, unsorted: [], collapsed: [] };
     projHintWs = wsList.length;
     const card = $('proj-card'); const f = document.activeElement;
-    const refocus = f && card.contains(f) ? (f.dataset.cat ? 'c:' + f.dataset.sec + ':' + f.dataset.cat : f.dataset.key ? 'k:' + f.dataset.key : f.id === 'proj-done-toggle' ? 't' : null) : null;
+    const refocus = f && card.contains(f) ? (f.dataset.cat ? 'c:' + f.dataset.sec + ':' + f.dataset.cat : f.dataset.key ? 'k:' + f.dataset.key : f.id === 'proj-done-toggle' ? 't' : f.id === 'proj-unsorted-toggle' ? 'u' : null) : null;
     const nums = numberMap();
     const box = $('projects'); box.replaceChildren();
     if (!projView.open.length) box.append(el('div', 'empty', T('proj.empty')));
     fillGroups(box, projView.open, 'open', nums);
+    const un = Array.isArray(projView.unsorted) ? projView.unsorted : [];
+    const ut = $('proj-unsorted-toggle'); ut.hidden = un.length === 0; ut.textContent = T('proj.unsorted.toggle', { n: un.length });
+    ut.setAttribute('aria-label', T('proj.unsorted.toggle', { n: un.length }) + ' — ' + T('proj.unsorted.aria'));
+    ut.setAttribute('aria-expanded', String(unsortedOpen && un.length > 0));
+    const ub = $('projects-unsorted'); ub.replaceChildren(); ub.hidden = !unsortedOpen || un.length === 0;
+    if (!ub.hidden) for (const it of un) ub.append(projRow(it, 0, false)); // 번호·끌기 없음
     const n = projView.doneCount | 0;
     const tg = $('proj-done-toggle'); tg.hidden = n === 0; tg.textContent = T('proj.done.toggle', { n });
     tg.setAttribute('aria-label', T('proj.done.toggle', { n }) + ' — ' + T('proj.done.aria'));
@@ -889,11 +899,13 @@
     if (refocus) {
       let t = null;
       if (refocus === 't') t = tg;
+      else if (refocus === 'u') t = ut;
       else if (refocus.startsWith('c:')) t = [...card.querySelectorAll('.proj-cat')].find((x) => 'c:' + x.dataset.sec + ':' + x.dataset.cat === refocus);
       else t = [...card.querySelectorAll('.proj')].find((x) => 'k:' + x.dataset.key === refocus);
       if (t && !t.hidden) t.focus();
     }
   }
+  $('proj-unsorted-toggle').addEventListener('click', () => { unsortedOpen = !unsortedOpen; if (lastPanels) renderProjects(lastPanels.projects); $('proj-unsorted-toggle').focus(); });
   $('proj-done-toggle').addEventListener('click', () => { doneOpen = !doneOpen; if (lastPanels) renderProjects(lastPanels.projects); $('proj-done-toggle').focus(); });
 
   // ---- 순서 바꾸기: 끌어서 놓기(같은 종류끼리만) + ⌥↑/⌥↓. 검증은 main 이 한다 ----
@@ -905,7 +917,7 @@
     if (kind === 'cat') { total = projView.open.length; pos = projView.open.findIndex((g) => g.tag === id) + 1; }
     else {
       const g = projView.open.find((x) => x.items.some((it) => it.key === id));
-      const ps = g ? g.items.filter((it) => it.kind === 'project') : [];
+      const ps = g ? g.items : [];
       total = ps.length; pos = ps.findIndex((it) => it.key === id) + 1; title = (ps[pos - 1] && ps[pos - 1].title) || id;
     }
     if (pos > 0) projNote(T('proj.moved', { title, pos, total }));
@@ -923,10 +935,9 @@
       return { el: g, after, beforeId };
     }
     const row = t.closest('.proj'); if (!row || !$('projects').contains(row) || row.dataset.tag !== dragState.tag || row.dataset.key === dragState.id) return null; // 다른 카테고리로는 못 옮긴다
-    if (row.classList.contains('unc')) return { el: row, after: false, beforeId: null }; // "분류 안 됨" 위 = 프로젝트 줄 맨 끝
     const r = row.getBoundingClientRect(); const after = e.clientY >= r.top + r.height / 2;
     let beforeId = row.dataset.key;
-    if (after) { let s = row.nextElementSibling; while (s && s.dataset.key === dragState.id) s = s.nextElementSibling; beforeId = s && !s.classList.contains('unc') ? s.dataset.key : null; }
+    if (after) { let s = row.nextElementSibling; while (s && s.dataset.key === dragState.id) s = s.nextElementSibling; beforeId = s ? s.dataset.key : null; }
     return { el: row, after, beforeId };
   }
   const projBox = $('projects');
@@ -959,7 +970,7 @@
     for (const n of projBox.querySelectorAll('.dragging')) n.classList.remove('dragging');
     if (pendingPv) renderProjects(pendingPv);
   });
-  // 키보드 대안: 포커스된 카테고리·프로젝트 줄에서 ⌥↑/⌥↓ 로 한 칸 이동("분류 안 됨" 줄은 고정)
+  // 키보드 대안: 포커스된 카테고리·프로젝트 줄에서 ⌥↑/⌥↓ 로 한 칸 이동
   projBox.addEventListener('keydown', (e) => {
     if ((e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     const t = e.target && e.target.closest ? e.target.closest('[data-drag]') : null;
@@ -970,7 +981,7 @@
     else {
       kind = 'proj'; id = t.dataset.key;
       const g = projView.open.find((x) => x.items.some((it) => it.key === id));
-      ids = g ? g.items.filter((it) => it.kind === 'project').map((it) => it.key) : [];
+      ids = g ? g.items.map((it) => it.key) : [];
     }
     const i = ids.indexOf(id); if (i < 0) return;
     const up = e.key === 'ArrowUp';
@@ -980,24 +991,26 @@
   });
 
   function openDetail(key) {
-    detailMode = 'project'; inboxDet = null; inboxDetSeq++; $('inbox-detail').hidden = true; if (memView) memView.hide();
+    detailMode = 'project'; inboxDet = null; inboxDetSeq++; $('inbox-detail').hidden = true; $('day-view').hidden = true; dayKey = null; daySeq++; if (memView) memView.hide();
     detailKey = key; detailOpen = true; detail = null; detailSig = '';
     $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = false;
     $('pd-note').textContent = '';
     if (lastPanels) renderProjects(lastPanels.projects);
+    renderCal();
     fetchDetail(true);
   }
   // 시험 전용: 첫 프로젝트(없으면 첫 '분류 안 됨')의 상세를 연다
   function openFirstProject() {
     const all = projView.open.flatMap((g) => g.items);
-    const it = all.find((x) => x.kind === 'project') || all[0];
+    const it = all[0] || (projView.unsorted || [])[0];
     if (it) openDetail(it.key);
   }
   function closeDetail(refocus) {
     if (!detailOpen) return;
-    detailOpen = false; detailKey = null; detail = null; detailSig = ''; detailSeq++; inboxDet = null; inboxDetSeq++;
-    $('proj-detail').hidden = true; $('inbox-detail').hidden = true; if (memView) memView.hide(); $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
+    detailOpen = false; detailKey = null; detail = null; detailSig = ''; detailSeq++; inboxDet = null; inboxDetSeq++; dayKey = null; daySeq++;
+    $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('day-view').hidden = true; if (memView) memView.hide(); $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
     if (lastPanels) renderProjects(lastPanels.projects);
+    renderCal();
     showActive(false); // 숨겨 둔 동안 바뀐 크기를 다시 맞추고 그린다(pty 는 그대로 살아 있다)
     if (refocus) focusTerm();
   }
@@ -1025,7 +1038,7 @@
     const f = document.activeElement; const had = f && $('pd-actions').contains(f) ? f.dataset.k : null;
     $('proj-detail').setAttribute('aria-label', T('proj.detail.aria'));
     $('pd-tag').textContent = d.tag;
-    $('pd-title').textContent = d.kind === 'unclassified' ? T('proj.unclassified') : d.title;
+    $('pd-title').textContent = d.kind === 'unclassified' ? T('proj.unsorted.title', { tag: d.tag }) : d.title;
     const st = $('pd-status'); st.hidden = d.kind !== 'project';
     st.className = 'pill ' + (d.status === 'done' ? 'ok' : 'open'); st.textContent = T(d.status === 'done' ? 'proj.status.done' : 'proj.status.open', { date: d.doneAt || '' }).trim();
     $('pd-meta').textContent = d.lastDay ? T('proj.meta', { date: d.lastDay, n: d.records }) : T('proj.meta.none');
@@ -1197,6 +1210,7 @@
     if (detailOpen && detailMode === 'project' && detail) renderDetail(false);
     if (detailOpen && detailMode === 'inbox' && inboxDet) renderInboxDetail(false);
     if (memView) memView.relabel();
+    renderCal(); if (detailOpen && detailMode === 'day' && dayData) renderDay(false);
     if (setRows) renderSettings();
     if (su.open) renderSetup(false);
     if (homeNotice) $('home-warn').textContent = T('home.warn.' + homeNotice);
@@ -1413,6 +1427,7 @@
         cb.addEventListener('change', async () => {
           cb.disabled = true;
           try { await (r.toggle.kind === 'resume' ? window.maru.setResume(cb.checked) : window.maru.setCalendar(cb.checked)); } catch (e) { /* 다시 읽기에서 반영 */ }
+          if (r.toggle.kind !== 'resume') { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); } // 끄면 일정 제목·점이 5초 폴링을 기다리지 않고 바로 사라진다
           setLoading = false; loadSettings(false);
         });
         lab.append(cb, el('span', '', T(r.toggle.kind === 'resume' ? 'resume.toggle' : 'cal.toggle'))); right.append(lab);
@@ -1606,13 +1621,156 @@
   window.addEventListener('blur', () => setMod(false));
   document.addEventListener('visibilitychange', () => { if (document.hidden) setMod(false); });
 
+  // ---- 달력 카드(왼쪽)와 하루 보기(가운데) ----
+  // 모든 문구는 textContent 로만 넣는다. 날짜 문자열은 main 이 검증해 준 값이고, 하루 보기는 읽기 전용이다.
+  let calYm = todayStr().slice(0, 7); let calData = null; let calSeq = 0; let calSig = '';
+  let dayKey = null; let dayData = null; let daySig = ''; let daySeq = 0; let dayPendTimer = null;
+  const ymdDate = (d) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d); return new Date(+m[1], +m[2] - 1, +m[3]); };
+  const fmtIntl = (date, opts) => { try { return new Intl.DateTimeFormat(lang, opts).format(date); } catch (x) { return ''; } };
+  function calDayLabel(day, info) {
+    const parts = [fmtIntl(ymdDate(day), { month: 'long', day: 'numeric' })];
+    if (info && info.records) parts.push(T('cal.day.rec', { n: info.records }));
+    if (info && info.events) parts.push(T('cal.day.ev', { n: info.events }));
+    if (info && info.diary) parts.push(T('cal.day.diary'));
+    return parts.join(', ');
+  }
+  function renderCal() {
+    const p = Lib.parseYm(calYm); if (!p) return;
+    const today = calData ? calData.today : todayStr();
+    const days = calData && calData.ym === calYm ? calData.days : {};
+    const on = !!(calData && calData.calendarOn);
+    const selDay = detailOpen && detailMode === 'day' ? dayKey : null;
+    const grid = $('cal-grid'); const f = document.activeElement;
+    const had = f && grid.contains(f) && f.dataset.day ? f.dataset.day : null;
+    const sig = JSON.stringify([lang, calYm, days, today, on, selDay, had]);
+    if (sig === calSig) return;
+    calSig = sig;
+    $('cal-month').textContent = fmtIntl(new Date(p.year, p.month - 1, 1), { year: 'numeric', month: 'long' });
+    $('cal-prev').disabled = !Lib.shiftYm(calYm, -1); $('cal-next').disabled = !Lib.shiftYm(calYm, 1);
+    const wds = $('cal-wds'); wds.replaceChildren();
+    for (let i = 0; i < 7; i++) wds.append(el('span', 'cal-wd', fmtIntl(new Date(2024, 0, 7 + i), { weekday: 'narrow' }))); // 2024-01-07 은 일요일
+    const lay = Lib.monthLayout(p.year, p.month);
+    const stop = had && had.startsWith(calYm + '-') ? had : selDay && selDay.startsWith(calYm + '-') ? selDay : today.startsWith(calYm + '-') ? today : calYm + '-01'; // 탭으로 들어오는 칸(roving tabindex)
+    grid.replaceChildren();
+    for (let i = 0; i < lay.first; i++) grid.append(el('span', 'cal-pad'));
+    for (let d = 1; d <= lay.days; d++) {
+      const day = calYm + '-' + pad(d); const info = Object.prototype.hasOwnProperty.call(days, day) ? days[day] : null;
+      const b = el('button', 'cal-d' + (day === today ? ' today' : '') + (day === selDay ? ' sel' : '')); b.type = 'button'; b.dataset.day = day;
+      b.append(el('span', 'n', String(d)));
+      const dots = el('span', 'dots');
+      if (info && info.records) dots.append(el('i', 'rec'));
+      if (info && info.events) dots.append(el('i', 'ev'));
+      b.append(dots);
+      b.setAttribute('aria-label', calDayLabel(day, info));
+      if (day === today) b.setAttribute('aria-current', 'date');
+      b.setAttribute('aria-pressed', String(day === selDay));
+      b.tabIndex = day === stop ? 0 : -1;
+      b.addEventListener('click', () => showDay(day, 'title'));
+      grid.append(b);
+    }
+    $('cal-legend').textContent = T(on ? 'cal.legend' : 'cal.legend.rec');
+    if (had) { const n = grid.querySelector('[data-day="' + had + '"]'); if (n) n.focus(); }
+  }
+  async function refreshCal() {
+    const my = ++calSeq; const ym = calYm;
+    let d = null; try { d = await window.maru.getMonthDays(ym); } catch (x) { d = null; }
+    if (my !== calSeq || !d || d.ym !== calYm || !Lib.parseYm(d.ym) || typeof d.today !== 'string' || !d.days || typeof d.days !== 'object') return;
+    calData = d; renderCal();
+  }
+  function setCalMonth(ym) { if (!Lib.parseYm(ym) || ym === calYm) return; calYm = ym; calSig = ''; renderCal(); refreshCal(); }
+  $('cal-prev').addEventListener('click', () => { const n = Lib.shiftYm(calYm, -1); if (n) setCalMonth(n); });
+  $('cal-next').addEventListener('click', () => { const n = Lib.shiftYm(calYm, 1); if (n) setCalMonth(n); });
+  $('cal-today').addEventListener('click', () => {
+    const t = (calData ? calData.today : todayStr()); setCalMonth(t.slice(0, 7));
+    const b = $('cal-grid').querySelector('[data-day="' + t + '"]'); if (b) b.focus();
+  });
+  // 방향키: 날짜 칸 사이 이동(좌우 하루, 상하 한 주, Home/End 달의 처음·끝). 달 밖으로는 나가지 않는다
+  $('cal-grid').addEventListener('keydown', (e) => {
+    const t = e.target && e.target.closest ? e.target.closest('.cal-d') : null;
+    if (!t || e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || e.isComposing) return;
+    const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[e.key];
+    const all = [...$('cal-grid').querySelectorAll('.cal-d')]; const i = all.indexOf(t);
+    let j = -1;
+    if (step !== undefined) j = i + step; else if (e.key === 'Home') j = 0; else if (e.key === 'End') j = all.length - 1; else return;
+    e.preventDefault();
+    if (j >= 0 && j < all.length) { for (const x of all) x.tabIndex = -1; all[j].tabIndex = 0; all[j].focus(); }
+  });
+
+  // 하루 보기: kind 'title' 이면 제목에 포커스(열 때), 'keep' 이면 누른 단추에 그대로(전날·다음 날)
+  function showDay(day, focus) {
+    if (!Lib.validDay(day) || !Lib.parseYm(day.slice(0, 7))) return;
+    closeMenu(false); closeUpdate(false);
+    detailMode = 'day'; inboxDet = null; inboxDetSeq++; detailKey = null; detail = null; detailSig = ''; detailSeq++; detailOpen = true;
+    dayKey = day; dayData = null; daySig = ''; daySeq++; clearTimeout(dayPendTimer);
+    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true; if (memView) memView.hide();
+    $('day-view').hidden = false;
+    $('day-view').setAttribute('aria-label', T('day.aria'));
+    $('dv-title').textContent = fmtIntl(ymdDate(day), { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+    $('dv-prev').disabled = !Lib.shiftDay(day, -1); $('dv-next').disabled = !Lib.shiftDay(day, 1);
+    $('dv-body').replaceChildren();
+    if (lastPanels) renderProjects(lastPanels.projects);
+    if (day.slice(0, 7) !== calYm) setCalMonth(day.slice(0, 7)); else { calSig = ''; renderCal(); }
+    if (focus === 'title') $('dv-title').focus();
+    fetchDay();
+  }
+  async function fetchDay() {
+    const my = ++daySeq; const day = dayKey;
+    let d = null; try { d = await window.maru.getDayDetail(day); } catch (x) { d = null; }
+    if (my !== daySeq || !detailOpen || detailMode !== 'day' || day !== dayKey) return;
+    if (!d || d.day !== day || !Array.isArray(d.groups) || !d.events) { closeDetail(true); return; }
+    clearTimeout(dayPendTimer);
+    if (d.events.state === 'pending') dayPendTimer = setTimeout(() => { if (detailOpen && detailMode === 'day' && day === dayKey) fetchDay(); }, 1500); // 일정을 읽는 중이면 곧 다시 묻는다
+    const sig = JSON.stringify(d);
+    if (sig === daySig && dayData) return; // 같으면 다시 그리지 않는다(깜박임·포커스 이동 없음)
+    daySig = sig; dayData = d; renderDay(false);
+  }
+  function renderDay() {
+    const d = dayData; if (!d) return;
+    $('day-view').setAttribute('aria-label', T('day.aria'));
+    $('dv-title').textContent = fmtIntl(ymdDate(d.day), { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+    $('dv-prev').disabled = !Lib.shiftDay(d.day, -1); $('dv-next').disabled = !Lib.shiftDay(d.day, 1);
+    const body = $('dv-body'); const f = document.activeElement;
+    const keep = f && body.contains(f) ? f : null; // 본문에는 포커스 가는 요소가 없지만 안전하게
+    body.replaceChildren();
+    const sec = (key) => { const x = el('section', 'dv-sec'); x.append(el('h3', 'pd-h', T(key))); body.append(x); return x; };
+    if (d.diary || d.groups.length || d.isToday) {
+      const x = sec('day.sec.diary');
+      if (d.diary) {
+        x.append(el('h4', 'dv-diary-title', d.diary.title));
+        for (const para of String(d.diary.body).split(/\n{2,}/)) if (para.trim()) x.append(el('p', 'dv-p', para));
+      } else x.append(el('p', 'hint dv-hint', T(d.isToday ? 'day.diary.today' : 'day.diary.none')));
+    }
+    const ev = d.events;
+    if (d.calendarOn && (ev.state !== 'ok' || ev.items.length)) {
+      const x = sec('day.sec.events');
+      if (ev.state === 'pending') x.append(el('p', 'hint dv-hint', T('day.events.loading')));
+      else if (ev.state === 'fail') x.append(el('p', 'hint dv-hint', T('day.events.fail')));
+      else for (const e of ev.items) { const r = el('div', 'cal-ev'); r.append(el('span', 'cal-t', e.allDay ? T('cal.allday') : e.time), el('span', 'cal-n', e.title)); x.append(r); }
+    }
+    if (d.groups.length) {
+      const x = sec('day.sec.records');
+      for (const g of d.groups) {
+        x.append(el('h4', 'dv-gh', g.title || T('day.notag')));
+        const lg = el('div', 'pd-log');
+        for (const it of g.items) { const r = el('div', 'pd-row dv-row'); r.append(el('span', 'd', it.time), el('span', 'k k-' + it.kind, T('proj.kind.' + it.kind)), el('span', 'x', it.text)); lg.append(r); }
+        x.append(lg);
+      }
+    }
+    if (!d.diary && !d.groups.length && !(ev.items && ev.items.length) && (ev.state === 'off' || ev.state === 'ok')) body.append(el('p', 'dv-empty', T('day.empty')));
+    if (keep && !document.contains(keep)) $('dv-title').focus();
+  }
+  $('dv-close').addEventListener('click', () => closeDetail(true));
+  $('dv-prev').addEventListener('click', () => { const n = Lib.shiftDay(dayKey, -1); if (n) showDay(n, 'keep'); });
+  $('dv-next').addEventListener('click', () => { const n = Lib.shiftDay(dayKey, 1); if (n) showDay(n, 'keep'); });
+
   // ---- 기억 보기: 터미널 자리를 차지하는 읽기 전용 화면(목록·그래프) ----
   memView = window.MaruMemView.create({ T, $, el, Lib, onClose: () => closeDetail(true) });
   function openMemory(initialMode) {
     if (detailOpen && detailMode === 'memory') return;
-    detailMode = 'memory'; inboxDet = null; inboxDetSeq++; detailKey = null; detail = null; detailSig = ''; detailSeq++; detailOpen = true;
-    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true;
+    detailMode = 'memory'; inboxDet = null; inboxDetSeq++; dayKey = null; daySeq++; detailKey = null; detail = null; detailSig = ''; detailSeq++; detailOpen = true;
+    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('day-view').hidden = true;
     if (lastPanels) renderProjects(lastPanels.projects);
+    renderCal();
     memView.show(initialMode).then(() => $('mv-title').focus());
   }
   $('mem-open').addEventListener('click', () => openMemory('list'));
@@ -1803,6 +1961,7 @@
       homeManaged = init.managed === true;
       homeNotice = init.homeNotice === 'failed' || init.homeNotice === 'newer' ? init.homeNotice : null;
       lang = I18N.isLang(profile && profile.lang) ? profile.lang : (I18N.isLang(init.defaultLang) ? init.defaultLang : 'ko');
+      if (init.uiUnsorted === true) unsortedOpen = true; // 시험 전용(MARU_APP_UNSORTED=open)
     }
     applyStatic();
     if (homeNotice) { $('home-warn').textContent = T('home.warn.' + homeNotice); $('home-warn').hidden = false; }
@@ -1816,8 +1975,9 @@
     else if (init && init.uiOpen === 'settings') openSettings();
     else if (init && init.uiOpen === 'update') openUpdate();
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') showDay(init.uiDay, 'title'); if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
+    setInterval(() => { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); }, 5000); // 일지·회고·일정은 main 이 읽어 둔 캐시를 가볍게 다시 묻는다
     refreshMeet(); setInterval(refreshMeet, 30000);
     setInterval(() => { if (lastPanels) renderInbox(lastPanels.inbox); }, 30000); // 상대 시각(N분 전)을 갱신
     setInterval(syncWs, 1000); // 상태 파일은 이벤트가 없으므로 주기적으로 읽는다

@@ -1249,10 +1249,10 @@ function validDay(d) {
 }
 // <기억 폴더>/journal/*.md 와 journal/archive/*.md 읽기(Node 전용). journal·archive 가 심볼릭 링크이거나 폴더가 아니면 읽지 않고,
 // 파일은 일반 파일만(readRegular: O_NOFOLLOW), 파일당·전체·개수 상한을 넘으면 건너뛴다(최신 날짜 우선).
+function isRealDir(d) { const fs = require('fs'); try { const st = fs.lstatSync(d); return st.isDirectory() && !st.isSymbolicLink(); } catch { return false; } }
 function readJournalEntries(memDir) {
   const fs = require('fs'); const path = require('path');
   const out = [];
-  const isRealDir = (d) => { try { const st = fs.lstatSync(d); return st.isDirectory() && !st.isSymbolicLink(); } catch { return false; } };
   const jd = path.join(memDir, 'journal');
   if (!isRealDir(memDir) || !isRealDir(jd)) return out; // 기억 폴더·journal 이 링크이면 읽지 않는다(readMemoryMetas 와 같다)
   const files = [];
@@ -1272,6 +1272,105 @@ function readJournalEntries(memDir) {
     out.push(...parseJournalText(r.text, f.day));
   }
   return out;
+}
+
+// ---- 하루 회고(<기억 폴더>/diary/YYYY-MM-DD.md): "# 제목" 한 줄 + 빈 줄로 나뉜 본문. 셸이 쓰고 앱은 읽기만 한다 ----
+const DIARY_FILE_MAX_BYTES = 8 * 1024;
+const DIARY_FILES_MAX = 400;
+const DIARY_TITLE_MAX = 60;
+const DIARY_BODY_MAX = 1500;
+const DIARY_NAME_RE = /^([0-9]{4}-[0-9]{2}-[0-9]{2})\.md$/;
+// 본문 -> { title, body } | null. 첫 비어 있지 않은 줄이 "# " 로 시작해야 한다. 줄마다 neutralizeBody(제어문자 제거 포함)를 거치고, 문단 구분(빈 줄)은 남긴다.
+function parseDiaryText(text) {
+  if (typeof text !== 'string') return null;
+  const lines = text.split('\n').map((l) => l.replace(/\r$/, ''));
+  let i = 0;
+  while (i < lines.length && !lines[i].replace(BAD_CHARS_G, '').trim()) i++;
+  if (i >= lines.length) return null;
+  const head = lines[i].replace(/^\uFEFF/, '');
+  if (!head.startsWith('# ')) return null;
+  const title = [...neutralizeBody(head.slice(2))].slice(0, DIARY_TITLE_MAX).join('').trim();
+  if (!title) return null;
+  const body = lines.slice(i + 1).map((l) => neutralizeBody(l)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { title, body: [...body].slice(0, DIARY_BODY_MAX).join('').trim() };
+}
+// <기억 폴더>/diary/*.md 읽기(Node 전용) -> Map(day -> {title, body}). diary 가 링크·폴더 아님이면 비어 있다. 일반 파일만, 8KB 넘으면 건너뛰고, 최신 400개까지.
+function readDiaries(memDir) {
+  const fs = require('fs'); const path = require('path');
+  const out = new Map();
+  const dd = path.join(memDir, 'diary');
+  if (!isRealDir(memDir) || !isRealDir(dd)) return out;
+  let names = [];
+  try { names = fs.readdirSync(dd); } catch { names = []; }
+  const files = [];
+  for (const n of names) { const m = DIARY_NAME_RE.exec(n); if (m && validDay(m[1])) files.push({ day: m[1], file: path.join(dd, n) }); }
+  files.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
+  for (const f of files.slice(0, DIARY_FILES_MAX)) {
+    const r = readRegular(f.file, DIARY_FILE_MAX_BYTES, false);
+    if (!r || r.truncated) continue;
+    const d = parseDiaryText(r.text);
+    if (d) out.set(f.day, d);
+  }
+  return out;
+}
+
+// ---- 달력(왼쪽 달 카드·가운데 하루 보기)용 순수 함수 ----
+const YM_RE = /^([0-9]{4})-([0-9]{2})$/;
+// 'YYYY-MM' -> { year, month } | null (2000~2100년, 1~12월)
+function parseYm(s) {
+  const m = typeof s === 'string' ? YM_RE.exec(s) : null;
+  if (!m) return null;
+  const year = +m[1]; const month = +m[2];
+  return year >= 2000 && year <= 2100 && month >= 1 && month <= 12 ? { year, month } : null;
+}
+// 'YYYY-MM' 에서 delta 달 뒤 -> 'YYYY-MM' (범위 밖이면 null)
+function shiftYm(ym, delta) {
+  const p = parseYm(ym);
+  if (!p || !Number.isInteger(delta)) return null;
+  const k = p.year * 12 + (p.month - 1) + delta;
+  const out = String(Math.floor(k / 12)).padStart(4, '0') + '-' + String((k % 12) + 1).padStart(2, '0');
+  return parseYm(out) ? out : null;
+}
+// 'YYYY-MM-DD' 에서 delta 일 뒤 -> 'YYYY-MM-DD' (잘못된 날짜·범위 밖이면 null)
+function shiftDay(day, delta) {
+  if (!validDay(day) || !Number.isInteger(delta)) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3] + delta));
+  const out = String(d.getUTCFullYear()).padStart(4, '0') + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+  return parseYm(out.slice(0, 7)) ? out : null;
+}
+// 달 격자: { days: 그 달의 날수, first: 1일의 요일(0=일요일) }
+function monthLayout(year, month) {
+  return { days: new Date(Date.UTC(year, month, 0)).getUTCDate(), first: new Date(Date.UTC(year, month - 1, 1)).getUTCDay() };
+}
+// 달 요약: { 'YYYY-MM-DD': { records, diary, events } } — 기록·회고·일정이 하나라도 있는 날만. entries: 일지 항목, diaries: Map, events: { 'YYYY-MM-DD': [...] } | null
+function buildMonthSummary({ entries, diaries, events, ym }) {
+  const out = {};
+  const get = (d) => (hasOwn(out, d) ? out[d] : (out[d] = { records: 0, diary: false, events: 0 }));
+  const inMonth = (d) => typeof d === 'string' && d.startsWith(ym + '-') && validDay(d);
+  for (const e of Array.isArray(entries) ? entries : []) if (e && inMonth(e.day)) get(e.day).records++;
+  if (diaries && typeof diaries.keys === 'function') for (const d of diaries.keys()) if (inMonth(d)) get(d).diary = true;
+  if (events && typeof events === 'object') for (const d of Object.keys(events)) if (inMonth(d) && Array.isArray(events[d]) && events[d].length) get(d).events = events[d].length;
+  return out;
+}
+// 하루의 일지 항목을 프로젝트(등록된 것) 또는 태그별로 묶는다 -> [{ title, key, items: [{time, kind, text}] }]. 묶음은 첫 기록 시각순, 태그 없음('' 제목)은 맨 뒤, 묶음 안은 시각·기록 순.
+function buildDayGroups({ entries, day, registry, state }) {
+  const st = state && typeof state === 'object' ? state : {};
+  const regMap = new Map((Array.isArray(registry) ? registry : []).map((r) => [r.key, r]));
+  const groups = new Map();
+  const mine = (Array.isArray(entries) ? entries : []).filter((e) => e && e.day === day);
+  mine.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : a.seq - b.seq));
+  for (const e of mine) {
+    const root = e.slug ? projectRoot(st, e.tag + '/' + e.slug) : null;
+    const owner = root && regMap.has(root) ? root : (e.slug && regMap.has(e.tag + '/' + e.slug) ? e.tag + '/' + e.slug : null);
+    const gk = owner ? 'p:' + owner : e.tag ? 't:' + e.tag : 'n:';
+    if (!groups.has(gk)) {
+      const e2 = owner && hasOwn(st, owner) ? st[owner] : null;
+      groups.set(gk, { title: owner ? (e2 && e2.title) || regMap.get(owner).title : e.tag, key: owner, none: !owner && !e.tag, items: [] });
+    }
+    groups.get(gk).items.push({ time: e.time, kind: e.kind, text: e.text });
+  }
+  return [...groups.values()].sort((a, b) => (a.none === b.none ? 0 : a.none ? 1 : -1)).map(({ title, key, items }) => ({ title, key, items }));
 }
 
 // ---- 사용자 상태(data/project-state.json): { "<태그/슬러그>": { status, doneAt?, title?, mergedInto? } } ----
@@ -1371,14 +1470,14 @@ function buildProjects({ registry, entries, state, todos, today }) {
   return out;
 }
 
-// 요약 배열 -> 화면용 묶음 { open: [{tag, items}], done: [{tag, items}], doneCount }. 카테고리는 최근 기록순, 묶음 안은 최근 기록순(분류 안 됨은 맨 뒤).
+// 요약 배열 -> 화면용 묶음 { open: [{tag, items}], done: [{tag, items}], doneCount, unsorted: [요약...] }. 카테고리는 최근 기록순, 묶음 안은 최근 기록순.
+// 분류 안 됨(kind 'unclassified') 줄은 카테고리 묶음에 넣지 않고 unsorted 로 따로 모은다(최근 기록 날짜 내림차순, 같으면 태그순).
 function groupProjects(list, ui) {
   const mk = (items) => {
     const by = new Map();
     for (const it of items) { if (!by.has(it.tag)) by.set(it.tag, []); by.get(it.tag).push(it); }
     const last = (arr) => arr.reduce((m, x) => (x.lastDay && x.lastDay > m ? x.lastDay : m), '');
-    const cmpItem = (a, b) => (a.kind !== b.kind ? (a.kind === 'project' ? -1 : 1)
-      : (a.lastDay || '') < (b.lastDay || '') ? 1 : (a.lastDay || '') > (b.lastDay || '') ? -1 : (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
+    const cmpItem = (a, b) => ((a.lastDay || '') < (b.lastDay || '') ? 1 : (a.lastDay || '') > (b.lastDay || '') ? -1 : (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
     return [...by.entries()]
       .map(([tag, arr]) => ({ tag, items: arr.sort(cmpItem), last: last(arr) }))
       .sort((a, b) => (a.last < b.last ? 1 : a.last > b.last ? -1 : (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0)))
@@ -1386,8 +1485,11 @@ function groupProjects(list, ui) {
   };
   const l = Array.isArray(list) ? list : [];
   const done = l.filter((x) => x.status === 'done');
-  const open = mk(l.filter((x) => x.status !== 'done'));
-  return { open: ui ? applyProjectUi(open, ui) : open, done: mk(done), doneCount: done.length }; // 사용자 순서는 진행 중 목록에만
+  const isUnc = (x) => x.kind === 'unclassified';
+  const open = mk(l.filter((x) => x.status !== 'done' && !isUnc(x)));
+  const unsorted = l.filter((x) => x.status !== 'done' && isUnc(x))
+    .sort((a, b) => ((a.lastDay || '') < (b.lastDay || '') ? 1 : (a.lastDay || '') > (b.lastDay || '') ? -1 : (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0)));
+  return { open: ui ? applyProjectUi(open, ui) : open, done: mk(done), doneCount: done.length, unsorted }; // 사용자 순서는 진행 중 목록에만
 }
 
 // ---- 화면 상태(data/project-ui.json): { catOrder: [태그...], projOrder: { "<태그>": ["<태그/슬러그>", ...] }, collapsed: [태그...] } ----
@@ -1458,7 +1560,8 @@ function projectUiFits(ui) { return Buffer.byteLength(JSON.stringify(ui, null, 2
 function pruneProjectUi(ui, list) {
   const v = validateProjectUi(ui) || defaultProjectUi();
   const l = Array.isArray(list) ? list : [];
-  const tags = new Set(l.map((x) => x.tag)); const keys = new Set(l.filter((x) => x.kind === 'project').map((x) => x.key));
+  if (!l.some((x) => x && x.kind === 'project')) return v; // 레지스트리가 비었거나 못 읽은 순간이면 저장해 둔 순서·접힘을 지우지 않는다(검증만 한다)
+  const tags = new Set(l.filter((x) => x.kind === 'project').map((x) => x.tag)); const keys = new Set(l.filter((x) => x.kind === 'project').map((x) => x.key));
   const projOrder = {};
   for (const tag of Object.keys(v.projOrder)) {
     const ks = v.projOrder[tag].filter((k) => keys.has(k));
@@ -1481,14 +1584,11 @@ function applyOrder(items, order, keyOf) {
   for (const it of items) if (!used.has(keyOf(it))) out.push(it);
   return out;
 }
-// 묶음(카테고리 배열)에 사용자 순서를 적용: 카테고리 순서, 카테고리 안 프로젝트 순서. "분류 안 됨" 줄은 항상 맨 아래.
+// 묶음(카테고리 배열)에 사용자 순서를 적용: 카테고리 순서, 카테고리 안 프로젝트 순서.
 function applyProjectUi(groups, ui) {
   const u = ui && typeof ui === 'object' ? ui : defaultProjectUi();
   const po = u.projOrder && typeof u.projOrder === 'object' ? u.projOrder : {};
-  return applyOrder(groups, u.catOrder, (g) => g.tag).map((g) => {
-    const proj = g.items.filter((it) => it.kind === 'project'); const unc = g.items.filter((it) => it.kind !== 'project');
-    return { tag: g.tag, items: [...applyOrder(proj, hasOwn(po, g.tag) ? po[g.tag] : [], (it) => it.key), ...unc] };
-  });
+  return applyOrder(groups, u.catOrder, (g) => g.tag).map((g) => ({ tag: g.tag, items: applyOrder(g.items, hasOwn(po, g.tag) ? po[g.tag] : [], (it) => it.key) }));
 }
 // ids 에서 id 를 beforeId 앞(null 이면 맨 끝)으로 옮긴 새 배열. id 가 없거나 beforeId 가 없거나(null 아님) 자기 자신이면 null.
 function moveInOrder(ids, id, beforeId) {
@@ -2096,13 +2196,14 @@ function projectSlug(realRoot) { return typeof realRoot === 'string' ? realRoot.
 // ---- 캘린더 ----
 // 고정 AppleScript(osascript -e 줄 배열). 출력: 이벤트마다 <날짜 YYYY-MM-DD>US<시각 HH:MM 또는 빈 값>US<종일 1|0>US<제목>RS
 // (US=ASCII 31, RS=ASCII 30). 제목의 RS/US 는 스크립트(clean)가 제거하고, 파서도 필드 수가 틀린 레코드를 버린다. 날짜·시각 조각을 스크립트가 직접 만들어 로케일 형식과 무관하다.
-const CAL_SCRIPT = [
+const CAL_PRE = [
   'on p2(n)', 'return text -2 thru -1 of ("0" & (n as text))', 'end p2',
   'on clean(s)', 'set AppleScript\'s text item delimiters to {(ASCII character 30), (ASCII character 31)}', 'set parts to text items of s',
   'set AppleScript\'s text item delimiters to ""', 'return parts as text', 'end clean',
   'on fmt(d)', 'return ((year of d) as text) & "-" & my p2(month of d as integer) & "-" & my p2(day of d)', 'end fmt',
   'set RS to (ASCII character 30)', 'set US to (ASCII character 31)', 'set out to ""',
-  'set d0 to current date', 'set time of d0 to 0', 'set d1 to d0 + (2 * days)',
+];
+const CAL_TAIL = [
   'tell application "Calendar"',
   'repeat with c in calendars', 'try',
   'set evs to (every event of c whose start date < d1 and end date > d0)',
@@ -2115,9 +2216,28 @@ const CAL_SCRIPT = [
   'end try', 'end repeat', 'end try', 'end repeat',
   'end tell', 'return out',
 ];
+const CAL_SCRIPT = [...CAL_PRE, 'set d0 to current date', 'set time of d0 to 0', 'set d1 to d0 + (2 * days)', ...CAL_TAIL];
+// 한 달 읽기용 고정 스크립트: 연·월(검증된 정수)만 바뀌는 부분이고 숫자 리터럴로만 들어간다. 로케일과 무관하게 1일로 먼저 맞춘 뒤 연·월을 바꾼다.
+// 날짜 설정 줄만 따로 돌려준다(시험에서 Calendar 부분 없이 실행할 수 있게). d1 은 `copy` 로 d0 의 사본을 만든다: `set d1 to d0` 는 같은 날짜 객체를 가리켜 d1 을 바꾸면 d0 도 바뀐다.
+function calMonthDateSetup(year, month) {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || year < 2000 || year > 2100 || month < 1 || month > 12) return null;
+  const ny = month === 12 ? year + 1 : year; const nm = month === 12 ? 1 : month + 1;
+  return [
+    'set d0 to current date', 'set day of d0 to 1', 'set year of d0 to ' + year, 'set month of d0 to ' + month, 'set time of d0 to 0',
+    'copy d0 to d1', 'set year of d1 to ' + ny, 'set month of d1 to ' + nm,
+  ];
+}
+function calMonthScript(year, month) {
+  const setup = calMonthDateSetup(year, month);
+  if (!setup) return null;
+  return [...CAL_PRE, ...setup, ...CAL_TAIL];
+}
 const CAL_MAX_EVENTS = 8;
 const CAL_TITLE_MAX = 60;
 const CAL_MAX_BYTES = 256 * 1024;
+const CAL_MONTH_MAX_BYTES = 512 * 1024;
+const CAL_DAY_MAX_EVENTS = 12; // 하루 최대
+const CAL_MONTH_MAX_EVENTS = 400; // 한 달 최대
 const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 
 // osascript 출력 -> [{day:'today'|'tomorrow', allDay, time, title}] (오늘·내일만, 정렬, 최대 8개). 형식이 아니면 해당 레코드 버림.
@@ -2144,6 +2264,38 @@ function parseCalendarOutput(text, now = new Date()) {
   }
   list.sort((a, b) => (a.day === b.day ? 0 : a.day === 'today' ? -1 : 1) || (a.allDay === b.allDay ? 0 : a.allDay ? -1 : 1) || (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
   return list.slice(0, CAL_MAX_EVENTS);
+}
+
+// 한 달 읽기 출력 -> { 'YYYY-MM-DD': [{allDay, time, title}] } (그 달 안의 날만; 하루 12개·한 달 400개 상한, 날짜별 종일 먼저·시각순). 형식이 틀린 레코드는 버린다.
+function parseCalendarMonth(text, year, month) {
+  const out = {};
+  const ym = Number.isInteger(year) && Number.isInteger(month) ? String(year).padStart(4, '0') + '-' + String(month).padStart(2, '0') : null;
+  if (!ym || !parseYm(ym) || typeof text !== 'string' || text.length > CAL_MONTH_MAX_BYTES) return out;
+  const seen = new Set();
+  for (const rec of text.split('\x1e')) {
+    const f = rec.replace(/^[\r\n]+/, '').split('\x1f');
+    if (f.length !== 4) continue;
+    const [date, time, flag, rawTitle] = f;
+    if (!date.startsWith(ym + '-') || !validDay(date) || (flag !== '0' && flag !== '1')) continue;
+    const allDay = flag === '1';
+    if (allDay ? time !== '' : !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) continue;
+    const title = [...cleanQuestText(rawTitle)].slice(0, CAL_TITLE_MAX).join('').trim();
+    if (!title) continue;
+    const key = date + '|' + time + '|' + title;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!hasOwn(out, date)) out[date] = [];
+    out[date].push({ allDay, time, title });
+  }
+  let total = 0;
+  for (const d of Object.keys(out).sort()) {
+    out[d].sort((a, b) => (a.allDay === b.allDay ? 0 : a.allDay ? -1 : 1) || (a.time < b.time ? -1 : a.time > b.time ? 1 : (a.title < b.title ? -1 : a.title > b.title ? 1 : 0)));
+    out[d] = out[d].slice(0, CAL_DAY_MAX_EVENTS);
+    if (total + out[d].length > CAL_MONTH_MAX_EVENTS) { out[d] = out[d].slice(0, CAL_MONTH_MAX_EVENTS - total); }
+    total += out[d].length;
+    if (!out[d].length) delete out[d];
+  }
+  return out;
 }
 
 // ---- 알림과 승인함(inbox) ----
@@ -3362,7 +3514,8 @@ const api = {
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
-  SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput,
+  SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth,
+  DIARY_FILE_MAX_BYTES, DIARY_FILES_MAX, DIARY_TITLE_MAX, DIARY_BODY_MAX, parseDiaryText, readDiaries, parseYm, shiftYm, shiftDay, monthLayout, buildMonthSummary, buildDayGroups,
   SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, matchSubs, squadOpen, claudeLaunchCommand,
   TODO_DONE_MAX, TODO_DONE_MAX_BYTES, fitTodoDone, todoMarkKey, TODO_DONE_KEEP_SEC, TODO_DONE_HIDE_SEC, titleKey, todoTitleRecordable, validTodoDoneEntry, makeTodoDone, todoMarkable, formatTodoDone, parseTodoDone, pruneTodoDone, addTodoDone, removeTodoDone, filterTodos, readTodoDoneFile, saveTodoDone, projectOpenTodos,
   confirmClose, confirmRestart, closeRequestAction, lookupWs, ringFrameInterval, readWorkspacesFile, backupCorruptFile,

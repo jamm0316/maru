@@ -47,9 +47,22 @@
       <section class="card proj-card" id="proj-card">
         <h2 class="eyebrow" data-i18n="proj.eyebrow">프로젝트</h2>
         <div id="projects" class="stack gap4"></div>
+        <button type="button" class="proj-toggle" id="proj-unsorted-toggle" aria-expanded="false" aria-controls="projects-unsorted" hidden></button>
+        <div id="projects-unsorted" class="stack gap4" hidden></div>
         <button type="button" class="proj-toggle" id="proj-done-toggle" aria-expanded="false" aria-controls="projects-done" hidden></button>
         <div id="projects-done" class="stack gap4" hidden></div>
         <div id="proj-note" class="hint proj-note" role="status"></div>
+      </section>
+      <section class="card cal-card" id="cal-card" role="group" data-i18n-aria="cal.card.aria">
+        <div class="cal-head">
+          <h2 class="cal-month" id="cal-month" aria-live="polite"></h2>
+          <button type="button" class="cal-nav" id="cal-prev" data-i18n-aria="cal.prev" data-i18n-title="cal.prev" aria-label="이전 달">‹</button>
+          <button type="button" class="cal-nav" id="cal-next" data-i18n-aria="cal.next" data-i18n-title="cal.next" aria-label="다음 달">›</button>
+          <button type="button" class="cal-nav cal-today" id="cal-today" data-i18n="cal.today" data-i18n-aria="cal.today.aria" aria-label="오늘 날짜로 이동">오늘</button>
+        </div>
+        <div class="cal-wds" id="cal-wds" aria-hidden="true"></div>
+        <div class="cal-grid" id="cal-grid" role="group" data-i18n-aria="cal.grid.aria" aria-label="날짜"></div>
+        <div class="hint cal-legend" id="cal-legend" aria-hidden="true"></div>
       </section>
       <div id="lang-note" class="hint lang-note" role="status" hidden></div>
       <div class="userbar" id="userbar">
@@ -121,6 +134,15 @@
           </div>
           <aside class="mv-detail" id="mv-detail" data-i18n-aria="mem.detail.aria" aria-label="기억 내용"></aside>
         </div>
+      </section>
+      <section id="day-view" class="proj-detail day-view" role="region" aria-labelledby="dv-title" hidden>
+        <div class="pd-top dv-top">
+          <button type="button" class="btn ghost" id="dv-close" data-i18n="day.close" data-i18n-aria="day.close.aria" aria-label="하루 보기 닫기">닫기</button>
+          <button type="button" class="btn dv-nav" id="dv-prev" data-i18n-aria="day.prev.aria" data-i18n-title="day.prev.aria" aria-label="전날 보기">‹</button>
+          <button type="button" class="btn dv-nav" id="dv-next" data-i18n-aria="day.next.aria" data-i18n-title="day.next.aria" aria-label="다음 날 보기">›</button>
+          <h2 class="pd-title dv-title" id="dv-title" tabindex="-1"></h2>
+        </div>
+        <div class="dv-body" id="dv-body"></div>
       </section>
       <div id="term-empty" class="term-empty" hidden>
         <p data-i18n="ws.empty">열린 작업 공간이 없습니다</p>

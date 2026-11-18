@@ -62,9 +62,11 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph', 'setup', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
+const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
-const PERSIST = !SMOKE && !TEST_FX && TEST_UI !== 'hierarchy'; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
+const PERSIST = !SMOKE && !TEST_FX && TEST_UI !== 'hierarchy' && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
 const AGENT_FILE_MAX = 8192;
 function readAgentParty() {
@@ -213,7 +215,7 @@ let cache = {
   status: null, todosRaw: [], todos: [], skills: [], notifs: [], battery: null, disk: null,
 };
 // 프로젝트·기억 캐시는 refresh() 가 통째로 바꾸는 cache 와 따로 둔다(예전에 cache = {...} 교체가 memMetasAt 을 지워 관련 기억이 항상 비던 회귀 방지)
-const proj = { raw: { registry: [], entries: [] }, list: [], view: { open: [], done: [], doneCount: 0 } };
+const proj = { raw: { registry: [], entries: [] }, diaries: new Map(), list: [], view: { open: [], done: [], doneCount: 0, unsorted: [] } };
 const memMetasCache = L.ttlCache(20000, () => { const md = memDir(); return md ? L.readMemoryMetas(md) : []; });
 
 // ---- 프로젝트 추적(lib.js 의 순수 함수로 계산; 여기서는 파일 읽기·쓰기와 IPC 만) ----
@@ -229,6 +231,7 @@ function memDir() {
   return path.join(claudeDir(), 'projects', L.projectSlug(real), 'memory');
 }
 function loadProjState() {
+  if (FAKE_PROJ) return;
   const r = L.readProjectStateFile(projStateFile());
   if (r.status === 'corrupt') L.backupCorruptFile(projStateFile()); // 망가진 파일은 .bak 으로 옮기고 새로 시작(workspaces.json 과 같다)
   projState = r.data;
@@ -249,10 +252,56 @@ function readProjectsRaw() {
   const md = memDir();
   const reg = readHead(path.join(ROOT, 'data', 'projects.txt'), L.PROJ_REG_MAX_BYTES);
   proj.raw = { registry: reg ? L.parseProjectRegistry(reg.text, reg.truncated) : [], entries: md ? L.readJournalEntries(md) : [] };
+  proj.diaries = md ? L.readDiaries(md) : new Map(); // 하루 회고(셸이 쓴 diary/*.md, 읽기 전용): 일지와 같은 주기로만 읽는다
+}
+// ---- 시험 전용(MARU_APP_UI=project|day): 지어낸 중립 데이터. 디스크·캘린더를 읽지 않는다 ----
+const fakeDayStr = (off) => { const d = new Date(); d.setDate(d.getDate() + off); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const FAKE_DAY_OFF = -1; // 하루 보기를 열어 둘 날(어제): 회고·일정·기록이 모두 있다
+function fakeRefresh() {
+  const E = [];
+  const add = (off, time, kind, tag, slug, text) => E.push({ day: fakeDayStr(off), time, kind, importance: 5, tag, slug, text, seq: E.length });
+  add(0, '09:10', 'done', 'garden', 'watering', 'Wired the reminder list to the plant detail screen');
+  add(0, '11:40', 'todo', 'garden', 'watering', 'Add a seasonal interval for summer');
+  add(-1, '09:30', 'done', 'garden', 'watering', 'Moved watering intervals into one shared table');
+  add(-1, '10:05', 'decision', 'garden', 'watering', 'Keep intervals per plant, not per pot');
+  add(-1, '14:20', 'done', 'recipes', 'site', 'Generated the first ten recipe pages');
+  add(-1, '16:45', 'todo', 'recipes', 'site', 'Pick a typeface for the recipe titles');
+  add(-1, '18:00', 'done', 'travel', null, 'Compared two autumn itineraries');
+  add(-1, '19:10', 'done', '', null, 'Cleaned up the downloads folder');
+  add(-2, '10:00', 'done', 'recipes', 'site', 'Wrote the import script for plain text recipes');
+  add(-3, '15:30', 'decision', 'recipes', 'site', 'Use a static generator, no server');
+  add(-3, '16:10', 'done', 'travel', null, 'Listed trains for the autumn trip');
+  add(-5, '09:00', 'done', 'garden', 'watering', 'Sketched the calendar-first home screen');
+  add(-8, '13:00', 'done', 'garden', 'watering', 'Collected plant care notes into one file');
+  add(-8, '17:30', 'done', 'notes', null, 'Reorganised the weekly review template');
+  add(-12, '10:20', 'decision', 'garden', 'watering', 'Store intervals in days');
+  add(-15, '11:00', 'done', 'recipes', 'site', 'Picked the page layout for recipes');
+  add(-19, '09:40', 'done', 'travel', null, 'Made a packing checklist');
+  add(-21, '14:00', 'done', 'garden', 'watering', 'Started the plant tracker prototype');
+  const todos = L.parseTodos('garden/watering|8|Add a seasonal interval for summer|Continue the watering schedule work\ntravel|5|Book the train tickets|\nnotes|4|Tidy the weekly template|');
+  cache = { status: null, todosRaw: todos, todos, skills: [], notifs: [], battery: null, disk: null };
+  proj.raw = { registry: L.parseProjectRegistry('garden|watering|Watering reminders\nrecipes|site|Recipe site\n'), entries: E };
+  proj.diaries = FAKE_DAY ? new Map([
+    [fakeDayStr(-1), { title: 'A quiet day for the garden app', body: 'Most of the day went into the watering table. Moving the intervals into one place made the reminder code much shorter.\n\nIn the afternoon the recipe site got its first pages, and the typeface question is still open.' }],
+    [fakeDayStr(-3), { title: 'Recipe site decisions', body: 'Settled on a static generator. No server to look after.' }],
+    [fakeDayStr(-8), { title: 'Collecting notes', body: 'Gathered the plant care notes into a single file and tidied the weekly template.' }],
+  ]) : new Map();
+  projState = {}; projUi = L.defaultProjectUi(); projUiLoaded = true;
+  recomputeProjects();
+  refreshed = true;
+}
+// 시험 전용 가짜 일정: 오늘 기준 며칠(그 달에 속하는 것만) + 다른 달에도 몇 개
+function fakeMonthEvents(ym) {
+  const out = {};
+  const put = (day, allDay, time, title) => { if (day.startsWith(ym + '-')) (out[day] = out[day] || []).push({ allDay, time, title }); };
+  put(fakeDayStr(-1), true, '', 'Community garden day'); put(fakeDayStr(-1), false, '10:30', 'Seed swap meetup');
+  put(fakeDayStr(0), false, '15:00', 'Planning check-in'); put(fakeDayStr(2), false, '09:00', 'Farmers market'); put(fakeDayStr(7), true, '', 'Recipe photo shoot'); put(fakeDayStr(-6), false, '18:30', 'Cooking class');
+  put(ym + '-05', false, '12:00', 'Lunch with a friend'); put(ym + '-24', true, '', 'Trip start');
+  return out;
 }
 // main 이 가진 요약 목록에 있는 키만 인정한다(렌더러가 보낸 키는 이 목록과 대조)
 const findProject = (key) => (typeof key === 'string' && key.length <= 40 ? proj.list.find((x) => x.key === key) || null : null);
-const projectMetas = () => memMetasCache.get();
+const projectMetas = () => (FAKE_PROJ ? [] : memMetasCache.get()); // 시험용 가짜 데이터에서는 실제 기억 폴더를 읽지 않는다
 
 // ---- 할 일 완료/안 함 표시(앱 소유 data/todo-done.txt; data/todos.txt 는 셸 소유라 건드리지 않는다) ----
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -303,6 +352,7 @@ function skillDirs(dir) {
 
 let refreshing = false;
 async function refresh() {
+  if (FAKE_PROJ) { fakeRefresh(); return; }
   if (refreshing || !ROOT) { if (!ROOT) refreshed = true; return; }
   refreshing = true;
   try {
@@ -403,7 +453,7 @@ function panels() {
     party, // 기본 팀. name null = 앱 이름(i18n app.title)
     squads: L.squadView(TEST_UI === 'party' ? FAKE_SQUADS : squads, party[0].model), // 스쿼드별 묶음(총괄 + 팀원)
     subs: TEST_UI === 'party' ? [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }, { type: 'sq-dev-lead', count: 1 }, { type: 'sq-dev-builder', count: 2 }, { type: 'sq-ghost-lead', count: 1 }] : (wsOf(activeId) ? readSubs(wsOf(activeId)) : []),
-    calendar: profile && profile.calendar && cal.ok ? cal.events : [], // 메모리에만 둔다(디스크·로그 금지)
+    calendar: FAKE_DAY ? fakeMonthEvents(fakeDayStr(0).slice(0, 7))[fakeDayStr(0)].map((x) => ({ day: 'today', ...x })) : profile && profile.calendar && cal.ok ? cal.events : [], // 메모리에만 둔다(디스크·로그 금지)
     updateAvailable: upd.view.status === 'available',
   };
 }
@@ -841,7 +891,7 @@ function gotoLabel(n, t) {
   if (t.kind === 'workspace') { const w = wsOf(t.id); return w ? tr('menu.gotoWs', { n }) + ' · ' + w.title : tr('menu.gotoNone', { n }); }
   const s = findProject(t.id);
   if (!s) return tr('menu.gotoNone', { n });
-  return tr('menu.gotoProj', { n }) + ' · ' + (s.kind === 'unclassified' ? tr('proj.unclassified') + ' (' + s.tag + ')' : s.title);
+  return tr('menu.gotoProj', { n }) + ' · ' + s.title;
 }
 function gotoNumber(n) {
   const t = gotoTargets()[n - 1];
@@ -1118,10 +1168,43 @@ async function runInstall() {
 }
 
 // ---- 캘린더(opt-in, 메모리에만) ----
+// 달 단위 읽기(달력 카드·하루 보기): 'YYYY-MM' -> { state: 'pending'|'ok'|'fail', events, at, busy, used }. 최대 3달, 달마다 15분에 한 번만 다시 읽고, osascript 는 한 번에 하나(20초 제한).
+const calMonths = new Map(); let calMonthQueue = Promise.resolve();
+const CAL_MONTH_TTL_MS = 15 * 60 * 1000; const CAL_MONTH_MAX = 3;
+const calOn = () => FAKE_DAY || (!SMOKE && !FAKE_PROJ && !!(profile && profile.calendar)); // 스모크·설정 꺼짐이면 읽지 않는다
+function ensureCalMonth(ym) {
+  const p = L.parseYm(ym);
+  if (!p || FAKE_DAY || !calOn()) return;
+  let c = calMonths.get(ym);
+  if (c && (c.busy || Date.now() - c.at < CAL_MONTH_TTL_MS)) return;
+  if (!c) {
+    while (calMonths.size >= CAL_MONTH_MAX) { let old = null; for (const [k, v] of calMonths) if (!v.busy && (!old || v.used < calMonths.get(old).used)) old = k; if (!old) return; calMonths.delete(old); }
+    c = { state: 'pending', events: {}, at: 0, busy: false, used: Date.now() }; calMonths.set(ym, c);
+  }
+  c.busy = true;
+  const script = L.calMonthScript(p.year, p.month);
+  calMonthQueue = calMonthQueue.then(async () => {
+    if (!calOn() || calMonths.get(ym) !== c) return;
+    const args = []; for (const line of script) args.push('-e', line);
+    const r = await exec('/usr/bin/osascript', args, { timeout: 20000, maxBuffer: 1 << 20, cwd: os.homedir() });
+    if (!calOn() || calMonths.get(ym) !== c) return; // 읽는 동안 꺼졌거나 밀려났으면 버린다
+    c.busy = false; c.at = Date.now();
+    if (r.err) c.state = 'fail'; else { c.state = 'ok'; c.events = L.parseCalendarMonth(r.stdout, p.year, p.month); }
+  }).catch(() => { c.busy = false; c.at = Date.now(); if (c.state === 'pending') c.state = 'fail'; });
+}
+// -> { state, events } (아직 읽지 않았으면 pending 이고 읽기를 시작한다)
+function calMonthGet(ym) {
+  if (FAKE_DAY) return { state: 'ok', events: fakeMonthEvents(ym) };
+  ensureCalMonth(ym);
+  const c = calMonths.get(ym);
+  if (c) c.used = Date.now();
+  return c ? { state: c.state, events: c.events } : { state: 'pending', events: {} };
+}
 let cal = { pending: false, ok: false, events: [] };
 let calRun = null;
 function readCalendar() {
-  if (!profile || !profile.calendar) { cal = { pending: false, ok: false, events: [] }; return Promise.resolve(); }
+  if (!profile || !profile.calendar) { cal = { pending: false, ok: false, events: [] }; calMonths.clear(); return Promise.resolve(); } // 꺼지면 달 캐시도 모두 버린다
+  if (FAKE_PROJ) return Promise.resolve();
   if (calRun) return calRun;
   cal = { ...cal, pending: true };
   const args = [];
@@ -1883,9 +1966,23 @@ ipcMain.handle('projects:detail', (e, key) => {
   }
   return d;
 });
+// 달력 카드·하루 보기: 인자는 'YYYY-MM' / 'YYYY-MM-DD' 문자열뿐이고 main 이 다시 검증한다. 일지·회고는 이미 읽어 둔 캐시(proj)만 쓰고 디스크를 다시 읽지 않는다.
+ipcMain.handle('days:month', (e, ym) => {
+  if (!fromMain(e) || !L.parseYm(ym)) return null;
+  const on = calOn();
+  return { ym, today: todayStr(), days: L.buildMonthSummary({ entries: proj.raw.entries, diaries: proj.diaries, events: on ? calMonthGet(ym).events : null, ym }), calendarOn: on };
+});
+ipcMain.handle('days:detail', (e, day) => {
+  if (!fromMain(e) || !L.validDay(day) || !L.parseYm(day.slice(0, 7))) return null;
+  const on = calOn();
+  let events = { state: 'off', items: [] };
+  if (on) { const r = calMonthGet(day.slice(0, 7)); events = { state: r.state, items: r.state === 'ok' ? (r.events[day] || []) : [] }; }
+  const d = proj.diaries.get(day) || null;
+  return { day, isToday: day === todayStr(), diary: d ? { title: d.title, body: d.body } : null, groups: L.buildDayGroups({ entries: proj.raw.entries, day, registry: proj.raw.registry, state: projState }), calendarOn: on, events };
+});
 function commitProjState(next) {
   if (!next || !L.projectStateFits(next)) return { ok: false, reason: 'size' }; // 읽기 상한을 넘는 상태는 쓰지 않는다(다음 읽기에서 손상으로 치워지므로)
-  if (!ROOT || !L.saveProjectState(projStateFile(), next)) return { ok: false, reason: 'save' };
+  if (FAKE_PROJ || !ROOT || !L.saveProjectState(projStateFile(), next)) return { ok: false, reason: 'save' }; // 시험용 가짜 데이터는 저장하지 않는다
   projState = next; recomputeProjects();
   return { ok: true };
 }
@@ -2171,6 +2268,7 @@ ipcMain.handle('meet:start', async (e, id) => {
   } finally { meetBusy = false; }
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
+  uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null,
   homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,
 } : null));
 // patch: { name?: string, lang?: 'ko'|'en' } 만 허용. 이름은 main 이 다시 정리·검증한다. 첫 저장에는 name 이 필요하다.
@@ -2310,7 +2408,7 @@ app.whenReady().then(() => {
     for (const w of wsOrder()) if (w.unavailable && dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } // 디스크가 다시 연결됨
     refreshTray();
   }, 1000).unref();
-  if (!SMOKE) { readCalendar(); setInterval(readCalendar, 15 * 60 * 1000).unref(); } // 스모크에서는 캘린더를 읽지 않는다
+  if (!SMOKE && !FAKE_PROJ) { readCalendar(); setInterval(readCalendar, 15 * 60 * 1000).unref(); } // 스모크에서는 캘린더를 읽지 않는다
   if (!SMOKE) { finishPendingInstall().then(() => checkUpdates(false)); setInterval(() => checkUpdates(false), 6 * 3600 * 1000).unref(); }
   if (SMOKE) setTimeout(() => { console.error('SMOKE FAIL: 15초 초과 (pty-output/rendered 미충족)'); app.exit(1); }, 15000);
 });

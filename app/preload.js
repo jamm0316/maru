@@ -42,6 +42,9 @@ contextBridge.exposeInMainWorld('maru', {
   renameProject: (key, title) => ipcRenderer.invoke('projects:rename', String(key).slice(0, 40), String(title).slice(0, 400)),
   mergeProject: (key, into) => ipcRenderer.invoke('projects:merge', String(key).slice(0, 40), String(into).slice(0, 40)),
   continueProject: (id, key, shown) => ipcRenderer.invoke('projects:continue', String(id), String(key).slice(0, 40), String(shown).slice(0, 200)),
+  // 달력 카드·하루 보기(읽기 전용): 'YYYY-MM' / 'YYYY-MM-DD' 문자열만 싣는다. main 이 다시 검증한다.
+  getMonthDays: (ym) => ipcRenderer.invoke('days:month', String(ym).slice(0, 7)),
+  getDayDetail: (day) => ipcRenderer.invoke('days:detail', String(day).slice(0, 10)),
   // 기억 보기(읽기 전용): 인자 없음. main 이 읽어 정리한 목록만 받는다.
   getMemories: () => ipcRenderer.invoke('memories:list'),
   // 알림과 승인함: 종류('squad'|'skill')와 slug 문자열만 싣는다(내용·경로는 받지 않는다). main 이 자기 목록과 대조하고 설치·거절은 네이티브 확인 창을 띄운다.

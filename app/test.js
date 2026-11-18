@@ -1041,9 +1041,10 @@ t('groupProjects: 카테고리별·최근순·완료 접기', () => {
   const list = L.buildProjects({ registry: REG, entries: ENT, state: { 'maru/old': { status: 'done', doneAt: '2026-11-15' } }, todos: [], today: '2026-11-16' });
   const g = L.groupProjects(list);
   assert.deepStrictEqual(g.open.map((x) => x.tag), ['블로그', 'maru']); // 최근 기록이 있는 카테고리 먼저
-  assert.deepStrictEqual(g.open[1].items.map((x) => x.key), ['maru/desktop-app', 'maru/other', 'maru']); // 분류 안 됨은 맨 뒤
+  assert.deepStrictEqual(g.open[1].items.map((x) => x.key), ['maru/desktop-app', 'maru/other']); // 분류 안 됨은 카테고리 묶음에 들지 않는다
+  assert.deepStrictEqual(g.unsorted.map((x) => x.key), ['maru']); // 따로 모은다
   assert.strictEqual(g.doneCount, 1); assert.deepStrictEqual(g.done.map((x) => [x.tag, x.items.map((i) => i.key)]), [['maru', ['maru/old']]]);
-  assert.deepStrictEqual(L.groupProjects(null), { open: [], done: [], doneCount: 0 });
+  assert.deepStrictEqual(L.groupProjects(null), { open: [], done: [], doneCount: 0, unsorted: [] });
 });
 t('상태 갱신 순수 함수: 완료·다시 열기·이름·합치기·검증', () => {
   const list = L.buildProjects({ registry: REG, entries: ENT, state: {}, todos: [], today: '2026-11-16' });
@@ -1164,7 +1165,7 @@ t('화면 시험 모드·상세와 터미널 전환 정적 검사', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
   const uiList = /!app\.isPackaged && \[([^\]]*)\]\.includes\(process\.env\.MARU_APP_UI\)/.exec(main); // 패키징 빌드에서는 무시
   assert.ok(uiList); for (const k of ['menu', 'settings', 'update', 'project', 'party', 'inbox', 'memory', 'memgraph']) assert.ok(uiList[1].includes("'" + k + "'"), k); // 목록 순서에는 기대지 않는다
-  assert.ok(/uiOpen === 'project'\) openFirstProject/.test(rd) && /x\.kind === 'project'\) \|\| all\[0\]/.test(rd));
+  assert.ok(/uiOpen === 'project'\) openFirstProject/.test(rd) && /all\[0\] \|\| \(projView\.unsorted/.test(rd));
   assert.ok(/closeDetail\(false\); showActive\(true\)/.test(rd)); // 작업 공간이 바뀌면 상세를 닫고 나서 그린다
   assert.ok(/function showActive\(focus\) \{\s*if \(detailOpen\) return;/.test(rd)); // 숨은 컨테이너에서 xterm open 금지
   assert.ok(/reason === 'size'/.test(rd) && /projectStateFits\(next\)/.test(main));
@@ -1199,6 +1200,138 @@ t('프로젝트 화면·IPC 정적 검사: textContent 만, preload 좁은 API, 
   assert.ok(/#terminal\[hidden\]\{display:none\}/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8')));
   assert.ok(/detailOpen \|\| !e \|\| !e\.opened/.test(rd)); // 상세가 터미널을 가리는 동안 pty 크기를 줄이지 않는다
 });
+// ---- 분류 안 된 작업 · 하루 회고 · 달력 ----
+t('groupProjects: 분류 안 됨만 있는 카테고리는 열린 목록에서 사라지고 unsorted 는 최근순·태그순', () => {
+  const mk = (tag, lastDay) => ({ key: tag, kind: 'unclassified', tag, title: '', status: 'open', doneAt: null, lastDay, records: 1, openTodos: 0, needsCheck: false });
+  const proj = { key: '책/z', kind: 'project', tag: '책', title: '지', status: 'open', doneAt: null, lastDay: '2026-11-01', records: 1, openTodos: 0, needsCheck: false };
+  const g = L.groupProjects([mk('가', '2026-11-02'), mk('나', '2026-11-09'), mk('다', '2026-11-09'), mk('라', null), proj]);
+  assert.deepStrictEqual(g.open.map((x) => x.tag), ['책']);
+  assert.deepStrictEqual(g.unsorted.map((x) => x.key), ['나', '다', '가', '라']); // 날짜 내림차순, 같으면 태그순, 날짜 없음은 맨 뒤
+  assert.deepStrictEqual(L.visibleProjectKeys(g.open, []), ['책/z']); // 번호는 프로젝트만
+  assert.deepStrictEqual(L.numberTargets(['w'], L.visibleProjectKeys(g.open, [])), [{ kind: 'workspace', id: 'w' }, { kind: 'project', id: '책/z' }]);
+  assert.deepStrictEqual(L.pruneProjectUi({ catOrder: ['가', '책'], projOrder: {}, collapsed: ['가'] }, [mk('가', '2026-11-02'), proj]), { catOrder: ['책'], projOrder: {}, collapsed: [] }); // 프로젝트 없는 태그의 순서·접힘은 정리된다
+});
+const DIARY_OK = '# 정원 앱 손질\n\n오늘은 물주기 화면을 다듬었다.\n두 번째 줄.\n\n\n\n다음 문단 <b>태그</b> `코드`\n';
+t('parseDiaryText: 제목·문단·무해화·상한', () => {
+  assert.deepStrictEqual(L.parseDiaryText(DIARY_OK), { title: '정원 앱 손질', body: '오늘은 물주기 화면을 다듬었다.\n두 번째 줄.\n\n다음 문단 ‹b›태그‹/b› 코드' });
+  assert.deepStrictEqual(L.parseDiaryText('\n\n# 제목만\r\n'), { title: '제목만', body: '' });
+  assert.strictEqual(L.parseDiaryText('제목 없음\n\n본문'), null); assert.strictEqual(L.parseDiaryText('## 둘\n본문'), null); assert.strictEqual(L.parseDiaryText('#제목\n'), null);
+  assert.strictEqual(L.parseDiaryText('# \n본문'), null); assert.strictEqual(L.parseDiaryText(''), null); assert.strictEqual(L.parseDiaryText(5), null);
+  const r = L.parseDiaryText('# ' + '가'.repeat(100) + '\n\n' + '나'.repeat(3000));
+  assert.strictEqual([...r.title].length, 60); assert.strictEqual([...r.body].length, 1500);
+  const c = L.parseDiaryText('# a\u202Eb\u200B\n\n\u001b[31m빨강\u0007');
+  assert.deepStrictEqual(c, { title: 'ab', body: '(31m빨강' }); // 제어·bidi 문자는 지워지고 [ 는 ( 로
+  assert.strictEqual(L.parseDiaryText('# x\n\n@멘션 # 헤더').body, '멘션 # 헤더'); // 줄 앞 # @ 는 지운다(일지와 같은 규칙)
+});
+t('readDiaries: 이름·크기·링크·개수 규칙', () => {
+  const mem = fs.mkdtempSync(path.join(tmp, 'dy-')); const dd = path.join(mem, 'diary'); fs.mkdirSync(dd);
+  fs.writeFileSync(path.join(dd, '2026-11-17.md'), DIARY_OK);
+  fs.writeFileSync(path.join(dd, '2026-11-18.md'), '# 둘째 날\n\n본문\n');
+  fs.writeFileSync(path.join(dd, '2026-02-30.md'), '# 없는 날짜\n'); // 없는 날짜
+  fs.writeFileSync(path.join(dd, '2026-11-16.txt'), '# 확장자\n'); fs.writeFileSync(path.join(dd, 'x2026-11-15.md'), '# 이름\n'); fs.writeFileSync(path.join(dd, '2026-11-14.1.md'), '# 번호\n'); // 이름 규칙
+  fs.writeFileSync(path.join(dd, '2026-11-13.md'), '# 큼\n\n' + 'a'.repeat(L.DIARY_FILE_MAX_BYTES)); // 8KB 초과
+  fs.writeFileSync(path.join(dd, '2026-11-12.md'), '제목 형식 아님\n');
+  fs.writeFileSync(path.join(mem, 'real.md'), '# 링크 대상\n'); fs.symlinkSync(path.join(mem, 'real.md'), path.join(dd, '2026-11-11.md')); // 심볼릭 링크 파일
+  fs.mkdirSync(path.join(dd, '2026-11-10.md')); // 폴더
+  const m = L.readDiaries(mem);
+  assert.deepStrictEqual([...m.keys()].sort(), ['2026-11-17', '2026-11-18']);
+  assert.strictEqual(m.get('2026-11-18').title, '둘째 날');
+  // diary 가 심볼릭 링크면 읽지 않는다
+  const mem2 = fs.mkdtempSync(path.join(tmp, 'dy-')); fs.symlinkSync(dd, path.join(mem2, 'diary'));
+  assert.strictEqual(L.readDiaries(mem2).size, 0);
+  assert.strictEqual(L.readDiaries(path.join(tmp, 'nothing-here')).size, 0); assert.strictEqual(L.readDiaries(mem).constructor, Map);
+  // 기억 폴더 자체가 링크이면 읽지 않는다
+  const ml = path.join(tmp, 'dy-memlink'); fs.symlinkSync(mem, ml); assert.strictEqual(L.readDiaries(ml).size, 0);
+  // 개수 상한(최신 400개)
+  const mem3 = fs.mkdtempSync(path.join(tmp, 'dy-')); const d3 = path.join(mem3, 'diary'); fs.mkdirSync(d3);
+  for (let i = 0; i < 405; i++) fs.writeFileSync(path.join(d3, new Date(Date.UTC(2024, 0, 1 + i)).toISOString().slice(0, 10) + '.md'), '# t' + i + '\n');
+  const big = L.readDiaries(mem3); assert.strictEqual(big.size, 400); assert.ok(!big.has('2024-01-01') && big.has(new Date(Date.UTC(2024, 0, 405)).toISOString().slice(0, 10)));
+});
+t('shiftYm / shiftDay / parseYm / monthLayout', () => {
+  assert.deepStrictEqual(L.parseYm('2026-11'), { year: 2026, month: 11 });
+  for (const bad of ['2026-13', '2026-00', '1999-12', '2101-01', '2026-1', '2026-11-01', 5, null]) assert.strictEqual(L.parseYm(bad), null, String(bad));
+  assert.strictEqual(L.shiftYm('2026-11', 1), '2026-12'); assert.strictEqual(L.shiftYm('2026-12', 1), '2027-01'); assert.strictEqual(L.shiftYm('2026-01', -1), '2025-12'); assert.strictEqual(L.shiftYm('2000-01', -1), null); assert.strictEqual(L.shiftYm('x', 1), null);
+  assert.strictEqual(L.shiftDay('2026-11-18', 1), '2026-11-19'); assert.strictEqual(L.shiftDay('2026-11-30', 1), '2026-12-01'); assert.strictEqual(L.shiftDay('2026-03-01', -1), '2026-02-28'); assert.strictEqual(L.shiftDay('2024-03-01', -1), '2024-02-29'); assert.strictEqual(L.shiftDay('2026-02-30', 1), null);
+  assert.deepStrictEqual(L.monthLayout(2026, 11), { days: 30, first: 0 }); // 2026-11-01 은 일요일
+  assert.deepStrictEqual(L.monthLayout(2024, 2), { days: 29, first: 4 });
+});
+t('buildMonthSummary: 기록 수·회고·일정', () => {
+  const E = (day, tag) => ({ day, time: '10:00', kind: 'done', importance: 5, tag: tag || '', slug: null, text: 'x', seq: 0 });
+  const s = L.buildMonthSummary({ entries: [E('2026-11-18'), E('2026-11-18', 'maru'), E('2026-11-02'), E('2026-10-31'), E('2026-12-01'), { day: 'bad' }, null],
+    diaries: new Map([['2026-11-17', { title: 't', body: '' }], ['2026-11-18', { title: 't', body: '' }], ['2026-10-01', { title: 't', body: '' }]]),
+    events: { '2026-11-18': [{}, {}], '2026-11-20': [{}], '2026-11-21': [], '2026-12-02': [{}] }, ym: '2026-11' });
+  assert.deepStrictEqual(s, { '2026-11-18': { records: 2, diary: true, events: 2 }, '2026-11-02': { records: 1, diary: false, events: 0 }, '2026-11-17': { records: 0, diary: true, events: 0 }, '2026-11-20': { records: 0, diary: false, events: 1 } });
+  assert.deepStrictEqual(L.buildMonthSummary({ entries: null, diaries: null, events: null, ym: '2026-11' }), {});
+});
+t('buildDayGroups: 프로젝트·태그·태그 없음 묶음, 시각순', () => {
+  const E = (time, tag, slug, text, seq, day) => ({ day: day || '2026-11-18', time, kind: seq % 2 ? 'decision' : 'done', importance: 5, tag, slug, text, seq });
+  const reg = L.parseProjectRegistry('정원|물주기|물주기 화면\n정원|달력|달력 보기\n');
+  const entries = [E('15:00', '', null, '태그 없는 일', 0), E('14:00', '요리', null, '태그만', 1), E('13:00', '정원', '물주기', '둘째', 2), E('09:00', '정원', '물주기', '첫째', 3), E('09:00', '정원', '없는슬러그', '미등록 슬러그', 4), E('10:00', '정원', '달력', '합쳐질 일', 5), E('08:00', '정원', '물주기', '다른 날', 6, '2026-11-17')];
+  const g = L.buildDayGroups({ entries, day: '2026-11-18', registry: reg, state: { '정원/달력': { status: 'open', mergedInto: '정원/물주기' }, '정원/물주기': { status: 'open', title: '새 이름' } } });
+  assert.deepStrictEqual(g, [
+    { title: '새 이름', key: '정원/물주기', items: [{ time: '09:00', kind: 'decision', text: '첫째' }, { time: '10:00', kind: 'decision', text: '합쳐질 일' }, { time: '13:00', kind: 'done', text: '둘째' }] },
+    { title: '정원', key: null, items: [{ time: '09:00', kind: 'done', text: '미등록 슬러그' }] },
+    { title: '요리', key: null, items: [{ time: '14:00', kind: 'decision', text: '태그만' }] },
+    { title: '', key: null, items: [{ time: '15:00', kind: 'done', text: '태그 없는 일' }] },
+  ]);
+  assert.deepStrictEqual(L.buildDayGroups({ entries, day: '2026-11-01', registry: reg, state: {} }), []);
+  assert.deepStrictEqual(L.buildDayGroups({ entries: null, day: 'x', registry: null, state: null }), []);
+});
+t('calMonthScript: 고정 줄, 정수만 삽입, 범위 검증', () => {
+  const sc = L.calMonthScript(2026, 11);
+  assert.ok(Array.isArray(sc) && sc.every((x) => typeof x === 'string'));
+  const i0 = sc.indexOf('set d0 to current date');
+  assert.deepStrictEqual(sc.slice(i0, i0 + 8), ['set d0 to current date', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set time of d0 to 0', 'copy d0 to d1', 'set year of d1 to 2026', 'set month of d1 to 12']);
+  const dec = L.calMonthScript(2026, 12); assert.ok(dec.includes('set year of d1 to 2027') && dec.includes('set month of d1 to 1'));
+  const base = L.CAL_SCRIPT; assert.ok(base.includes('set d1 to d0 + (2 * days)') && !sc.includes('set d1 to d0 + (2 * days)'));
+  const rest = (a) => a.filter((x) => !/^set (d0|d1|day of d0|year of d[01]|month of d[01]|time of d0)\b|^copy d0 to d1$/.test(x)); assert.deepStrictEqual(rest(sc), rest(base)); // 날짜 범위 줄만 다르다
+  for (const [y, m] of [[1999, 1], [2101, 1], [2026, 0], [2026, 13], [2026.5, 1], ['2026', 11], [2026, '11'], [null, 1], [NaN, 1]]) assert.strictEqual(L.calMonthScript(y, m), null, y + '-' + m);
+  assert.ok(sc.every((x) => !/\$|`|\\/.test(x) || base.includes(x)));
+  assert.ok(!sc.some((x) => /^set d1 to d0$/.test(x))); // 별칭(같은 날짜 객체) 금지
+  assert.deepStrictEqual(sc.slice(i0, i0 + 8), L.calMonthDateSetup(2026, 11)); assert.strictEqual(L.calMonthDateSetup(2026, 13), null);
+});
+if (process.platform === 'darwin') t('calMonthDateSetup: osascript 로 d0=그 달 1일 00:00, d1=다음 달 1일(12월 포함)', () => {
+  const { execFileSync } = require('child_process');
+  const run = (y, m) => {
+    const lines = [...L.calMonthDateSetup(y, m),
+      'return ((year of d0) as text) & "-" & ((month of d0) as integer) & "-" & (day of d0) & "T" & (time of d0) & " " & ((year of d1) as text) & "-" & ((month of d1) as integer) & "-" & (day of d1) & "T" & (time of d1)'];
+    return execFileSync('/usr/bin/osascript', lines.flatMap((x) => ['-e', x]), { encoding: 'utf8', timeout: 20000 }).trim();
+  };
+  assert.strictEqual(run(2026, 11), '2026-11-1T0 2026-12-1T0');
+  assert.strictEqual(run(2026, 12), '2026-12-1T0 2027-1-1T0');
+  assert.strictEqual(run(2026, 1), '2026-1-1T0 2026-2-1T0');
+});
+t('parseCalendarMonth: 그 달만, 검증·중복·상한·정렬', () => {
+  const rec = (d, tm, fl, ti) => d + '\x1f' + tm + '\x1f' + fl + '\x1f' + ti + '\x1e';
+  const out = rec('2026-11-18', '14:30', '0', '회의') + rec('2026-11-18', '', '1', '휴일') + rec('2026-11-18', '09:00', '0', '아침') + rec('2026-11-18', '09:00', '0', '아침') + rec('2026-11-02', '', '1', '가'.repeat(100))
+    + rec('2026-10-31', '10:00', '0', '지난달') + rec('2026-12-01', '', '1', '다음달') + rec('2026-11-31', '', '1', '없는 날') + rec('2026-11-05', '25:00', '0', '나쁜 시각') + rec('2026-11-05', '10:00', '2', '나쁜 플래그')
+    + rec('2026-11-05', '10:00', '0', '') + '2026-11-05\x1f10:00\x1f0\x1e' + rec('2026-11-06', '', '1', 'a\u200Bb');
+  const r = L.parseCalendarMonth(out, 2026, 11);
+  assert.deepStrictEqual(r['2026-11-18'], [{ allDay: true, time: '', title: '휴일' }, { allDay: false, time: '09:00', title: '아침' }, { allDay: false, time: '14:30', title: '회의' }]);
+  assert.strictEqual([...r['2026-11-02'][0].title].length, 60); assert.deepStrictEqual(r['2026-11-06'], [{ allDay: true, time: '', title: 'ab' }]);
+  assert.deepStrictEqual(Object.keys(r).sort(), ['2026-11-02', '2026-11-06', '2026-11-18']);
+  // 하루 12개(한 달 400개 상한은 하루 12개 × 31일 = 372 라 코드 안의 안전장치일 뿐이다)
+  let day = ''; for (let i = 0; i < 20; i++) day += rec('2026-11-10', '10:' + String(i).padStart(2, '0'), '0', 't' + i);
+  assert.strictEqual(L.parseCalendarMonth(day, 2026, 11)['2026-11-10'].length, 12);
+  let many = ''; for (let d = 1; d <= 30; d++) for (let i = 0; i < 12; i++) many += rec('2026-11-' + String(d).padStart(2, '0'), '10:' + String(i).padStart(2, '0'), '0', 'e' + i);
+  const mr = L.parseCalendarMonth(many, 2026, 11); assert.strictEqual(Object.values(mr).reduce((n, a) => n + a.length, 0), 360);
+  for (const bad of ['', 'garbage', undefined, 5, 'x'.repeat(600000)]) assert.deepStrictEqual(L.parseCalendarMonth(bad, 2026, 11), {});
+  assert.deepStrictEqual(L.parseCalendarMonth(out, 1999, 11), {}); assert.deepStrictEqual(L.parseCalendarMonth(out, 2026, 13), {});
+  assert.deepStrictEqual(L.parseCalendarOutput(rec('2026-11-18', '10:00', '0', 'x'), new Date(2026, 10, 18)).length, 1); // 기존 파서는 그대로
+});
+t('달력 카드·하루 보기 연결(소스 구조)', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8'); const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  assert.ok(html.indexOf('id="cal-card"') > html.indexOf('id="proj-card"') && html.indexOf('id="cal-card"') < html.indexOf('id="lang-note"'));
+  assert.ok(/<section id="day-view" class="proj-detail day-view" role="region"[^>]* hidden>/.test(html));
+  assert.ok(html.indexOf('id="proj-unsorted-toggle"') < html.indexOf('id="proj-done-toggle"'));
+  for (const ch of ['days:month', 'days:detail']) assert.ok(main.includes("ipcMain.handle('" + ch + "', (e, ") && pre.includes("'" + ch + "'"));
+  assert.ok(/'days:month', \(e, ym\) => \{\s*if \(!fromMain\(e\) \|\| !L\.parseYm\(ym\)\) return null;/.test(main)); // 보낸 창·형식을 main 이 다시 본다
+  assert.ok(/'days:detail', \(e, day\) => \{\s*if \(!fromMain\(e\) \|\| !L\.validDay\(day\)/.test(main));
+  assert.ok(/if \(!SMOKE && !FAKE_PROJ\) \{ readCalendar\(\)/.test(main) && /const calOn = \(\) => FAKE_DAY \|\| \(!SMOKE && !FAKE_PROJ/.test(main)); // 스모크·시험 모드에서는 캘린더를 읽지 않는다
+  assert.ok(/calMonths\.clear\(\)/.test(main) && /CAL_MONTH_MAX = 3/.test(main) && /timeout: 20000/.test(main));
+  for (const id of ['cal-prev', 'cal-next', 'cal-today', 'dv-close', 'dv-prev', 'dv-next']) assert.ok(new RegExp('<button type="button"[^>]*id="' + id + '"[^>]*aria-label=').test(html), id);
+  assert.ok(/aria-pressed/.test(rd) && /aria-current', 'date'/.test(rd) && /detailMode = 'day'/.test(rd));
+});
 // ---- ⌘숫자 매핑 · 순서 적용 · 화면 상태 파일 ----
 const UI_LIST = L.buildProjects({ registry: L.parseProjectRegistry('maru|a|가\nmaru|b|나\nmaru|c|다\n블로그|x|엑스\n블로그|y|와이\n책|z|지\n'),
   entries: [{ day: '2026-11-10', tag: 'maru', slug: null, time: '10:00', kind: 'done', importance: 5, text: 't', seq: 0 }, { day: '2026-11-01', tag: '블로그', slug: 'x', time: '10:00', kind: 'done', importance: 5, text: 't', seq: 1 }],
@@ -1216,13 +1349,14 @@ t('numberTargets: 작업 공간 먼저, 이어서 프로젝트, 최대 9', () =>
   assert.deepStrictEqual(L.numberTargets(['w', 5, null], ['p/1', {}, 'p/2']).map((x) => x.id), ['w', 'p/1', 'p/2']); // 이상한 값은 건너뜀
   assert.deepStrictEqual(L.numberTargets('x', null), []);
 });
-t('visibleProjectKeys: 접힌 카테고리 제외, 화면 순서, 분류 안 됨 포함', () => {
+t('visibleProjectKeys: 접힌 카테고리 제외, 화면 순서, 분류 안 됨은 번호 없음', () => {
   const v = L.groupProjects(UI_LIST);
   const all = L.visibleProjectKeys(v.open, []);
   assert.deepStrictEqual(all, v.open.flatMap((g) => g.items.map((x) => x.key)));
-  assert.ok(all.includes('maru') && all.includes('maru/a')); // 분류 안 됨(키 = 태그)도 번호를 받는다
+  assert.ok(!all.includes('maru') && all.includes('maru/a')); // 분류 안 됨(키 = 태그)은 번호를 받지 않는다
+  assert.deepStrictEqual(v.unsorted.map((x) => x.key), ['maru']);
   const noMaru = L.visibleProjectKeys(v.open, ['maru']);
-  assert.ok(!noMaru.some((k) => k === 'maru' || k.startsWith('maru/')) && noMaru.length === all.length - 4);
+  assert.ok(!noMaru.some((k) => k === 'maru' || k.startsWith('maru/')) && noMaru.length === all.length - 3);
   assert.deepStrictEqual(L.visibleProjectKeys(v.open, ['없는태그', 5]), all);
   assert.deepStrictEqual(L.visibleProjectKeys(null, null), []);
   const done = L.groupProjects(L.buildProjects({ registry: L.parseProjectRegistry('maru|a|가\n'), entries: [], state: { 'maru/a': { status: 'done', doneAt: '2026-11-15' } }, todos: [], today: '2026-11-16' }));
@@ -1243,12 +1377,13 @@ t('applyProjectUi: 모르는 키·중복·다른 카테고리 키 무시, 새 �
   const g = L.groupProjects(UI_LIST, ui);
   assert.deepStrictEqual(g.open.map((x) => x.tag), ['책', '블로그', 'maru']); // 정한 순서 먼저
   const maru = g.open.find((x) => x.tag === 'maru').items.map((x) => x.key);
-  assert.deepStrictEqual(maru, ['maru/c', 'maru/a', 'maru/b', 'maru']); // c,a 는 정한 순서, b(새 항목)는 뒤, 분류 안 됨은 맨 아래
+  assert.deepStrictEqual(maru, ['maru/c', 'maru/a', 'maru/b']); // c,a 는 정한 순서, b(새 항목)는 뒤
   assert.ok(!g.open.find((x) => x.tag === '블로그').items.some((x) => x.key.startsWith('maru'))); // 다른 카테고리 키는 옮겨지지 않는다
   assert.deepStrictEqual(g.done, base.done);
   assert.strictEqual(g.open.reduce((n, x) => n + x.items.length, 0), base.open.reduce((n, x) => n + x.items.length, 0)); // 항목이 늘거나 줄지 않는다
-  // 분류 안 됨을 projOrder 에 적어도 맨 아래 고정
-  assert.strictEqual(L.groupProjects(UI_LIST, { catOrder: [], projOrder: { maru: ['maru', 'maru/b'] }, collapsed: [] }).open.find((x) => x.tag === 'maru').items.at(-1).key, 'maru');
+  assert.deepStrictEqual(g.unsorted, base.unsorted);
+  // 분류 안 됨 키를 projOrder 에 적어도 카테고리 묶음에는 들어오지 않는다
+  assert.ok(!L.groupProjects(UI_LIST, { catOrder: [], projOrder: { maru: ['maru', 'maru/b'] }, collapsed: [] }).open.find((x) => x.tag === 'maru').items.some((x) => x.key === 'maru'));
   // 프로토타입 키 이름의 태그도 안전하다
   assert.doesNotThrow(() => L.applyProjectUi(base.open, { catOrder: ['constructor', '__proto__'], projOrder: { constructor: ['constructor/a'] }, collapsed: [] }));
 });
@@ -1290,7 +1425,11 @@ t('프로젝트 화면 상태 파일: 원자적 저장·손상·과대·링크',
 t('pruneProjectUi: 없는 태그·키는 걸러 낸다', () => {
   const ui = { catOrder: ['책', 'ghost', 'maru'], projOrder: { maru: ['maru/b', 'maru/gone', 'maru'], ghost: ['ghost/a'], 책: ['책/z'] }, collapsed: ['ghost', '블로그'] };
   assert.deepStrictEqual(L.pruneProjectUi(ui, UI_LIST), { catOrder: ['책', 'maru'], projOrder: { maru: ['maru/b'], 책: ['책/z'] }, collapsed: ['블로그'] });
-  assert.deepStrictEqual(L.pruneProjectUi(ui, []), L.defaultProjectUi());
+  const kept = { catOrder: ['책', 'maru'], projOrder: { maru: ['maru/b'] }, collapsed: ['블로그'] };
+  assert.deepStrictEqual(L.pruneProjectUi(kept, []), kept); // 프로젝트 행이 하나도 없으면(레지스트리가 비었거나 읽지 못함) 지우지 않는다
+  assert.deepStrictEqual(L.pruneProjectUi(kept, null), kept);
+  assert.deepStrictEqual(L.pruneProjectUi(kept, [{ kind: 'unsorted', tag: '책' }]), kept);
+  assert.deepStrictEqual(L.pruneProjectUi({ bad: 1 }, []), L.defaultProjectUi()); // 잘못된 값은 여전히 기본값
   assert.deepStrictEqual(L.pruneProjectUi('x', UI_LIST), L.defaultProjectUi());
   const big = { catOrder: [], projOrder: {}, collapsed: [] }; assert.ok(L.projectUiFits(big));
 });

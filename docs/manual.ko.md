@@ -154,6 +154,7 @@ data/              개인 데이터 (gitignore): state logs digests skill-propos
 ```
 - 코드는 `MARU_HOME`(스크립트 위치 기준), 개인 데이터는 `MARU_DATA`(기본 `$MARU_HOME/data`)에 둡니다. 설정은 `scripts/lib.sh` 상단 한 곳이며 환경변수 또는 `data/maru.conf`로 덮어씁니다.
 - **기억 위치**: Claude Code의 자동 기억 폴더 `~/.claude/projects/<슬러그>/memory/`. 슬러그는 `MARU_HOME`의 실제 경로에서 영숫자가 아닌 문자를 `-`로 바꾼 값입니다(예: `/path/to/maru` → `-path-to-maru`). 그래서 `~/maru`에서 `claude`를 실행하면 색인이 자동으로 로드됩니다.
+- **하루 회고(daily note)**: 새벽 정리(`dream.sh`)가 최근 7일 중 일지가 있는 날(오늘 제외, 아직 회고가 없는 날)에 대해 한 번에 최대 2개, 최신 날짜부터 짧은 일기 글을 `<기억 폴더>/diary/YYYY-MM-DD.md` 에 둡니다. 날짜는 셸이 고르고, 글은 모델이 그날 일지 줄에 적힌 내용만으로 쓰며(지어낸 내용 금지), 셸(`apply_diary`)이 길이·비밀값·무해화를 검증해 `# 제목`, 빈 줄, 본문 형식으로 설치합니다. 이미 있는 파일은 덮어쓰지 않고, 기억 변경 이력(`maru hist`)에 함께 남습니다. 세션 시작 컨텍스트와 기억 색인에는 들어가지 않습니다. 파일을 지워도 안전합니다. 그날이 최근 7일 안이면 새벽 정리가 실제로 도는 다음 때 다시 만들어지고(정리는 기억이나 일지가 바뀐 밤에만 돕니다), 7일이 지났으면 다시 만들어지지 않습니다.
 - **변경 이력**: `scripts/hist`는 기억 폴더만 추적하는 별도 git 저장소(`data/history.git`)를 감쌉니다. `scripts/hist log`. 이 저장소(`.git`)는 코드만 추적합니다.
 
 ## 보안 모델과 한계
