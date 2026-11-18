@@ -62,9 +62,9 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
-const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을 연 채로 둔다)
+const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew' || TEST_UI === 'wsmenu' || TEST_UI === 'wsrename'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을, wsmenu 는 둘째 행의 우클릭 메뉴를, wsrename 은 둘째 행의 이름 편집을 연 채로 둔다)
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX && !FAKE_HIER && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
@@ -281,13 +281,13 @@ function fakeRefresh() {
   add(-21, '14:00', 'done', 'garden', 'watering', 'Started the plant tracker prototype');
   const todos = L.parseTodos('garden/watering|8|Add a seasonal interval for summer|Continue the watering schedule work\ntravel|5|Book the train tickets|\nnotes|4|Tidy the weekly template|');
   cache = { status: null, todosRaw: todos, todos, skills: [], notifs: [], battery: null, disk: null };
-  proj.raw = { registry: L.parseProjectRegistry('garden|watering|Watering reminders\nrecipes|site|Recipe site\n'), entries: E };
+  proj.raw = { registry: L.parseProjectRegistry('garden|watering|Watering reminders\nrecipes|site|Recipe site\ngarden|seed-log|Seed log\ntravel|packing|Packing checklist\n'), entries: E };
   proj.diaries = FAKE_DAY ? new Map([
     [fakeDayStr(-1), { title: 'A quiet day for the garden app', body: 'Most of the day went into the watering table. Moving the intervals into one place made the reminder code much shorter.\n\nIn the afternoon the recipe site got its first pages, and the typeface question is still open.' }],
     [fakeDayStr(-3), { title: 'Recipe site decisions', body: 'Settled on a static generator. No server to look after.' }],
     [fakeDayStr(-8), { title: 'Collecting notes', body: 'Gathered the plant care notes into a single file and tidied the weekly template.' }],
   ]) : new Map();
-  projState = {}; projUi = L.defaultProjectUi(); projUiLoaded = true;
+  projState = { 'garden/seed-log': { status: 'done', doneAt: fakeDayStr(-6) }, 'travel/packing': { status: 'done', doneAt: fakeDayStr(-19) } }; projUi = L.defaultProjectUi(); projUiLoaded = true; // 끝낸 프로젝트 둘(하나는 진행 중 카테고리와 같은 태그: 완료 목록 화면 확인용)
   recomputeProjects();
   refreshed = true;
 }
@@ -1420,6 +1420,18 @@ ipcMain.handle('ws:resume-prev', async (e, id) => {
 ipcMain.handle('ws:activate', (e, id) => { if (!wsFrom(e, id)) return false; activate(id); return true; });
 ipcMain.handle('ws:new', (e) => (fromMain(e) ? newWorkspaceFlow() : { ok: false, reason: 'invalid' })); // 경로는 렌더러가 주지 않는다(main 의 폴더 선택창)
 ipcMain.handle('ws:close', (e, id) => (wsFrom(e, id) ? closeWorkspace(id) : { ok: false, reason: 'invalid' }));
+// 작업 공간 이름 변경: 제목은 main 이 다시 무해화·40자 상한을 적용하고(비면 거부, 기존 제목 유지), 다른 작업 공간과 겹치면 " 2" 를 붙인다(자기 자신의 현재 제목은 겹침 대상이 아니다)
+ipcMain.handle('ws:rename', (e, id, title) => {
+  const w = wsFrom(e, id);
+  if (!w) return { ok: false, reason: 'invalid' };
+  const clean = L.cleanWsTitle(title);
+  if (!clean) return { ok: false, reason: 'title' };
+  const next = L.uniqueTitle(clean, [...wss.values()].filter((o) => o !== w).map((o) => o.title));
+  if (next === w.title) return { ok: true, title: w.title }; // 같은 제목이면 아무것도 하지 않는다
+  w.title = next;
+  wsChanged(true); // 즉시 저장 + 화면·메뉴·트레이 갱신
+  return { ok: true, title: next };
+});
 ipcMain.handle('panels:get', (e) => (fromMain(e) ? panels() : null));
 // 렌더러가 본 항목(shown = 제목+"\n"+프롬프트)이 main 의 index 번 항목과 같을 때만 처리. 쓰는 문장은 항상 main 의 프롬프트.
 // 대상은 활성 작업 공간뿐(id 가 활성이 아니면 거부).
@@ -2495,7 +2507,7 @@ ipcMain.handle('meet:start', async (e, id) => {
   } finally { meetBusy = false; }
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
-  uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null, uiDayOpen: FAKE_DAY && !app.isPackaged && process.env.MARU_APP_DAY_OPEN === '1',
+  uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDoneOpen: !app.isPackaged && process.env.MARU_APP_DONE === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null, uiDayOpen: FAKE_DAY && !app.isPackaged && process.env.MARU_APP_DAY_OPEN === '1',
   homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,
 } : null));
 // patch: { name?: string, lang?: 'ko'|'en' } 만 허용. 이름은 main 이 다시 정리·검증한다. 첫 저장에는 name 이 필요하다.

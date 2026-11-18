@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('maru', {
   activateWorkspace: (id) => ipcRenderer.invoke('ws:activate', String(id)),
   newWorkspace: () => ipcRenderer.invoke('ws:new'),
   closeWorkspace: (id) => ipcRenderer.invoke('ws:close', String(id)),
+  renameWorkspace: (id, title) => ipcRenderer.invoke('ws:rename', String(id), String(title).slice(0, 400)),
   onCloseRequest: (cb) => { ipcRenderer.on('ui:close-request', () => cb()); },
   onWorkspacesChanged: (cb) => { ipcRenderer.on('ws:changed', () => cb()); },
   // 파일 끌어다 놓기: sandbox 렌더러에는 File.path 가 없어 webUtils 로 경로 문자열만 얻어 보낸다(내용은 읽지 않는다)

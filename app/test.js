@@ -593,6 +593,35 @@ t('화면이 쓰는 키가 표에 모두 있다', () => {
 // ---- 작업 공간 ----
 const WSDIRS = new Set(['/h/a/blog', '/h/b/blog', '/h/maru', '/h/x', '/h/y', '/h/z', '/h/w', '/h/v', '/']);
 const wsExists = (p) => WSDIRS.has(p);
+t('cleanWsTitle: 무해화·40자(코드포인트) 상한·trim·빈 값 거부', () => {
+  assert.strictEqual(L.cleanWsTitle('  블로그 글  '), '블로그 글');
+  assert.strictEqual(L.cleanWsTitle('a\u202Eb\u200Bc\r\nd\u001b[2J'), 'abcd[2J');
+  assert.strictEqual([...L.cleanWsTitle('가'.repeat(60))].length, 40);
+  assert.strictEqual(L.cleanWsTitle('😀'.repeat(41)), '😀'.repeat(40)); // 코드포인트 기준(쌍 문자를 반으로 자르지 않는다)
+  assert.strictEqual(L.cleanWsTitle('x'.repeat(39) + ' yyy'), 'x'.repeat(39)); // 자른 뒤 끝 공백은 trim
+  for (const bad of ['', '   ', '\u200B\u202E', '\n\t', null, undefined, 42, {}, []]) assert.strictEqual(L.cleanWsTitle(bad), '', String(bad));
+  assert.strictEqual(L.cleanWsTitle('y'.repeat(100000)).length, 40);
+});
+t('이름 변경 겹침: 다른 작업 공간과 겹치면 " 2", 자기 자신의 제목은 겹침이 아니다', () => {
+  assert.strictEqual(L.uniqueTitle('blog', ['notes', 'blog']), 'blog 2');
+  assert.strictEqual(L.uniqueTitle('blog', ['notes']), 'blog'); // 자기 자신(제외한 목록)만 있으면 그대로
+  assert.strictEqual(L.uniqueTitle('blog', ['blog', 'blog 2']), 'blog 3');
+  assert.strictEqual([...L.uniqueTitle('가'.repeat(40), ['가'.repeat(40)])].length, 40); // 번호를 붙여도 40자 이내
+});
+t('ws:rename: main 이 wsFrom·cleanWsTitle·uniqueTitle(자기 제외)로 처리하고 preload 와 맞는다', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const h = main.slice(main.indexOf("ipcMain.handle('ws:rename'"), main.indexOf("ipcMain.handle('panels:get'"));
+  assert.ok(/wsFrom\(e, id\)/.test(h) && /L\.cleanWsTitle\(title\)/.test(h) && /reason: 'title'/.test(h) && /filter\(\(o\) => o !== w\)/.test(h) && /wsChanged\(true\)/.test(h));
+  assert.ok(/'ws:rename', String\(id\), String\(title\)/.test(pre));
+  assert.ok(/'wsmenu', 'wsrename', 'hierarchy'\]/.test(main) && /TEST_UI === 'wsmenu' \|\| TEST_UI === 'wsrename'/.test(main));
+});
+t('작업 공간 우클릭 메뉴·이름 변경 문구가 ko·en 모두 있고 자리표시자가 같다', () => {
+  for (const k of ['ws.menu.aria', 'ws.menu.rename', 'ws.menu.remove', 'ws.rename.aria', 'ws.rename.err', 'ws.rename.fail']) for (const lg of I.LANGS) assert.ok(typeof I.STR[lg][k] === 'string' && I.STR[lg][k].length > 0, lg + ':' + k);
+  assert.strictEqual(I.t('ko', 'ws.menu.aria', { title: 'x' }), 'x 작업 공간 메뉴');
+  const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  for (const m of rd.matchAll(/T\('(ws\.(?:menu|rename)\.[\w.]+)'/g)) assert.ok(I.STR.ko[m[1]] && I.STR.en[m[1]], m[1]);
+  assert.ok(/e\.isComposing \|\| e\.keyCode === 229/.test(rd) && /maxLength = Lib\.WS_TITLE_MAX/.test(rd) && /role', 'menu'/.test(rd));
+});
 t('workspaceTitle·uniqueTitle 번호 매기기', () => {
   assert.strictEqual(L.workspaceTitle('/h/a/blog'), 'blog');
   assert.strictEqual(L.workspaceTitle('/h/a/blog/'), 'blog');
@@ -749,10 +778,10 @@ t('작업 공간·트레이 i18n 키가 ko·en 모두 있고 비어 있지 않�
 });
 t('main.js 가 쓰는 작업 공간 IPC 채널이 preload 와 맞는다', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
-  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'quest:fill', 'ws:get', 'ws:activate', 'ws:new', 'ws:close']) {
+  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'quest:fill', 'ws:get', 'ws:activate', 'ws:new', 'ws:close', 'ws:rename']) {
     assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch);
   }
-  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'ws:activate', 'ws:close']) assert.ok(new RegExp("'" + ch + "', String\\(id\\)").test(pre), 'id 를 싣는지: ' + ch);
+  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'ws:activate', 'ws:close', 'ws:rename']) assert.ok(new RegExp("'" + ch + "', String\\(id\\)").test(pre), 'id 를 싣는지: ' + ch);
   assert.ok(/'quest:fill', String\(id\)/.test(pre));
 });
 

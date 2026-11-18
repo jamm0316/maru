@@ -1003,6 +1003,11 @@ function managedWsTitle(title, cwd, roots, product) {
   const isRoot = typeof cwd === 'string' && Array.isArray(roots) && roots.some((r) => typeof r === 'string' && r && r.replace(/\/+$/, '') === cwd.replace(/\/+$/, ''));
   return isRoot && typeof product === 'string' && product && (!title || title === '.maru') ? product : title;
 }
+// 사용자가 직접 정한 제목: 무해화 -> 40자(코드포인트) 상한 -> 앞뒤 공백 제거. 비면 ''(거부). 문자열이 아니면 ''
+function cleanWsTitle(s) {
+  if (typeof s !== 'string') return '';
+  return [...cleanQuestText(s.length > 4000 ? s.slice(0, 4000) : s)].slice(0, WS_TITLE_MAX).join('').trim();
+}
 // 이미 쓰는 제목(taken)과 겹치면 " 2", " 3" … 을 붙인다
 function uniqueTitle(base, taken) {
   const used = new Set(taken);
@@ -3780,7 +3785,7 @@ const api = {
   SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, teamChip, matchSubs, squadOpen, claudeLaunchCommand,
   TODO_DONE_MAX, TODO_DONE_MAX_BYTES, fitTodoDone, todoMarkKey, TODO_DONE_KEEP_SEC, TODO_DONE_HIDE_SEC, titleKey, todoTitleRecordable, validTodoDoneEntry, makeTodoDone, todoMarkable, formatTodoDone, parseTodoDone, pruneTodoDone, addTodoDone, removeTodoDone, filterTodos, readTodoDoneFile, saveTodoDone, projectOpenTodos,
   confirmClose, confirmRestart, closeRequestAction, lookupWs, ringFrameInterval, readWorkspacesFile, backupCorruptFile,
-  WS_MAX, WS_STATES, workspaceTitle, managedWsTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,
+  WS_MAX, WS_TITLE_MAX, WS_STATES, workspaceTitle, managedWsTitle, cleanWsTitle, uniqueTitle, normalizeWorkspaces, parseWorkspaces, loadWorkspaces, saveWorkspaces, workspaceDirOk, newSessionId, shortenPath,
   LOGO, logoShapesSvg, RING, ringInit, stepRing, ringView,
   traySummary, trayTitle, trayTodoTitles, trayMenuModel, trayIconPath,
   splitProjectField, projectKey, isProjectKey, neutralizeBody, looksSecret, cleanProjectTitle, parseProjectRegistry, parseJournalText, readJournalEntries,

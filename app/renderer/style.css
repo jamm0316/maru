@@ -55,6 +55,10 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family
 .ws:hover .ws-x,.ws:focus-within .ws-x{opacity:1;pointer-events:auto}
 .ws-x:hover{background:#2A1A0C;color:var(--or)}
 .ws-x:focus-visible{outline:2px solid var(--or);opacity:1}
+.ws-main.editing{cursor:default}
+.ws .ws-edit{flex:1 1 auto;min-width:0;width:100%;box-sizing:border-box;font:inherit;font-weight:600;font-size:14px;line-height:1.3;color:var(--ink);background:#0E0B08;border:1px solid var(--or);border-radius:4px;padding:0 4px;margin:-1px 0}
+.ws .ws-edit:focus{outline:2px solid rgba(255,138,42,.35);outline-offset:0}
+.ws-menu{min-width:150px;z-index:60}
 .ws-add{flex:none;width:24px;height:24px;border-radius:6px;border:1px solid #4A3A2C;background:transparent;color:var(--or2);font:inherit;font-size:16px;line-height:1;cursor:pointer;padding:0}
 .ws-add:hover:not(:disabled),.ws-add:focus-visible{border-color:var(--or);color:var(--or);outline:none}
 .ws-add:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
@@ -267,6 +271,11 @@ body.mod .kbd{display:inline-block}
 .proj:hover:not(.on),.proj:focus-visible{border-color:var(--or);background:var(--sel);outline:none}
 .proj.on{background:var(--sel);border-color:var(--or)}
 .proj .pt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj .pt{flex:1}
+.proj{position:relative}
+.proj .grip{position:absolute;left:0;top:50%;transform:translateY(-50%);font-size:10px;letter-spacing:-2px;color:var(--mute);opacity:0;pointer-events:none}
+.proj[draggable=true]:hover .grip,.proj[draggable=true]:focus-visible .grip{opacity:.8}
+.proj[draggable=true]:active{cursor:grabbing}
 .proj .cnt{font-size:11px;color:var(--mute);white-space:nowrap;overflow-wrap:normal}
 .proj .cnt.check{color:var(--or2);border:1px solid #5A4630;border-style:dashed;border-radius:999px;padding:1px 8px}
 .proj-toggle{align-self:flex-start;font:inherit;font-size:12px;color:var(--soft);background:transparent;border:0;border-top:1px solid var(--line);width:100%;text-align:left;padding:8px 2px 0;cursor:pointer}

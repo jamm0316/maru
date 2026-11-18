@@ -28,7 +28,7 @@
     modals.forEach((m, i) => { m.el.inert = i !== modals.length - 1; });
   }
   function openModal(backdrop, focusEl, opts) {
-    closeMenu(false); closeUpdate(false);
+    closeMenu(false); closeUpdate(false); closeWsMenu(false);
     const m = { el: backdrop, prev: document.activeElement, closable: () => true, close: () => closeModal(backdrop), ...opts };
     modals.push(m);
     backdrop.hidden = false;
@@ -46,7 +46,7 @@
     if (m.prev && document.contains(m.prev) && !m.prev.closest('[inert]')) m.prev.focus(); else focusTerm();
   }
   function focusTerm() {
-    if (modalOpen()) return;
+    if (modalOpen() || wsEdit) return; // 이름을 고치는 동안에는 터미널이 포커스를 가져가지 않는다(가져가면 입력칸이 포커스를 잃어 확정돼 버린다)
     if (detailOpen) { (detailMode === 'inbox' ? $('id-title') : detailMode === 'memory' ? $('mv-title') : detailMode === 'day' ? $('dv-title') : $('pd-title')).focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
     const e = terms.get(activeId); if (e && e.opened) e.term.focus();
   }
@@ -240,15 +240,134 @@
     if (n.kind === 'prefill') return T('child.note.prefill');
     return T('child.note.refused', { reason: T(Lib.childReasonKey(n.reason), { n: Lib.CHILD_MAX }) });
   }
+
+  // ---- 작업 공간 이름 변경(인라인 편집) ----
+  // wsEdit: 편집 중인 행 하나. input = 지금 그려진 입력칸, busy = 목록을 다시 그리는 중(blur 를 확정으로 치지 않는다), composing = 한글 조합 중
+  let wsEdit = null;
+  function makeWsInput(w, restore) {
+    const inp = el('input', 'ws-edit'); inp.type = 'text'; inp.maxLength = Lib.WS_TITLE_MAX; inp.spellcheck = false; inp.autocomplete = 'off';
+    inp.setAttribute('aria-label', T('ws.rename.aria'));
+    inp.value = restore ? restore.value : w.title;
+    wsEdit.composing = false;
+    for (const ev of ['click', 'dblclick', 'mousedown', 'mouseup', 'pointerdown', 'contextmenu']) inp.addEventListener(ev, (e) => { e.stopPropagation(); if (ev === 'contextmenu') e.preventDefault(); });
+    inp.addEventListener('compositionstart', () => { if (wsEdit && wsEdit.input === inp) wsEdit.composing = true; });
+    inp.addEventListener('compositionend', () => { if (wsEdit && wsEdit.input === inp) wsEdit.composing = false; });
+    inp.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // 페이지의 전역 키 처리로 새지 않게(앱 메뉴의 ⌘ 단축키는 그대로 동작한다)
+      if (e.isComposing || e.keyCode === 229) return; // 조합 중의 Enter·Esc 는 입력기 몫
+      if (e.key === 'Enter') { e.preventDefault(); endWsEdit(true, true); }
+      else if (e.key === 'Escape') { e.preventDefault(); endWsEdit(false, true); }
+    });
+    inp.addEventListener('keyup', (e) => e.stopPropagation());
+    inp.addEventListener('blur', () => {
+      if (!(wsEdit && wsEdit.input === inp && !wsEdit.busy && inp.isConnected)) return;
+      if (!wsPtrDown) { endWsEdit(true, false); return; }
+      // 다른 곳을 눌러서 포커스를 잃었다: 지금 목록을 다시 그리면 눌린 단추가 사라져 그 클릭이 없어진다. 클릭이 끝난 뒤에 확정한다
+      const ed = wsEdit; document.addEventListener('mouseup', () => setTimeout(() => { if (wsEdit === ed) endWsEdit(true, false); }, 0), { once: true, capture: true });
+    });
+    return inp;
+  }
+  let wsPtrDown = false; // 마우스 단추가 눌려 있는 동안(입력칸의 blur 가 클릭 도중에 온 것인지 가린다)
+  document.addEventListener('mousedown', () => { wsPtrDown = true; }, true);
+  document.addEventListener('mouseup', () => { wsPtrDown = false; }, true);
+  window.addEventListener('blur', () => { wsPtrDown = false; });
+  function startWsEdit(id) {
+    const w = wsList.find((n) => n.id === id);
+    if (!w || modalOpen() || wsEdit) return;
+    closeWsMenu(false);
+    wsEdit = { id, orig: w.title, input: null, busy: false, composing: false, ending: false };
+    wsKey = null; renderWs();
+    if (wsEdit && wsEdit.input) { wsEdit.input.focus(); wsEdit.input.select(); }
+  }
+  // 확정(commit) 또는 취소. refocus: 키보드로 끝냈을 때 그 행의 버튼으로 포커스를 돌려 준다(바깥을 눌러 끝났으면 건드리지 않는다)
+  async function endWsEdit(commit, refocus) {
+    const ed = wsEdit;
+    if (!ed || ed.ending) return;
+    ed.ending = true;
+    const value = ed.input ? ed.input.value : ed.orig;
+    wsEdit = null; wsKey = null; renderWs();
+    const focusRow = () => { const r = [...$('workspaces').children].find((n) => n.dataset.id === ed.id); const t = r && r.querySelector('.ws-main'); if (t) t.focus(); else focusTerm(); };
+    if (refocus) focusRow();
+    if (commit && value !== ed.orig) {
+      let res = null; try { res = await window.maru.renameWorkspace(ed.id, value); } catch (x) { res = null; }
+      if (!res || !res.ok) flashNote(T(res && res.reason === 'title' ? 'ws.rename.err' : 'ws.rename.fail'));
+    }
+    wsKey = null; await syncWs();
+  }
+  // ---- 작업 공간 우클릭 메뉴(앱 안 DOM 메뉴): 이름 변경 / 제거 ----
+  let wsMenu = null; // { id, el, x, y }
+  function closeWsMenu(refocus) {
+    if (!wsMenu) return;
+    const m = wsMenu; wsMenu = null;
+    m.el.remove();
+    if (refocus) { // 열기 전에 포커스가 있던 곳으로(터미널에서 우클릭했으면 터미널로). 그 요소가 다시 그려져 사라졌으면 그 행으로
+      if (m.prev && m.prev.isConnected && m.prev !== document.body) { m.prev.focus(); return; }
+      const r = [...$('workspaces').children].find((n) => n.dataset.id === m.id); const t = r && r.querySelector('.ws-main'); if (t) t.focus(); else focusTerm();
+    }
+  }
+  function openWsMenu(id, x, y) {
+    const w = wsList.find((n) => n.id === id);
+    if (!w || modalOpen() || (wsEdit && wsEdit.id === id)) return;
+    closeWsMenu(false); closeMenu(false); closeUpdate(false); closeReports(false);
+    const prev = document.activeElement;
+    const menu = el('div', 'pop menu ws-menu'); menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', T('ws.menu.aria', { title: w.title }));
+    const mk = (cls, label, fn) => { const b = el('button', 'mi', label); b.type = 'button'; b.setAttribute('role', 'menuitem'); b.dataset.k = cls; b.addEventListener('click', (e) => { e.stopPropagation(); fn(); }); return b; };
+    menu.append(
+      mk('rename', T('ws.menu.rename'), () => startWsEdit(id)),
+      mk('remove', T('ws.menu.remove'), async () => {
+        closeWsMenu(false);
+        let r = null; try { r = await window.maru.closeWorkspace(id); } catch (e) { r = null; }
+        await syncWs();
+        if (!r || !r.ok) { const row = [...$('workspaces').children].find((n) => n.dataset.id === id); const t = row && row.querySelector('.ws-main'); if (t) t.focus(); } // 취소했으면 원래 행으로
+      }),
+    );
+    menu.addEventListener('keydown', (e) => {
+      const items = [...menu.querySelectorAll('[role=menuitem]')]; const i = items.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+      else if (e.key === 'Home') { e.preventDefault(); items[0].focus(); }
+      else if (e.key === 'End') { e.preventDefault(); items[items.length - 1].focus(); }
+      else if (e.key === 'Tab') { e.preventDefault(); closeWsMenu(true); }
+    });
+    document.body.append(menu);
+    const r = menu.getBoundingClientRect(); const M = 8;
+    menu.style.left = Math.max(M, Math.min(x, window.innerWidth - r.width - M)) + 'px';
+    menu.style.top = Math.max(M, Math.min(y, window.innerHeight - r.height - M)) + 'px';
+    wsMenu = { id, el: menu, prev };
+    menu.querySelector('[role=menuitem]').focus();
+  }
+  document.addEventListener('mousedown', (e) => { if (wsMenu && !wsMenu.el.contains(e.target)) closeWsMenu(false); }, true);
+  document.addEventListener('scroll', (e) => { const t = e.target; if (wsMenu && (t === document || (t && t.contains && t.contains($('workspaces'))))) closeWsMenu(false); }, true); // 목록이 움직일 때만 닫는다(터미널 출력의 스크롤에는 반응하지 않는다)
+  window.addEventListener('resize', () => closeWsMenu(false));
+  window.addEventListener('blur', () => closeWsMenu(true));
+  // 키보드로 메뉴 열기: 행의 버튼에 포커스가 있을 때 ContextMenu 키 또는 Shift+F10(버튼 자리 기준으로 띄운다)
+  $('workspaces').addEventListener('keydown', (e) => {
+    if (!(e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey))) return;
+    const row = e.target && e.target.closest ? e.target.closest('.ws') : null;
+    if (!row || e.target.classList.contains('ws-edit')) return;
+    e.preventDefault();
+    const b = row.querySelector('.ws-main').getBoundingClientRect();
+    openWsMenu(row.dataset.id, b.left + 24, b.bottom - 4);
+  });
+  // 시험 전용(MARU_APP_UI=wsmenu|wsrename): 둘째 행의 메뉴를 열거나 이름 편집을 연 채로 둔다(화면 확인용)
+  function openWsDev(mode) {
+    const row = $('workspaces').children[1]; if (!row) return;
+    if (mode === 'wsmenu') { const b = row.getBoundingClientRect(); openWsMenu(row.dataset.id, b.left + 40, b.top + 30); } else startWsEdit(row.dataset.id);
+  }
   function renderWs() {
-    const key = JSON.stringify([wsList, activeId, lang, wsCollapsedIds]);
+    if (wsEdit && !wsList.some((w) => w.id === wsEdit.id)) wsEdit = null; // 편집하던 작업 공간이 사라졌다
+    const key = JSON.stringify([wsList, activeId, lang, wsCollapsedIds, wsEdit ? wsEdit.id : null]);
     if (key === wsKey) return;
+    if (wsEdit && wsEdit.composing) return; // 한글 조합 중에는 입력칸을 바꿔 끼우지 않는다(조합이 끊긴다). wsKey 를 갱신하지 않았으니 다음 주기에 다시 그린다
     wsKey = key;
     const box = $('workspaces');
     const f = document.activeElement;
     const fr = f && box.contains(f) ? f.closest('.ws') : null;
-    const refocus = fr ? { id: fr.dataset.id, x: f.classList.contains('ws-x'), c: f.classList.contains('ws-chev'), b: f.classList.contains('ws-badge'), s: f.classList.contains('ws-sub') } : null;
-    box.replaceChildren();
+    const refocus = fr && !(wsEdit && f === wsEdit.input) ? { id: fr.dataset.id, x: f.classList.contains('ws-x'), c: f.classList.contains('ws-chev'), b: f.classList.contains('ws-badge'), s: f.classList.contains('ws-sub') } : null;
+    if (wsMenu && !wsList.some((w) => w.id === wsMenu.id)) closeWsMenu(false); // 메뉴는 행에 붙어 있지 않으므로 목록을 다시 그려도 열어 둔다(상태가 바뀔 때마다 닫히면 고를 수 없다). 그 작업 공간이 사라졌을 때만 닫는다
+    let edit = null; // 편집 중인 입력칸의 값·선택 범위는 다시 그리기 전에 붙잡아 둔다
+    if (wsEdit && wsEdit.input) { edit = { value: wsEdit.input.value, s: wsEdit.input.selectionStart, e: wsEdit.input.selectionEnd, d: wsEdit.input.selectionDirection, focus: document.activeElement === wsEdit.input }; wsEdit.busy = true; }
+    box.replaceChildren(); // (크롬은 포커스 있는 요소를 떼어낼 때 blur 를 보낸다: busy 동안은 확정하지 않는다)
     const nums = numberMap();
     const kidCount = new Map(); for (const w of wsList) if (w.parentId) kidCount.set(w.parentId, (kidCount.get(w.parentId) || 0) + 1);
     const titleOf = new Map(wsList.map((w) => [w.id, w.title]));
@@ -265,11 +384,13 @@
         ch.addEventListener('click', async () => { try { await window.maru.setWsCollapsed(w.id, !closedKids); } catch (x) { /* 무시 */ } syncWs(); });
         row.append(ch);
       }
-      const main = el('button', 'ws-main'); main.type = 'button';
-      if (on) main.setAttribute('aria-current', 'true');
-      main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }) + (w.team && w.team.name ? ' · ' + T('ws.team.aria', { name: w.team.name }) : ''));
+      const editing = !!wsEdit && wsEdit.id === w.id;
+      const main = el(editing ? 'div' : 'button', 'ws-main' + (editing ? ' editing' : '')); if (!editing) main.type = 'button'; // 편집 중에는 단추가 아니다(입력칸 안의 클릭·스페이스가 작업 공간 전환으로 새지 않는다)
+      if (on && !editing) main.setAttribute('aria-current', 'true');
+      if (!editing) main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }) + (w.team && w.team.name ? ' · ' + T('ws.team.aria', { name: w.team.name }) : ''));
       const c = el('span', 'col'); const num = nums.get('workspace:' + w.id);
-      const l1 = el('span', 'l1'); const nm = el('span', 'nm'); nm.append(el('span', 'n', w.title));
+      const l1 = el('span', 'l1'); const nm = el('span', 'nm');
+      if (editing) { const inp = makeWsInput(w, edit); nm.append(inp); wsEdit.input = inp; } else nm.append(el('span', 'n', w.title));
       l1.append(nm, el('span', 'st ' + k, T('agent.' + k)));
       const l2 = el('span', 'l2'); l2.append(el('span', 's', w.path)); if (num) l2.append(kbdHint(num));
       c.append(l1, l2);
@@ -282,10 +403,13 @@
       if (extra.length) { const l3 = el('span', 'l3'); l3.append(...extra); c.append(l3); }
       const cn = childNoteText(w.cnote);
       if (cn) { const nt = el('span', 'l3 cnote', cn); nt.setAttribute('role', 'status'); c.append(nt); }
-      if (num) main.setAttribute('aria-keyshortcuts', 'Meta+' + num);
+      if (num && !editing) main.setAttribute('aria-keyshortcuts', 'Meta+' + num);
       main.append(el('span', 'dot ' + k), c);
-      main.title = w.path + (ux === 'unknown' ? ' — ' + T('agent.unknown.sub') : '');
-      main.addEventListener('click', async () => { closeDetail(true); try { await window.maru.activateWorkspace(w.id); } catch (x) { /* 무시 */ } syncWs(); });
+      if (!editing) {
+        main.title = w.path + (ux === 'unknown' ? ' — ' + T('agent.unknown.sub') : '');
+        main.addEventListener('click', async () => { closeDetail(true); try { await window.maru.activateWorkspace(w.id); } catch (x) { /* 무시 */ } syncWs(); });
+      }
+      row.addEventListener('contextmenu', (ev) => { ev.preventDefault(); ev.stopPropagation(); if (!(wsEdit && wsEdit.id === w.id)) openWsMenu(w.id, ev.clientX, ev.clientY); });
       row.append(main);
       if (w.reports > 0) {
         const bd = el('button', 'ws-badge', T('ws.reports', { n: w.reports })); bd.type = 'button'; bd.setAttribute('aria-haspopup', 'dialog'); bd.dataset.id = w.id;
@@ -306,6 +430,12 @@
       const r = [...box.children].find((n) => n.dataset.id === refocus.id);
       const t = r && r.querySelector(refocus.x ? '.ws-x' : refocus.s ? '.ws-sub' : refocus.c ? '.ws-chev' : refocus.b ? '.ws-badge' : '.ws-main');
       if (t) t.focus();
+    }
+    if (wsEdit) { // 새 입력칸에 포커스·선택 범위를 되돌린다. 입력칸이 없으면(행이 숨겨짐) 편집을 접는다
+      if (wsEdit.input && wsEdit.input.isConnected) {
+        if (edit && edit.focus) { wsEdit.input.focus(); try { wsEdit.input.setSelectionRange(edit.s, edit.e, edit.d || 'none'); } catch (x) { /* 무시 */ } }
+        wsEdit.busy = false;
+      } else wsEdit = null;
     }
     $('ws-add').disabled = wsList.length >= Lib.WS_MAX;
     $('term-empty').hidden = wsList.length > 0 || detailOpen;
@@ -552,9 +682,11 @@
   window.maru.onWorkspacesChanged(() => syncWs());
   // ⌘W: 열린 모달·메뉴·팝오버가 있으면 그것을 닫고, 아니면 활성 작업 공간을 닫는다(확인은 main)
   window.maru.onCloseRequest(async () => {
-    const act = Lib.closeRequestAction({ overlayOpen: modalOpen() || menuOpen || updOpen || detailOpen || !!repOpenId, hasActive: !!activeId });
+    const act = Lib.closeRequestAction({ overlayOpen: modalOpen() || !!wsMenu || !!wsEdit || menuOpen || updOpen || detailOpen || !!repOpenId, hasActive: !!activeId });
     if (act === 'overlay') {
       if (modalOpen()) { const top = modals[modals.length - 1]; if (top.closable()) top.close(); }
+      else if (wsMenu) closeWsMenu(true);
+      else if (wsEdit) endWsEdit(false, true);
       else if (repOpenId) closeReports(true);
       else if (menuOpen) closeMenu(true);
       else if (updOpen) closeUpdate(true);
@@ -1013,18 +1145,19 @@
     const n = $('proj-note'); n.textContent = msg;
     clearTimeout(projNoteTimer); projNoteTimer = setTimeout(() => { n.textContent = ''; }, 4000);
   }
-  function projRow(it, num, canDrag) {
+  function projRow(it, num, canDrag, showTag) {
     const b = el('button', 'proj' + (it.key === detailKey ? ' on' : '')); b.type = 'button'; b.dataset.key = it.key; b.dataset.tag = it.tag;
     const name = projTitle(it);
     let cnt;
-    if (it.status === 'done') cnt = el('span', 'cnt', it.doneAt || '');
+    if (it.status === 'done') cnt = el('span', 'cnt', showTag ? it.tag + (it.doneAt ? ' · ' + it.doneAt.slice(5) : '') : (it.doneAt || '')); // 완료 목록은 카테고리 묶음 없이 한 줄씩: 어느 카테고리였는지와 끝낸 날(월-일)만 작게 붙인다
     else if (it.needsCheck) cnt = el('span', 'cnt check', T('proj.check'));
     else cnt = el('span', 'cnt', T('proj.todos', { n: it.openTodos }));
     const pr = el('span', 'pr'); pr.append(cnt); if (num) pr.append(kbdHint(num));
+    if (canDrag && it.kind === 'project') { const gr = el('span', 'grip', '⋮⋮'); gr.setAttribute('aria-hidden', 'true'); b.append(gr); } // 끌 수 있다는 표시(마우스를 올리면 보인다)
     b.append(el('span', 'pt', name), pr);
-    b.title = canDrag && it.kind === 'project' ? name + '\n' + T('proj.row.tip') : name;
+    b.title = canDrag && it.kind === 'project' ? name + '\n' + T('proj.row.tip') : showTag && it.doneAt ? name + '\n' + it.tag + ' · ' + it.doneAt : name;
     if (it.key === detailKey) b.setAttribute('aria-current', 'true');
-    b.setAttribute('aria-label', T('proj.row.aria', { title: name, state: cnt.textContent }));
+    b.setAttribute('aria-label', T('proj.row.aria', { title: name, state: showTag ? it.tag + ' · ' + (it.doneAt || '') : cnt.textContent }));
     if (num) b.setAttribute('aria-keyshortcuts', 'Meta+' + num);
     if (canDrag && it.kind === 'project') { b.draggable = true; b.dataset.drag = 'proj'; } // 분류 안 된 작업 줄은 끌 수 없다
     b.addEventListener('click', () => openDetail(it.key));
@@ -1078,7 +1211,10 @@
     tg.setAttribute('aria-label', T('proj.done.toggle', { n }) + ' — ' + T('proj.done.aria'));
     tg.setAttribute('aria-expanded', String(doneOpen && n > 0));
     const done = $('projects-done'); done.replaceChildren(); done.hidden = !doneOpen || n === 0;
-    if (!done.hidden) fillGroups(done, projView.done, 'done', nums);
+    if (!done.hidden) { // 진행 중 목록과 같은 카테고리 이름표를 또 그리면 카테고리가 둘로 나뉜 것처럼 보인다. 완료는 묶지 않고 끝낸 날짜순으로 한 줄씩
+      const flat = projView.done.flatMap((g) => g.items).sort((a, b) => ((a.doneAt || '') < (b.doneAt || '') ? 1 : (a.doneAt || '') > (b.doneAt || '') ? -1 : 0));
+      for (const it of flat) done.append(projRow(it, 0, false, true));
+    }
     if (refocus) {
       let t = null;
       if (refocus === 't') t = tg;
@@ -1776,6 +1912,8 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' && modalOpen()) { trapTab(e); return; }
     if (e.key !== 'Escape') return;
+    if (wsEdit && document.activeElement === wsEdit.input) return; // 이름 입력칸이 Esc 를 직접 처리한다(취소)
+    if (wsMenu) { e.preventDefault(); e.stopPropagation(); closeWsMenu(true); return; }
     if (modalOpen()) {
       const top = modals[modals.length - 1];
       e.preventDefault(); e.stopPropagation();
@@ -2202,6 +2340,7 @@
       homeNotice = init.homeNotice === 'failed' || init.homeNotice === 'newer' ? init.homeNotice : null;
       lang = I18N.isLang(profile && profile.lang) ? profile.lang : (I18N.isLang(init.defaultLang) ? init.defaultLang : 'ko');
       if (init.uiUnsorted === true) unsortedOpen = true; // 시험 전용(MARU_APP_UNSORTED=open)
+      if (init.uiDoneOpen === true) doneOpen = true; // 시험 전용(MARU_APP_DONE=open)
     }
     applyStatic();
     if (homeNotice) { $('home-warn').textContent = T('home.warn.' + homeNotice); $('home-warn').hidden = false; }
@@ -2216,7 +2355,7 @@
     else if (init && init.uiOpen === 'update') openUpdate();
     else if (init && init.uiOpen === 'squadnew') openSquadNew(); // 시험 전용(MARU_APP_UI=squadnew): 화면 확인용
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'subnew') { const m = wsList.find((w) => w.sub === true); if (m) openSub(m.id, true); } if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'subnew') { const m = wsList.find((w) => w.sub === true); if (m) openSub(m.id, true); } if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } if (init && (init.uiOpen === 'wsmenu' || init.uiOpen === 'wsrename')) openWsDev(init.uiOpen); }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
     setInterval(() => { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); }, 5000); // 일지·회고·일정은 main 이 읽어 둔 캐시를 가볍게 다시 묻는다
     refreshMeet(); setInterval(refreshMeet, 30000);

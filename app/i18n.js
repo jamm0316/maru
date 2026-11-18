@@ -179,7 +179,7 @@ const ko = {
   'upd.repoBehind': '마루 저장소에도 받을 변경이 있습니다', 'upd.pull': '저장소 업데이트', 'upd.pullDone': '저장소 업데이트: {m}',
   // 작업 공간·트레이
   'agent.exited': '종료됨', 'agent.exited.sub': '터미널이 끝났습니다. Cmd+Shift+R 로 다시 시작하세요',
-  'ws.add': '새 작업 공간', 'ws.add.aria': '새 작업 공간 열기', 'ws.close.aria': '{title} 닫기', 'ws.row.aria': '{title}, {path}, {state}',
+  'ws.add': '새 작업 공간', 'ws.add.aria': '새 작업 공간 열기', 'ws.close.aria': '{title} 닫기', 'ws.menu.aria': '{title} 작업 공간 메뉴', 'ws.menu.rename': '이름 변경', 'ws.menu.remove': '제거', 'ws.rename.aria': '작업 공간 이름(Enter 확정, Esc 취소)', 'ws.rename.err': '이름은 1~40자여야 합니다. 이름을 바꾸지 않았습니다.', 'ws.rename.fail': '이름을 바꾸지 못했습니다.', 'ws.row.aria': '{title}, {path}, {state}',
   'ws.empty': '열린 작업 공간이 없습니다', 'ws.new': '새 작업 공간',
   'term.fail': '[터미널을 시작하지 못했습니다. 폴더를 확인해 주세요]',
   'fill.inactive': '작업 공간이 바뀌어 넣지 않았습니다. 다시 눌러 주세요.',
@@ -438,7 +438,7 @@ const en = {
   'upd.finish.installed': 'Update installed (version {v})', 'upd.finish.rolledBack': 'The update had a problem and was rolled back to the previous version', 'upd.finish.failed': "The update couldn't be completed", 'upd.install': 'Install and restart', 'upd.installFail': "Couldn't install the update",
   'upd.repoBehind': 'The Maru repository has new changes too', 'upd.pull': 'Update repository', 'upd.pullDone': 'Repository update: {m}',
   'agent.exited': 'Exited', 'agent.exited.sub': 'The terminal has ended. Restart it with Cmd+Shift+R',
-  'ws.add': 'New workspace', 'ws.add.aria': 'Open a new workspace', 'ws.close.aria': 'Close {title}', 'ws.row.aria': '{title}, {path}, {state}',
+  'ws.add': 'New workspace', 'ws.add.aria': 'Open a new workspace', 'ws.close.aria': 'Close {title}', 'ws.menu.aria': 'Workspace menu for {title}', 'ws.menu.rename': 'Rename', 'ws.menu.remove': 'Remove', 'ws.rename.aria': 'Workspace name (Enter to confirm, Esc to cancel)', 'ws.rename.err': 'The name must be 1-40 characters. The name was not changed.', 'ws.rename.fail': "Couldn't rename the workspace.", 'ws.row.aria': '{title}, {path}, {state}',
   'ws.empty': 'No workspaces are open', 'ws.new': 'New workspace',
   'term.fail': "[Couldn't start the terminal. Check the folder]",
   'fill.inactive': 'The workspace changed, so nothing was entered. Click again.',
