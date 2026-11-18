@@ -405,7 +405,7 @@ function workspacesToSave(items, activeId, withSid = true) {
   return { list: keep.map((x) => {
     const p = parentOf(x);
     return { cwd: x.cwd, title: x.title, ...(withSid && validSessionUuid(x.claudeSid) ? { claudeSid: x.claudeSid, claudeSidAt: x.claudeSidAt } : {}), ...(withSid && validSessionUuid(x.prevSid) ? { prevSid: x.prevSid } : {}),
-      ...(isProjectKey(x.project) ? { project: x.project } : {}), ...(typeof x.squad === 'string' && SQUAD_SLUG_RE.test(x.squad) && (x.origin === 'child' || p) ? { squad: x.squad } : {}), ...(x.origin === 'child' || p ? { origin: 'child' } : {}), ...(validWsId(x.id) ? { id: x.id } : {}), ...(p ? { parentId: p.id } : {}) };
+      ...(isProjectKey(x.project) ? { project: x.project } : {}), ...(typeof x.squad === 'string' && SQUAD_SLUG_RE.test(x.squad) && (x.origin === 'child' || p) ? { squad: x.squad } : {}), ...(x.origin === 'child' || p ? { origin: 'child' } : {}), ...(x.by === 'user' && (x.origin === 'child' || p) ? { by: 'user' } : {}), ...(validWsId(x.id) ? { id: x.id } : {}), ...(p ? { parentId: p.id } : {}) };
   }), active: a >= 0 ? a : 0 };
 }
 const WS_ID_RE = /^[0-9a-f]{16}$/;
@@ -1049,6 +1049,7 @@ function normalizeWorkspaces(raw, { exists, max = WS_MAX, fallbackTitle } = {}) 
     if (e.origin === 'child') entry.origin = 'child'; // 하위 세션이었던 적이 있다(부모가 닫혀도 마루 세션이 될 수 없다)
     if (isProjectKey(e.project)) entry.project = e.project; // 하위 세션의 프로젝트 이름표(부모가 닫혀도 남는다)
     if (e.origin === 'child' && typeof e.squad === 'string' && SQUAD_SLUG_RE.test(e.squad)) entry.squad = e.squad; // 하위 세션이 맡은 팀(다시 열 때 같은 팀으로; 없어진 팀이면 래퍼가 무시하고 팀 없이 연다)
+    if (e.origin === 'child' && e.by === 'user') entry.by = 'user'; // 사용자가 직접 연 하위 세션(마루가 요청한 것과 구분). 그 밖의 값은 버린다
     rawIds.push(validWsId(e.id) ? e.id : null); rawParents.push(validWsId(e.parentId) ? e.parentId : null);
     out.list.push(entry);
     origIdx.push(i);
@@ -2234,15 +2235,16 @@ const CAL_TAIL = [
 const CAL_SCRIPT = [...CAL_PRE, 'set d0 to current date', 'set time of d0 to 0', 'set d1 to d0 + (2 * days)', ...CAL_TAIL];
 // 한 달 읽기용 고정 스크립트: 연·월(검증된 정수)만 바뀌는 부분이고 숫자 리터럴로만 들어간다. 로케일과 무관하게 1일로 먼저 맞춘 뒤 연·월을 바꾼다.
 // 날짜 설정 줄만 따로 돌려준다(시험에서 Calendar 부분 없이 실행할 수 있게). d1 은 `copy` 로 d0 의 사본을 만든다: `set d1 to d0` 는 같은 날짜 객체를 가리켜 d1 을 바꾸면 d0 도 바뀐다.
+// 날짜 변수 v 를 y-m-d 0시로 만드는 줄들. 정오에서 출발해 날짜를 옮긴 뒤 0시로 맞춘다(실행 시각과 무관하게 같은 결과).
+// 자정에 서머타임이 시작돼 0시가 없는 날은 전날 23시로 가므로, 그때만 1시간을 더해 그 날의 첫 시각으로 맞춘다.
+function calDateLines(v, y, m, d) {
+  return ['set time of ' + v + ' to 43200', 'set day of ' + v + ' to 1', 'set year of ' + v + ' to ' + y, 'set month of ' + v + ' to ' + m, 'set day of ' + v + ' to ' + d,
+    'set time of ' + v + ' to 0', 'if (hours of ' + v + ') is not 0 then set ' + v + ' to ' + v + ' + (1 * hours)'];
+}
 function calMonthDateSetup(year, month) {
   if (!Number.isInteger(year) || !Number.isInteger(month) || year < 2000 || year > 2100 || month < 1 || month > 12) return null;
   const ny = month === 12 ? year + 1 : year; const nm = month === 12 ? 1 : month + 1;
-  return [
-    'set d0 to current date', 'set day of d0 to 1', 'set year of d0 to ' + year, 'set month of d0 to ' + month, 'set time of d0 to 0',
-    'if (day of d0) is not 1 then set d0 to d0 + (1 * hours)', // 1일 0시가 없는 시간대(자정 서머타임)는 전달 23시로 가므로 1시간을 더한다
-    'copy d0 to d1', 'set year of d1 to ' + ny, 'set month of d1 to ' + nm,
-    'if (day of d1) is not 1 then set d1 to d1 + (1 * hours)',
-  ];
+  return ['set d0 to current date', ...calDateLines('d0', year, month, 1), 'copy d0 to d1', ...calDateLines('d1', ny, nm, 1)];
 }
 function calMonthScript(year, month) {
   const setup = calMonthDateSetup(year, month);
@@ -2342,13 +2344,7 @@ function calDayDateSetup(year, month, day) {
   if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day) || year < 2000 || year > 2100 || month < 1 || month > 12) return null;
   if (!validDay(String(year) + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0'))) return null;
   const nx = new Date(Date.UTC(year, month - 1, day + 1));
-  const ny = nx.getUTCFullYear(), nm = nx.getUTCMonth() + 1, nd = nx.getUTCDate();
-  return [
-    'set d0 to current date', 'set day of d0 to 1', 'set year of d0 to ' + year, 'set month of d0 to ' + month, 'set day of d0 to ' + day, 'set time of d0 to 0',
-    'if (day of d0) is not ' + day + ' then set d0 to d0 + (1 * hours)',
-    'copy d0 to d1', 'set time of d1 to 43200', 'set day of d1 to 1', 'set year of d1 to ' + ny, 'set month of d1 to ' + nm, 'set day of d1 to ' + nd, 'set time of d1 to 0',
-    'if (day of d1) is not ' + nd + ' then set d1 to d1 + (1 * hours)',
-  ];
+  return ['set d0 to current date', ...calDateLines('d0', year, month, day), 'copy d0 to d1', ...calDateLines('d1', nx.getUTCFullYear(), nx.getUTCMonth() + 1, nx.getUTCDate())];
 }
 function calDayScript(year, month, day) {
   const setup = calDayDateSetup(year, month, day);
@@ -2416,6 +2412,38 @@ function parseCalendarDay(text, year, month, day) {
   }
   out.sort((a, b) => (a.allDay === b.allDay ? 0 : a.allDay ? -1 : 1) || (a.time < b.time ? -1 : a.time > b.time ? 1 : (a.title < b.title ? -1 : a.title > b.title ? 1 : 0)));
   return out.slice(0, CAL_DAY_DETAIL_MAX_EVENTS);
+}
+
+// ---- 캘린더 도우미(maru-cal, EventKit) 순수 함수 ----
+// 도우미가 있으면 osascript 대신 쓴다. 인자는 검증된 정수에서만 만든다(셸 없이 execFile 의 인자 배열로 전달).
+const CAL_HELPER_FIRST_MS = 70000; // 권한 창이 뜰 수 있는 첫 호출(도우미 안의 대기 상한 60초보다 길다)
+const CAL_HELPER_MS = 10000; // 권한이 확인된 뒤
+const CAL_OSA_MS = 90000; // 도우미가 없을 때 osascript 폴백(느린 것이 알려져 있다)
+// kind: 'today' | 'month' | 'day' -> 인자 배열, 잘못이면 null
+function calHelperArgs(kind, year, month, day) {
+  const int = (n, lo, hi) => Number.isInteger(n) && n >= lo && n <= hi;
+  if (kind === 'today') return ['today'];
+  if (kind === 'month') return int(year, 2000, 2100) && int(month, 1, 12) ? ['month', String(year), String(month)] : null;
+  if (kind === 'day') {
+    if (!int(year, 2000, 2100) || !int(month, 1, 12) || !int(day, 1, 31)) return null;
+    return validDay(String(year) + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0')) ? ['day', String(year), String(month), String(day)] : null;
+  }
+  return null;
+}
+// 도우미 종료 코드 -> 'ok' | 'perm'(권한 없음) | 'fail'. null(시간 초과로 죽음 등)도 fail.
+function calHelperExit(code) { return code === 0 ? 'ok' : code === 3 ? 'perm' : 'fail'; }
+// `maru-cal status` 한 단어 -> 'ok' | 'denied' | 'ask'(첫 읽기 때 시스템이 묻는다) | 'unknown'
+function calStatusWord(out) {
+  const w = typeof out === 'string' ? out.trim() : '';
+  return w === 'authorized' ? 'ok' : w === 'denied' || w === 'restricted' ? 'denied' : w === 'notDetermined' ? 'ask' : 'unknown';
+}
+// 읽기 방식 선택: 패키징된 앱이거나 소스 실행 + 개발용 옵트인(devOptIn)일 때만, 도우미가 일반 파일(심볼릭 링크 아님)·실행 가능·소유자 확인(owned)이고 (패키징 시) 앱 Resources 안에 있으면 'helper', 아니면 'osascript'.
+// i = { helper: 경로, isFile, executable, owned, packaged, devOptIn, realHelper, realResources }
+function calChooseReader(i) {
+  if (!i || typeof i.helper !== 'string' || !i.helper || i.isFile !== true || i.executable !== true || i.owned !== true) return 'osascript';
+  if (!i.packaged && i.devOptIn !== true) return 'osascript';
+  if (i.packaged && !pathInside(i.realHelper, i.realResources)) return 'osascript';
+  return 'helper';
 }
 
 // ---- 알림과 승인함(inbox) ----
@@ -3462,16 +3490,83 @@ function cleanSquadAsk(s) {
   return n >= 1 && n <= SQUAD_ASK_MAX && !looksSecret(t) ? t : '';
 }
 
+// ======== 사용자가 직접 여는 하위 세션(마루 작업 공간 아래) ========
+// 폴더는 렌더러가 주지 않는다: main 이 연 폴더 선택창의 결과를 "초안"(한 번만 쓰는 토큰)에 담아 두고, 렌더러는 표시용 문자열과 토큰만 받는다.
+const SUB_TITLE_MAX = REQ_TITLE_MAX; const SUB_BRIEF_MAX = REQ_PROMPT_MAX; // 마루가 맡기는 것과 같은 한도
+const SUB_DRAFT_MS = 10 * 60 * 1000; const SUB_DRAFT_MAX = 8;
+const SUB_TOKEN_RE = /^[0-9a-f]{32}$/;
+const SUB_OPEN_KEYS = ['parent', 'token', 'title', 'brief', 'squad', 'notify'];
+// 열기 요청(렌더러가 준 값, 신뢰하지 않는다) -> { ok: true, parent, token, title, brief, squad, notify } | { ok: false, reason: 'invalid'|'title'|'brief' }
+// title 은 정리한 값(비면 '' — 호출 쪽이 폴더 이름으로 채운다), brief 는 마루의 브리핑과 같은 정리(비어도 된다)
+function parseSubOpen(o) {
+  const bad = (reason) => ({ ok: false, reason });
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return bad('invalid');
+  const keys = Object.keys(o);
+  if (keys.length !== SUB_OPEN_KEYS.length || keys.some((k) => !SUB_OPEN_KEYS.includes(k))) return bad('invalid');
+  if (!validWsId(o.parent) || typeof o.token !== 'string' || !SUB_TOKEN_RE.test(o.token)) return bad('invalid');
+  if (typeof o.title !== 'string' || typeof o.brief !== 'string' || typeof o.notify !== 'boolean') return bad('invalid');
+  if (!(o.squad === null || (typeof o.squad === 'string' && SQUAD_SLUG_RE.test(o.squad)))) return bad('invalid');
+  if (o.title.length > SUB_TITLE_MAX * 4) return bad('title');
+  const title = cleanQuestText(o.title);
+  if (cpLen(title) > SUB_TITLE_MAX) return bad('title');
+  if (o.brief.length > SUB_BRIEF_MAX * 4) return bad('brief');
+  const brief = cleanPromptText(o.brief);
+  if (cpLen(brief) > SUB_BRIEF_MAX) return bad('brief');
+  if (brief && (Buffer.byteLength(childPromptText('ko', brief, 'user'), 'utf8') > PROMPT_FILE_MAX || Buffer.byteLength(childPromptText('en', brief, 'user'), 'utf8') > PROMPT_FILE_MAX)) return bad('brief'); // 전달 파일(머리말 포함)이 16KB 를 넘으면 조용히 줄이지 않고 거부
+  return { ok: true, parent: o.parent, token: o.token, title, brief, squad: o.squad, notify: o.notify };
+}
+// 초안 보관소(Map: token -> { parentId, real, display, expiresAt }). 부모마다 하나만 두고(새로 고르면 이전 것은 버린다), 만료된 것은 치운다
+function subDraftAdd(store, { token, parentId, real, display, nowMs }) {
+  if (!(store instanceof Map) || typeof token !== 'string' || !SUB_TOKEN_RE.test(token) || !validWsId(parentId) || !validAbsDir(real) || typeof display !== 'string' || !Number.isFinite(nowMs)) return false;
+  for (const [k, d] of store) if (nowMs > d.expiresAt || d.parentId === parentId) store.delete(k);
+  while (store.size >= SUB_DRAFT_MAX) store.delete(store.keys().next().value);
+  store.set(token, { parentId, real, display, expiresAt: nowMs + SUB_DRAFT_MS });
+  return true;
+}
+// -> { ok: true, draft } | { ok: false, reason: 'invalid'|'expired' }. 토큰이 없거나(이미 썼거나) 다른 부모의 것이면 invalid
+function subDraftCheck(store, token, parentId, nowMs) {
+  if (!(store instanceof Map) || typeof token !== 'string' || !SUB_TOKEN_RE.test(token)) return { ok: false, reason: 'invalid' };
+  const d = store.get(token);
+  if (!d || d.parentId !== parentId) return { ok: false, reason: 'invalid' };
+  if (!Number.isFinite(nowMs) || nowMs > d.expiresAt) { store.delete(token); return { ok: false, reason: 'expired' }; }
+  return { ok: true, draft: d };
+}
+function subDraftUse(store, token) { return store instanceof Map && store.delete(token); } // 열었으면 한 번 쓴 것으로 지운다(다시 쓰면 invalid)
+// 마루가 요청한 경로(decideChildRequest)와 같은 한도, 같은 순서: 하위 세션 수 -> 작업 공간 수 -> 분당 -> 하루. 막히면 이유 코드(child.reject.*), 아니면 null
+function subLimitCheck({ childCount, wsCount, accepted, monoMs, launches, nowMs }) {
+  if (!Number.isInteger(childCount) || childCount >= CHILD_MAX) return 'children-max';
+  if (!Number.isInteger(wsCount) || wsCount >= WS_MAX) return 'ws-max';
+  const recent = (Array.isArray(accepted) ? accepted : []).filter((t) => Number.isFinite(t) && monoMs - t >= 0 && monoMs - t < CHILD_RATE_MS);
+  if (recent.length >= CHILD_RATE_MAX) return 'rate';
+  if (!budgetOk(launches, nowMs)) return 'budget';
+  return null;
+}
+// "마루에게 알리기" 한 줄: 고정 문장(i18n sub.noticeLine)에 정리한 제목·폴더(표시용, 홈은 ~)만 끼운다. 개행·제어 문자 없음, 비면 ''
+function cleanNoticePart(s, max) {
+  const t = typeof s === 'string' ? s.replace(BAD_CHARS_G, ' ').replace(/\s+/g, ' ').trim() : '';
+  return [...t].slice(0, max).join('').trim();
+}
+function subNoticeLine(tr, title, folder) {
+  const t = cleanNoticePart(title, SUB_TITLE_MAX); const f = cleanNoticePart(folder, 80);
+  if (!t || !f || typeof tr !== 'function') return '';
+  return cleanQuestText(String(tr('sub.noticeLine', { title: t, folder: f })));
+}
+
 // ---- 프롬프트 전달: 셸에 글을 쓰지 않고 파일로 건넨다(래퍼가 읽고 지운다) ----
 const CHILD_HEADER = {
   ko: '[마루가 맡긴 일] 이 세션은 총괄 에이전트 마루가 이 프로젝트의 일을 맡기려고 열었습니다. 아래가 맡긴 내용입니다. 설계 문서가 있으면 먼저 읽고, 끝나면 무엇을 했고 무엇이 남았는지 짧게 보고하세요.',
   en: '[Task from Maru] This session was opened by Maru, the coordinating agent, to hand off work on this project. Below is what was handed over. If there is a design document, read it first, and when you finish, briefly report what you did and what remains.',
 };
+const CHILD_HEADER_USER = { // 사용자가 직접 연 하위 세션의 머리말(마루가 연 것이 아니므로 그렇게 말하지 않는다)
+  ko: '[사용자가 맡긴 일] 이 세션은 사용자가 마루에서 직접 연 하위 세션입니다. 아래가 맡긴 내용입니다. 설계 문서가 있으면 먼저 읽고, 끝나면 무엇을 했고 무엇이 남았는지 짧게 보고하세요.',
+  en: '[Task from the user] This session was opened by the user directly from Maru as a child session. Below is what was handed over. If there is a design document, read it first, and when you finish, briefly report what you did and what remains.',
+};
 const PROMPT_FILE_MAX = 16384; const PROMPT_STALE_MS = 5 * 60 * 1000;
 const PROMPT_FILE_RE = /^[0-9a-f]{16}\.txt$/;
-function childPromptText(lang, prompt) { // 고정 머리말(코드가 만든다) + 빈 줄 + 정리된 프롬프트
+function childPromptText(lang, prompt, by) { // 고정 머리말(코드가 만든다) + 빈 줄 + 정리된 프롬프트. by === 'user' 면 사용자가 직접 연 세션용 머리말
   const p = cleanPromptText(prompt);
-  return p ? (CHILD_HEADER[lang] || CHILD_HEADER.ko) + '\n\n' + p : '';
+  const H = by === 'user' ? CHILD_HEADER_USER : CHILD_HEADER;
+  return p ? (H[lang] || H.ko) + '\n\n' + p : '';
 }
 // 전달 파일은 정확히 한 번만 쓴다. 시작하려는 순간의 상황으로 무엇을 할지 정한다(순수): file = 아직 안 쓴 전달 파일 경로|null, wrapperOk = 래퍼를 지금 쓸 수 있나
 // -> { env: 파일 경로|null(환경변수로 건넬 것), deleteFile: 지울 파일|null, paste: 입력줄에 채우기로 내려가나 }
@@ -3479,6 +3574,20 @@ function promptHandoff({ file, wrapperOk }) {
   if (typeof file !== 'string' || !file) return { env: null, deleteFile: null, paste: false };
   if (wrapperOk !== true) return { env: null, deleteFile: file, paste: true }; // 승인 뒤 래퍼를 못 쓰게 됐다: 파일은 지우고 같은 내용을 입력줄에(Enter 는 사용자가)
   return { env: file, deleteFile: null, paste: false };
+}
+// 하위 세션을 만든 직후 맡길 내용을 어떻게 할지(순수). hasFile = 전달 파일을 썼나, text = 맡길 내용(머리말 포함, 비면 '')
+// -> { pasteNow: 지금 입력줄에 채우나(파일 없이 내용만 있을 때), keepBrief: 시작 순간 래퍼를 못 쓰게 될 때를 위해 내용을 들고 있나(파일이 있을 때) }
+function childBriefPlan({ hasFile, text }) {
+  const has = typeof text === 'string' && text !== '';
+  return { pasteNow: !hasFile && has, keepBrief: !!hasFile && has };
+}
+// 시작 순간에 입력줄에 채울 내용(순수). 파일을 래퍼로 건네지 못하게 됐고(ho.paste) 들고 있던 내용이 있을 때만 그 내용, 아니면 null
+function briefAtSpawn(ho, brief) {
+  return ho && ho.paste === true && typeof brief === 'string' && brief !== '' ? brief : null;
+}
+// 마루 자신의 폴더인가(순수): 둘 다 이미 실제 경로로 바꾼 절대 경로여야 같다고 본다
+function isMaruRootDir(real, rootReal) {
+  return typeof real === 'string' && real !== '' && typeof rootReal === 'string' && rootReal !== '' && real === rootReal;
 }
 function promptDirOk(dir, fsx, uid, create) {
   try {
@@ -3653,7 +3762,7 @@ function childLogLine(kind, reason, name) { return String(kind).replace(/[^a-z-]
 
 const api = {
   CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, consentChoice, squadChoices, cleanSquadAsk, SQUAD_ASK_MAX, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
-  macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, promptHandoff, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
+  macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, CHILD_HEADER_USER, parseSubOpen, subDraftAdd, subDraftCheck, subDraftUse, subLimitCheck, subNoticeLine, cleanNoticePart, SUB_TITLE_MAX, SUB_BRIEF_MAX, SUB_DRAFT_MS, SUB_DRAFT_MAX, promptHandoff, childBriefPlan, briefAtSpawn, isMaruRootDir, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
   hierarchyOrder, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
   MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, parseOnboarded, firstMeetingGate, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
   defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
@@ -3666,7 +3775,7 @@ const api = {
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
-  SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth, calDayScript, calDayDateSetup, parseCalendarDay, calNotes, calDayJobStale, calDayVictim, calDayAfterFail, CAL_DAY_FRESH_MS,
+  SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth, calDayScript, calDayDateSetup, parseCalendarDay, calNotes, CAL_HELPER_FIRST_MS, CAL_HELPER_MS, CAL_OSA_MS, calHelperArgs, calHelperExit, calStatusWord, calChooseReader, calDayJobStale, calDayVictim, calDayAfterFail, CAL_DAY_FRESH_MS,
   DIARY_FILE_MAX_BYTES, DIARY_FILES_MAX, DIARY_TITLE_MAX, DIARY_BODY_MAX, parseDiaryText, readDiaries, parseYm, shiftYm, shiftDay, monthLayout, buildMonthSummary, buildDayGroups,
   SQUADS_MAX, SQUAD_MEMBERS_MAX, SQUAD_NAME_MAX, SQUAD_DESC_MAX, SQUAD_META_MAX_BYTES, parseSquadMeta, squadView, teamChip, matchSubs, squadOpen, claudeLaunchCommand,
   TODO_DONE_MAX, TODO_DONE_MAX_BYTES, fitTodoDone, todoMarkKey, TODO_DONE_KEEP_SEC, TODO_DONE_HIDE_SEC, titleKey, todoTitleRecordable, validTodoDoneEntry, makeTodoDone, todoMarkable, formatTodoDone, parseTodoDone, pruneTodoDone, addTodoDone, removeTodoDone, filterTodos, readTodoDoneFile, saveTodoDone, projectOpenTodos,

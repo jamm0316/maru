@@ -73,6 +73,10 @@ contextBridge.exposeInMainWorld('maru', {
   setWsCollapsed: (id, on) => ipcRenderer.invoke('ws:set-collapsed', String(id), on === true),
   // 동의 창 답: 한 번만 쓰는 토큰과 'open'|'cancel' 만. main 이 토큰·보낸 창을 다시 검증한다
   answerChildConsent: (token, answer, squad) => ipcRenderer.invoke('child:answer', String(token).slice(0, 64), answer === 'open' ? 'open' : 'cancel', typeof squad === 'string' ? squad.slice(0, 40) : null), // squad: 고른 팀 slug 또는 null(팀 없이). main 이 설치된 목록과 다시 대조한다
+  subPrepare: (parentId) => ipcRenderer.invoke('sub:prepare', String(parentId).slice(0, 64)), // 열기 창에 쓸 팀 목록(main 이 읽는다)
+  subPickFolder: (parentId) => ipcRenderer.invoke('sub:pick-folder', String(parentId).slice(0, 64)), // main 이 폴더 선택창을 연다. 돌려받는 것은 표시용 문자열과 토큰뿐(경로는 렌더러에 오지도, 가지도 않는다)
+  subOpen: (o) => ipcRenderer.invoke('sub:open', { parent: String(o && o.parent).slice(0, 64), token: String(o && o.token).slice(0, 64), title: String(o && o.title).slice(0, 400), brief: String(o && o.brief).slice(0, 20000), squad: o && typeof o.squad === 'string' ? o.squad.slice(0, 40) : null, notify: !!(o && o.notify) }), // 토큰·제목·내용·팀·알림 여부만. 최종 검증은 main
+  onOpenSub: (cb) => { ipcRenderer.on('ui:open-sub', (_e, id) => cb(String(id))); },
   requestSquadCreate: (text) => ipcRenderer.invoke('squads:request-create', typeof text === 'string' ? text.slice(0, 2000) : ''), // 글만 보낸다(작업 공간·경로는 main 이 정한다)
   resumePrevious: (id) => ipcRenderer.invoke('ws:resume-prev', String(id)),
   setResume: (on) => ipcRenderer.invoke('resume:set', on === true),

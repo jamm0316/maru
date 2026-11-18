@@ -62,11 +62,12 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
+const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을 연 채로 둔다)
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
-const PERSIST = !SMOKE && !TEST_FX && TEST_UI !== 'hierarchy' && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
+const PERSIST = !SMOKE && !TEST_FX && !FAKE_HIER && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
 const AGENT_FILE_MAX = 8192;
 function readAgentParty() {
@@ -180,7 +181,7 @@ function readAgentState(w) {
 }
 // busy | idle | waiting | none | pending(시작 전) | exited | unavailable(폴더 없음)
 function wsState(w) {
-  if (TEST_UI === 'hierarchy' && w.fakeState) return w.fakeState; // 시험 전용: 가짜 상태
+  if (FAKE_HIER && w.fakeState) return w.fakeState; // 시험 전용: 가짜 상태
   if (w.unavailable) return 'unavailable';
   if (TEST_UI === 'party' && w.term) return 'busy'; // 시험 전용: 화면 확인용
   if (w.term) {
@@ -507,7 +508,7 @@ function spawnPty(w, cols, rows) {
     self = pty.spawn(shellBin, ['-l'], { name: 'xterm-256color', cols, rows, cwd: w.cwd, env });
   } catch { dropPromptFile(w); w.exited = true; wsChanged(false); return false; }
   w.spawnPromptFile = ho.env; w.childPromptFile = null; w.reqKey = reqKey; // 래퍼가 읽고 지운다. 아직 남아 있으면 끝날 때 앱이 지운다
-  if (ho.paste && w.childBrief) { const b = w.childBrief; w.childBrief = null; setChildNote(wsOf(w.parentId), { kind: 'paste', title: w.title }); prefillChild(w, b); } else w.childBrief = null;
+  { const b = L.briefAtSpawn(ho, w.childBrief); w.childBrief = null; if (b) { setChildNote(wsOf(w.parentId), { kind: 'paste', title: w.title }); prefillChild(w, b); } }
   removeStateFile(w);
   w.sessionId = sid; w.term = self; w.exited = false; w.bracketed = false; w.seqTail = ''; w.lastOutputAt = 0; w.escAt = 0; w.subsCutoff = 0;
   const resume = L.validSessionUuid(w.pendingResume) ? w.pendingResume : null; // 할 일 클릭이 정한 이어 열기 대상(검증된 uuid 만). 한 번만 쓴다(다시 시작은 새 세션)
@@ -635,7 +636,7 @@ function saveWsNow(opts) {
   const order = wsOrder();
   const on = resumeActive();
   if (on) syncHookSids();
-  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, claudeSid: w.claudeSid, claudeSidAt: w.claudeSidAt, prevSid: w.prevSid, transient: !!w.fromTodo, parentId: w.parentId, project: w.project, origin: w.origin, squad: w.squad })), activeId, on);
+  const keep = L.workspacesToSave(order.map((w) => ({ id: w.id, cwd: w.cwd, title: w.title, claudeSid: w.claudeSid, claudeSidAt: w.claudeSidAt, prevSid: w.prevSid, transient: !!w.fromTodo, parentId: w.parentId, project: w.project, origin: w.origin, squad: w.squad, by: w.by })), activeId, on);
   if (!keep) return;
   const clean = !!(opts && opts.clean);
   const body = L.workspacesJson(keep.list, keep.active, { cleanExit: clean });
@@ -657,7 +658,7 @@ function addWorkspace(cwd, title, fx, unavailable, extra) {
   const x = extra || {};
   const id = L.validWsId(x.id) && !wss.has(x.id) ? x.id : crypto.randomBytes(8).toString('hex');
   const w = { id, cwd, title: L.uniqueTitle(L.managedWsTitle(title || L.workspaceTitle(cwd, tr('ws.untitled')), cwd, MANAGED && ROOT ? [ROOT, realOrNull(ROOT)] : [], tr('app.title')), [...wss.values()].map((o) => o.title)), term: null, sessionId: null, bracketed: false, seqTail: '', lastOutputAt: 0, exited: false, unavailable: !!unavailable, fx: fx || null,
-    parentId: L.validWsId(x.parentId) ? x.parentId : null, project: L.isProjectKey(x.project) ? x.project : null, origin: x.origin === 'child' || L.validWsId(x.parentId) ? 'child' : null, squad: (x.origin === 'child' || L.validWsId(x.parentId)) && typeof x.squad === 'string' && /^[a-z0-9][a-z0-9-]{0,19}$/.test(x.squad) ? x.squad : null, cwdReal: realOrNull(cwd), inRoot: false, isRoot: false, reqKey: null };
+    parentId: L.validWsId(x.parentId) ? x.parentId : null, project: L.isProjectKey(x.project) ? x.project : null, origin: x.origin === 'child' || L.validWsId(x.parentId) ? 'child' : null, squad: (x.origin === 'child' || L.validWsId(x.parentId)) && typeof x.squad === 'string' && /^[a-z0-9][a-z0-9-]{0,19}$/.test(x.squad) ? x.squad : null, by: (x.origin === 'child' || L.validWsId(x.parentId)) && x.by === 'user' ? 'user' : null, cwdReal: realOrNull(cwd), inRoot: false, isRoot: false, reqKey: null };
   w.inRoot = insideRoot(w.cwdReal); const rr = realOrNull(ROOT); w.isRoot = !!rr && w.cwdReal === rr; // isRoot: 저장소 루트 폴더(마루 세션 후보)
   wss.set(id, w);
   return w;
@@ -679,7 +680,7 @@ function dropPromptFile(w) { // 래퍼가 읽지 못한 전달 파일을 지운�
 // 시험 전용(MARU_APP_UI=hierarchy): 마루 + 하위 세션 3개 + 일반 작업 공간 하나를 가짜 상태로 그린다(아무것도 저장·실행하지 않는다)
 function initFakeHierarchy() {
   const base = ROOT || os.homedir(); const now = Date.now();
-  const maru = addWorkspace(base, tr('app.title')); maru.fakeState = 'idle'; maru.fakeView = { reports: 2, flash: false, cnote: { kind: 'opened', title: 'blog-draft' } };
+  const maru = addWorkspace(base, tr('app.title')); maru.fakeState = 'idle'; maru.fakeView = { sub: true, reports: 2, flash: false, cnote: { kind: 'opened', title: 'blog-draft' } };
   const mk = (title, cwd, project, fakeState, view) => { const w = addWorkspace(cwd, title, null, false, { parentId: maru.id, project }); w.fakeState = fakeState; w.fakeView = view; return w; };
   mk('blog-draft', path.join(os.homedir(), 'work', 'blog'), 'blog/draft', 'pending', { state: 'idle', ux: 'turnEnded', reportAt: now - 3 * 60000, loc: null, subs: [], cc: true });
   mk('api-server', path.join(os.homedir(), 'work', 'api-server'), 'dev/api', 'pending', { state: 'none', ux: 'unknown', loc: 'handlers', subs: [], cc: true, team: { slug: 'dev', name: fakeSquads()[0].name } });
@@ -689,7 +690,7 @@ function initFakeHierarchy() {
 }
 function initWorkspaces() {
   const base = ROOT || os.homedir();
-  if (TEST_UI === 'hierarchy') { initFakeHierarchy(); return; }
+  if (FAKE_HIER) { initFakeHierarchy(); return; }
   if (TEST_FX) {
     for (const d of FX_DEFS) { const c = path.join(base, 'projects', d.name); addWorkspace(dirOk(c) ? c : base, d.name, d); }
     activeId = wsOrder()[1].id;
@@ -702,7 +703,7 @@ function initWorkspaces() {
     else if (r.status === 'ok' && r.data.list.length) {
       const dec = restoreDecisions(r.data);
       const made = r.data.list.map((e, i) => { // 폴더가 없어도 버리지 않는다. 하위 세션 관계·프로젝트 이름표도 되살린다(프롬프트 파일은 다시 만들지 않는다)
-        const w = addWorkspace(e.cwd, e.title, null, e.unavailable, { id: e.id, parentId: e.parentId, project: e.project, origin: e.origin, squad: e.squad });
+        const w = addWorkspace(e.cwd, e.title, null, e.unavailable, { id: e.id, parentId: e.parentId, project: e.project, origin: e.origin, squad: e.squad, by: e.by });
         const d = dec[i];
         if (d && d.action === 'resume') { w.pendingResume = d.sid; w.claudeSid = d.sid; w.claudeSidAt = e.claudeSidAt; w.startNote = 'resumed'; } // 알림·입력 없이 실행만: spawnPty 가 --resume 을 붙인다
         else if (d && d.prev) { w.prevSid = d.prev; if (d.note) w.startNote = d.note; } // 새로 시작하지만 "원래 세션 열기" 로 되돌릴 수 있게 포인터를 남긴다
@@ -744,11 +745,12 @@ const wsView = () => {
     const reportAt = reportedAtOf(w);
     const ux = derivedState(w, state);
     const v = { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, ux, bp: w.bracketed, bg: L.bgCount(rec, state, now, SUBS_TTL_MS), note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }),
+      sub: !w.fx && L.maruEligible(w), // 사용자가 이 작업 공간 아래에 하위 세션을 직접 열 수 있다(마루가 요청한 하위 세션의 부모와 같은 자격)
       parentId: o.depth === 1 ? w.parentId : null, depth: o.depth, project: w.project || null, team: L.teamChip(w.squad, FAKE_SQ_UI ? fakeSquads() : squads), loc: L.currentLocation({ recCwd: rec && rec.cwd, cwd: w.cwd, cwdReal: w.cwdReal }),
       reports: own ? own.count : 0, reportAt, flash: !!w.flashUntil && w.flashUntil > now, auto: !!w.autoStart && !w.term && !w.exited && !w.unavailable,
       cnote: w.childNote && now - w.childNote.at < CNOTE_MS ? { kind: w.childNote.kind, reason: w.childNote.reason || null, title: w.childNote.title || null } : null,
       subs: w.parentId ? L.childSubNames(readSubs(w)) : [] };
-    return TEST_UI === 'hierarchy' && w.fakeView ? { ...v, ...w.fakeView, state: w.fakeView.state || state } : v;
+    return FAKE_HIER && w.fakeView ? { ...v, ...w.fakeView, state: w.fakeView.state || state } : v;
   });
 };
 const attention = () => wsOrder().filter((w) => { const s = derivedState(w, wsState(w)); return s === 'busy' || s === 'waiting' || s === 'unknown'; }); // 상태를 알 수 없는 실행 중 세션도 종료 확인에 센다
@@ -910,21 +912,23 @@ function gotoNumber(n) {
   if (t.kind === 'workspace') { if (!wsOf(t.id)) return; activate(t.id); sendToRenderer('ui:goto', 'workspace', t.id); } // 렌더러는 열려 있던 프로젝트 상세를 닫는다
   else if (findProject(t.id)) sendToRenderer('ui:goto', 'project', t.id); // 모달이 열려 있으면 렌더러가 무시한다
 }
+const subMenuTarget = () => subParent(activeId) || wsOrder().find((w) => subParent(w.id)) || null;
 let menuSig = null; let menuBuilt = false;
 function syncMenu() { // 번호 -> 대상 매핑이나 제목이 바뀌었을 때만 메뉴를 다시 만든다
   if (!menuBuilt) return;
-  const sig = JSON.stringify([curLang(), gotoTargets().map((t, i) => gotoLabel(i + 1, t))]);
+  const sig = JSON.stringify([curLang(), gotoTargets().map((t, i) => gotoLabel(i + 1, t)), !!subMenuTarget()]);
   if (sig !== menuSig) buildMenu();
 }
 function buildMenu() {
   const targets = gotoTargets();
-  menuSig = JSON.stringify([curLang(), targets.map((t, i) => gotoLabel(i + 1, t))]); menuBuilt = true;
+  menuSig = JSON.stringify([curLang(), targets.map((t, i) => gotoLabel(i + 1, t)), !!subMenuTarget()]); menuBuilt = true;
   const goto = Array.from({ length: L.GOTO_MAX }, (_, i) => ({ label: gotoLabel(i + 1, targets[i]), accelerator: 'CmdOrCtrl+' + (i + 1), click: () => gotoNumber(i + 1) })); // 대상이 없는 번호도 키는 삼킨다(터미널로 새지 않게)
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },
     { label: tr('menu.workspace'), submenu: [
       { label: tr('menu.newWs'), accelerator: 'CmdOrCtrl+T', click: () => { newWorkspaceFlow(); } },
+      { label: tr('menu.newSub'), enabled: !!subMenuTarget(), click: () => { const t = subMenuTarget(); if (t) { showWindow(); sendToRenderer('ui:open-sub', t.id); } } }, // 활성 작업 공간이 마루면 그 아래, 아니면 첫 마루 작업 공간 아래
       { label: tr('menu.closeWs'), accelerator: 'CmdOrCtrl+W', click: () => {
         if (!win || win.isDestroyed() || !win.isVisible()) return;
         if (wss.size === 0) win.hide(); else sendToRenderer('ui:close-request'); // 열린 창·메뉴가 있으면 렌더러가 그것부터 닫는다
@@ -1083,11 +1087,18 @@ function checkResume() {
   const on = L.resumeSessionsOn(profile);
   return row('resume', on ? 'ok' : 'optional', on ? 'resume.on' : 'resume.off', null, null, { toggle: { on, available: !!profile, kind: 'resume' } });
 }
-function checkCalendar() {
+async function checkCalendar() {
   const on = !!(profile && profile.calendar);
   const toggle = { on, available: !!profile };
   if (!on) return row('cal', 'optional', 'cal.off', null, null, { toggle });
   if (cal.pending) return row('cal', 'unknown', 'cal.pending', null, null, { toggle });
+  const helper = calHelperChoice(); // 도우미가 있으면 권한 상태를 직접 묻는다(권한 창은 띄우지 않는다)
+  if (helper) {
+    const r = await exec(helper, ['status'], { timeout: 5000, maxBuffer: 1 << 10, cwd: os.homedir() });
+    const w = r.code === 0 ? L.calStatusWord(r.stdout) : 'unknown';
+    if (w === 'denied') { calDropAll(); return row('cal', 'need', 'cal.fail', null, 'openCalendars', { toggle }); } // 거부되면 캐시한 일정도 버린다
+    if (w === 'ask') return calLastFail ? row('cal', 'need', 'cal.fail', null, 'openCalendars', { toggle }) : row('cal', 'unknown', 'cal.ask', null, null, { toggle }); // 요청이 무시·시간 초과로 끝났으면 실패로 보인다
+  }
   if (cal.ok) return row('cal', 'ok', 'cal.ok', { n: cal.events.length }, null, { toggle });
   return row('cal', 'need', 'cal.fail', null, 'openCalendars', { toggle });
 }
@@ -1179,7 +1190,52 @@ async function runInstall() {
 }
 
 // ---- 캘린더(opt-in, 메모리에만) ----
-// 달 단위 읽기(달력 카드·하루 보기): 'YYYY-MM' -> { state: 'pending'|'ok'|'fail', events, at, busy, used }. 최대 3달, 달마다 15분에 한 번만 다시 읽고, osascript 는 한 번에 하나(20초 제한).
+// 읽기 방식은 이 한 곳에서 고른다: 패키징된 앱(또는 소스 실행 + 개발용 옵트인 환경변수 MARU_APP_CAL_HELPER=1)이고 EventKit 도우미(maru-cal)가 심볼릭 링크 아닌 일반 파일·실행 가능·소유자가 현재 사용자나 root(group/other 쓰기 없음)이며 패키징 시 앱 Resources 안이면 그것을, 아니면 osascript(느리다)를 쓴다.
+// 소스 실행에서는 macOS 가 권한 요청을 터미널/Electron 에 붙여 사용 목적 문구가 없으므로 옵트인 없이는 도우미를 쓰지 않는다. 원문 텍스트를 만드는 부분만 다르고 큐·캐시·파서는 같다.
+// 도우미는 execFile 로 셸 없이 부르고 인자는 검증된 정수에서만 만든다. 일정 내용은 디스크·로그에 쓰지 않는다(종료 코드만 본다).
+let calHelperOk = false; // 도우미가 한 번이라도 정상으로 읽었으면(권한 확인됨) 짧은 제한 시간을 쓴다
+let calLastFail = false; // 마지막 도우미 읽기가 권한 문제가 아닌 실패(시간 초과·신호로 종료 등)였는지 — 설정 줄이 "처음 물어봅니다"를 계속 말하지 않게
+const calAborts = new Set(); // 진행 중인 도우미 호출의 AbortController(끄면 모두 죽인다)
+let calFirstGate = Promise.resolve(); // 권한을 아직 모를 때는 도우미 호출을 한 번에 하나씩(시스템 권한 창이 겹치지 않게)
+function calHelperChoice() {
+  if (!app.isPackaged && process.env.MARU_APP_CAL_HELPER !== '1') return null;
+  const helper = app.isPackaged ? path.join(process.resourcesPath, 'native', 'maru-cal') : path.join(__dirname, 'native', 'bin', 'maru-cal');
+  let isFile = false, executable = false, owned = false, realHelper = null, realResources = null;
+  try {
+    const st = fs.lstatSync(helper); // 심볼릭 링크는 따라가지 않는다
+    isFile = st.isFile();
+    owned = (st.uid === process.getuid() || st.uid === 0) && (st.mode & 0o022) === 0;
+    fs.accessSync(helper, fs.constants.X_OK); executable = true;
+    realHelper = fs.realpathSync(helper); if (app.isPackaged) realResources = fs.realpathSync(process.resourcesPath);
+  } catch { /* 없음 */ }
+  return L.calChooseReader({ helper, isFile, executable, owned, packaged: app.isPackaged, devOptIn: process.env.MARU_APP_CAL_HELPER === '1', realHelper, realResources }) === 'helper' ? helper : null;
+}
+// kind: 'today' | 'month' | 'day' -> { err, stdout, perm }
+async function calRead(kind, y, m, d) {
+  const helper = calHelperChoice();
+  const hargs = helper ? L.calHelperArgs(kind, y, m, d) : null;
+  if (helper && hargs) {
+    const run = async () => {
+      if (!calOn()) return { err: new Error('cal'), stdout: '', perm: false }; // 첫 읽기 대기열에서 기다리는 동안 꺼졌으면 띄우지 않는다
+      const ac = new AbortController(); calAborts.add(ac);
+      let r;
+      try { r = await exec(helper, hargs, { timeout: calHelperOk ? L.CAL_HELPER_MS : L.CAL_HELPER_FIRST_MS, maxBuffer: 1 << 20, cwd: os.homedir(), signal: ac.signal }); } finally { calAborts.delete(ac); }
+      if (ac.signal.aborted) return { err: new Error('cal'), stdout: '', perm: false }; // 꺼져서 죽인 호출: 결과를 버린다
+      const st = L.calHelperExit(r.code);
+      if (st === 'ok') { calHelperOk = true; calLastFail = false; } else if (st === 'perm') { calHelperOk = false; calLastFail = false; } else calLastFail = true;
+      return { err: st === 'ok' ? null : (r.err || new Error('cal')), stdout: st === 'ok' ? r.stdout : '', perm: st === 'perm' };
+    };
+    if (calHelperOk) return run();
+    const p = calFirstGate.then(run, run); calFirstGate = p.catch(() => {});
+    return p;
+  }
+  const script = kind === 'today' ? L.CAL_SCRIPT : kind === 'month' ? L.calMonthScript(y, m) : kind === 'day' ? L.calDayScript(y, m, d) : null;
+  if (!script) return { err: new Error('cal'), stdout: '', perm: false };
+  const args = []; for (const line of script) args.push('-e', line);
+  const r = await exec('/usr/bin/osascript', args, { timeout: L.CAL_OSA_MS, maxBuffer: 1 << 20, cwd: os.homedir() });
+  return { err: r.err, stdout: r.stdout, perm: false };
+}
+// 달 단위 읽기(달력 카드·하루 보기): 'YYYY-MM' -> { state: 'pending'|'ok'|'fail', events, at, busy, used }. 최대 3달, 달마다 15분에 한 번만 다시 읽고, 읽기는 한 번에 하나(도우미 10초·osascript 90초 제한).
 const calMonths = new Map(); let calMonthQueue = Promise.resolve();
 const CAL_MONTH_TTL_MS = 15 * 60 * 1000; const CAL_MONTH_MAX = 3;
 const calOn = () => FAKE_DAY || (!SMOKE && !FAKE_PROJ && !!(profile && profile.calendar)); // 스모크·설정 꺼짐이면 읽지 않는다
@@ -1193,13 +1249,13 @@ function ensureCalMonth(ym) {
     c = { state: 'pending', events: {}, at: 0, busy: false, used: Date.now() }; calMonths.set(ym, c);
   }
   c.busy = true;
-  const script = L.calMonthScript(p.year, p.month);
   calMonthQueue = calMonthQueue.then(async () => {
     if (!calOn() || calMonths.get(ym) !== c) return;
-    const args = []; for (const line of script) args.push('-e', line);
-    const r = await exec('/usr/bin/osascript', args, { timeout: 20000, maxBuffer: 1 << 20, cwd: os.homedir() });
+    const r = await calRead('month', p.year, p.month);
     if (!calOn() || calMonths.get(ym) !== c) return; // 읽는 동안 꺼졌거나 밀려났으면 버린다
     c.busy = false; c.at = Date.now();
+    c.perm = !!r.perm;
+    if (r.perm) c.events = {}; // 권한이 없으면 옛 일정을 계속 보여 주지 않는다
     if (r.err) c.state = 'fail'; else { c.state = 'ok'; c.events = L.parseCalendarMonth(r.stdout, p.year, p.month); }
   }).catch(() => { c.busy = false; c.at = Date.now(); if (c.state === 'pending') c.state = 'fail'; });
 }
@@ -1209,16 +1265,16 @@ function calMonthGet(ym) {
   ensureCalMonth(ym);
   const c = calMonths.get(ym);
   if (c) c.used = Date.now();
-  return c ? { state: c.state, events: c.events } : { state: 'pending', events: {} };
+  return c ? { state: c.state, events: c.events, perm: !!c.perm && c.state === 'fail' } : { state: 'pending', events: {} };
 }
-// 하루 상세 읽기(하루 보기가 열려 있을 때만): 'YYYY-MM-DD' -> { state, events, at, busy, started, used, fails, okAt }. 최대 5일, 하루마다 5분에 한 번만 다시 읽고, 달 읽기와 같은 큐를 쓴다(osascript 는 한 번에 하나, 20초 제한). 메모리에만 둔다.
+// 하루 상세 읽기(하루 보기가 열려 있을 때만): 'YYYY-MM-DD' -> { state, events, at, busy, started, used, fails, okAt }. 최대 5일, 하루마다 5분에 한 번만 다시 읽고, 달 읽기와 같은 큐를 쓴다(읽기는 한 번에 하나). 메모리에만 둔다.
 // used = 그 날을 마지막으로 요청한 때(days:detail 마다 갱신). 큐에서 차례가 왔을 때 used 가 오래됐으면(이미 떠난 날) 읽지 않고 건너뛴다. 다시 읽기가 실패하면 이전 상세를 연속 2번·15분까지만 남기고 그 뒤에는 'fail' 이다.
 const calDays = new Map();
 const CAL_DAY_TTL_MS = 5 * 60 * 1000; const CAL_DAY_MAX = 5;
 function ensureCalDay(day) {
   if (!L.validDay(day) || FAKE_DAY || !calOn()) return;
   const y = +day.slice(0, 4), m = +day.slice(5, 7), d = +day.slice(8, 10);
-  const script = L.calDayScript(y, m, d); if (!script) return;
+  if (!L.calDayScript(y, m, d)) return; // 날짜 검증
   let c = calDays.get(day);
   if (c) c.used = Date.now();
   if (c && (c.busy || Date.now() - c.at < CAL_DAY_TTL_MS)) return;
@@ -1232,9 +1288,10 @@ function ensureCalDay(day) {
     if (!calOn() || calDays.get(day) !== c) return;
     if (L.calDayJobStale(c.used, Date.now())) { c.busy = false; if (c.state === 'pending') calDays.delete(day); return; } // 이미 떠난 날: 읽지 않고(달 큐를 늦추지 않는다) 건너뛴다
     c.started = true;
-    const args = []; for (const line of script) args.push('-e', line);
-    const r = await exec('/usr/bin/osascript', args, { timeout: 20000, maxBuffer: 1 << 20, cwd: os.homedir() });
+    const r = await calRead('day', y, m, d);
     if (!calOn() || calDays.get(day) !== c) return; // 읽는 동안 꺼졌거나 밀려났으면 버린다
+    c.perm = !!r.perm;
+    if (r.perm) { c.busy = false; c.at = Date.now(); c.fails++; c.state = 'fail'; c.events = []; return; } // 권한 없음: 옛 상세를 남기지 않는다
     const evs = r.err ? null : L.parseCalendarDay(r.stdout, y, m, d); // null = 읽기 실패(상한 초과·형식 오류), []는 일정 없음
     if (!evs) { fail(); return; }
     c.busy = false; c.at = Date.now(); c.state = 'ok'; c.events = evs; c.fails = 0; c.okAt = c.at;
@@ -1246,22 +1303,22 @@ function calDayGet(day) {
   ensureCalDay(day);
   const c = calDays.get(day);
   if (c) c.used = Date.now();
-  return c ? { state: c.state, events: c.events } : { state: 'pending', events: [] };
+  return c ? { state: c.state, events: c.events, perm: !!c.perm && c.state === 'fail' } : { state: 'pending', events: [] };
 }
 let cal = { pending: false, ok: false, events: [] };
 let calRun = null;
+function calDropAll() { cal = { pending: false, ok: false, events: [] }; calMonths.clear(); calDays.clear(); }
 function readCalendar() {
-  if (!profile || !profile.calendar) { cal = { pending: false, ok: false, events: [] }; calMonths.clear(); calDays.clear(); return Promise.resolve(); } // 꺼지면 달·하루 캐시도 모두 버린다
+  if (!profile || !profile.calendar) { calDropAll(); for (const ac of calAborts) ac.abort(); calRun = null; return Promise.resolve(); } // 꺼지면 달·하루 캐시도 모두 버리고 진행 중인 도우미 호출은 죽인다
   if (FAKE_PROJ) return Promise.resolve();
   if (calRun) return calRun;
   cal = { ...cal, pending: true };
-  const args = [];
-  for (const line of L.CAL_SCRIPT) args.push('-e', line);
-  calRun = exec('/usr/bin/osascript', args, { timeout: 15000, maxBuffer: 1 << 20, cwd: os.homedir() }).then((r) => {
+  const mine = calRun = calRead('today').then((r) => {
     if (!profile || !profile.calendar) cal = { pending: false, ok: false, events: [] }; // 읽는 동안 꺼졌으면 버림
+    else if (r.perm) calDropAll(); // 권한이 없으면 메모리의 옛 일정도 모두 버린다
     else cal = r.err ? { pending: false, ok: false, events: [] } : { pending: false, ok: true, events: L.parseCalendarOutput(r.stdout) };
-  }).finally(() => { calRun = null; });
-  return calRun;
+  }).finally(() => { if (calRun === mine) calRun = null; });
+  return mine;
 }
 
 // ---- 업그레이드(다른 모듈 updater.js 계약에 연결만) ----
@@ -1672,24 +1729,28 @@ async function handleChildRequest(item) {
   launchChild(par, d.req, d.real, item.name, ans.squad);
 }
 // 하위 세션을 만들고(마루 뒤에 들여써서) 시작한다. 래퍼를 쓸 수 있으면 프롬프트 파일(래퍼가 읽고 지운다), 아니면 입력줄에만 채우고 Enter 는 사용자가 누른다
-function launchChild(parent, req, real, name, squad) {
+// by: 'user' = 사용자가 직접 연 것(열기 창). 맡길 내용이 비면 전달 파일을 만들지 않고 보통의 빈 세션으로 시작한다(마루의 요청은 늘 비어 있지 않다)
+function launchChild(parent, req, real, name, squad, by) {
   let file = null;
-  if (claudeWrapper()) file = L.writeChildPromptFile({ dir: PROMPT_DIR(), text: L.childPromptText(curLang(), req.prompt), rand: () => crypto.randomBytes(8).toString('hex'), fsx: fs, uid: process.getuid() });
-  if (!file && claudeWrapper()) childLog('warn', 'prompt-file', name);
-  const w = addWorkspace(real, req.title, null, false, { parentId: parent.id, project: req.project, origin: 'child', squad: claudeWrapper() ? squad : null }); // 래퍼를 못 쓰는 경우(입력줄에만 채움)에는 팀을 적용할 수 없다
+  const text = L.childPromptText(curLang(), req.prompt, by);
+  if (text && claudeWrapper()) file = L.writeChildPromptFile({ dir: PROMPT_DIR(), text, rand: () => crypto.randomBytes(8).toString('hex'), fsx: fs, uid: process.getuid() });
+  if (!file && text && claudeWrapper()) childLog('warn', 'prompt-file', name);
+  const w = addWorkspace(real, req.title, null, false, { parentId: parent.id, project: req.project, origin: 'child', squad: claudeWrapper() ? squad : null, by }); // 래퍼를 못 쓰는 경우(입력줄에만 채움)에는 팀을 적용할 수 없다
   w.expectClaude = true; w.autoStart = true; w.childPromptFile = file; w.childBrief = req.prompt; // childBrief: 시작 순간 래퍼를 못 쓰게 되면 같은 내용을 입력줄에 채우려고 시작 전까지만 들고 있는다
   if (wsCollapsed().includes(parent.id)) setWsCollapsed(L.expandParent(wsCollapsed(), parent.id)); // 하위 세션은 숨긴 채 시작하지 않는다
   setBudget(L.recordLaunch(budget.list, Date.now()));
-  childLog('opened', file ? 'auto' : 'paste', name);
-  setChildNote(parent, { kind: file ? 'opened' : 'paste', title: w.title });
+  childLog('opened', file || !text ? 'auto' : 'paste', name);
+  setChildNote(parent, { kind: file || !text ? 'opened' : 'paste', title: w.title });
   wsChanged(true);
   L.cleanStalePromptFiles({ dir: PROMPT_DIR(), nowMs: Date.now(), fsx: fs, uid: process.getuid() });
-  if (!file) { const b = w.childBrief; w.childBrief = null; prefillChild(w, b); }
+  const plan = L.childBriefPlan({ hasFile: !!file, text });
+  if (plan.pasteNow) { const b = w.childBrief; w.childBrief = null; prefillChild(w, b); } else if (!plan.keepBrief) w.childBrief = null; // 파일이 있으면 시작 순간까지 내용을 들고 있는다(래퍼를 못 쓰게 되면 spawnPty 가 입력줄에 채운다)
+  return w;
 }
 const PREFILL_TIMEOUT_MS = 90000;
 // 입력줄에 채운다(Enter 없음). 기다리는 판단은 fillStep(순수). 사용자가 그 사이 입력하면 그만둔다. 내용은 동의 창에서 이미 전부 보여 준 것이다
 async function prefillChild(w, prompt) {
-  const text = L.childPromptText(curLang(), prompt);
+  const text = L.childPromptText(curLang(), prompt, w.by);
   if (!text) return;
   const t0 = Date.now(); const typed0 = w.typedN || 0;
   const note = (kind) => setChildNote(wsOf(w.parentId) || wsOrder().find((x) => L.maruEligible(x)), { kind, title: w.title });
@@ -1707,6 +1768,79 @@ async function prefillChild(w, prompt) {
     await delay(READY_POLL_MS);
   }
 }
+// ---- 사용자가 직접 여는 하위 세션(마루 작업 공간 아래) ----
+// 폴더는 렌더러가 주지 않는다: main 이 연 폴더 선택창의 결과를 "초안"(한 번만 쓰는 토큰, 10분)에 담고, 렌더러는 표시용 문자열과 토큰만 받는다. 열기는 마루가 요청한 하위 세션과 같은 launchChild 로 만든다.
+const subDrafts = new Map(); // token -> { parentId, real, display, expiresAt }
+let subBusy = false; // 열기를 처리하는 중(폴더 선택창은 picking 을 쓴다)
+const FAKE_SUB = !app.isPackaged && TEST_UI === 'subnew'; // 시험 전용: 폴더를 이미 고른 것으로 하고 지어낸 팀 둘을 보여 준다(디스크·선택창·세션 시작 없음)
+function subParent(id) { const w = typeof id === 'string' ? wsOf(id) : null; return w && !w.fx && L.maruEligible(w) ? w : null; } // 마루가 요청한 하위 세션의 부모와 같은 자격
+const subDisplay = (real) => L.shortenPath(real, os.homedir(), 60);
+const isMaruRoot = (real) => !!ROOT && L.isMaruRootDir(real, realDir(ROOT)); // 사용자가 연 하위 세션은 마루 자신의 폴더에서 열 수 없다(마루의 지침·훅이 자식으로 실행되지 않게). 마루가 요청한 경로에는 적용하지 않는다
+ipcMain.handle('sub:prepare', async (e, parentId) => {
+  if (!fromMain(e)) return { ok: false, reason: 'invalid' };
+  const w = subParent(parentId); if (!w) return { ok: false, reason: 'parent' };
+  const wrapperOk = FAKE_SUB || !!claudeWrapper();
+  const teams = FAKE_SUB ? L.squadChoices(fakeSquads()) : wrapperOk ? L.squadChoices(await readSquadsNow()) : []; // 래퍼를 못 쓰면 팀을 적용할 수 없다
+  return { ok: true, title: w.title, squads: teams, noWrapper: !wrapperOk };
+});
+ipcMain.handle('sub:pick-folder', async (e, parentId) => {
+  if (!fromMain(e)) return { ok: false, reason: 'invalid' };
+  const w = subParent(parentId); if (!w) return { ok: false, reason: 'parent' };
+  if (FAKE_SUB) { const real = path.join(os.homedir(), 'work', 'api-server'); const token = crypto.randomBytes(16).toString('hex'); L.subDraftAdd(subDrafts, { token, parentId: w.id, real, display: subDisplay(real), nowMs: Date.now() }); return { ok: true, token, display: subDisplay(real) }; }
+  if (picking || closing || quitAsking || restarting || subBusy) return { ok: false, reason: 'busy' };
+  picking = true;
+  try {
+    showWindow();
+    const opts = { title: tr('dlg.pick.title'), buttonLabel: tr('dlg.pick.ok'), defaultPath: os.homedir(), properties: ['openDirectory'] }; // 처음 위치는 사용자의 홈 폴더(부모의 폴더는 마루 자신의 폴더라서 그대로 열기만 눌러도 거기로 들어가 버린다)
+    const r = win && !win.isDestroyed() ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    if (r.canceled || !Array.isArray(r.filePaths) || r.filePaths.length !== 1) return { ok: false, reason: 'cancel' };
+    const real = realDir(r.filePaths[0]); // 마루가 요청한 폴더와 같은 검증: 실제 경로, 내 폴더, 정규화된 절대 경로
+    if (!real || !L.validAbsDir(real)) return { ok: false, reason: 'dir' };
+    if (isMaruRoot(real)) return { ok: false, reason: 'maru' };
+    if (subParent(w.id) !== w) return { ok: false, reason: 'parent' }; // 선택창이 열린 사이 부모가 닫혔다
+    const token = crypto.randomBytes(16).toString('hex'); // 32 hex
+    if (!L.subDraftAdd(subDrafts, { token, parentId: w.id, real, display: subDisplay(real), nowMs: Date.now() })) return { ok: false, reason: 'dir' };
+    return { ok: true, token, display: subDisplay(real) };
+  } finally { picking = false; }
+});
+// payload: { parent, token, title, brief, squad, notify } 만(경로 없음). 모두 main 이 다시 검증한다
+ipcMain.handle('sub:open', async (e, payload) => {
+  if (!fromMain(e)) return { ok: false, reason: 'invalid' };
+  const p = L.parseSubOpen(payload);
+  if (!p.ok) return { ok: false, reason: p.reason };
+  if (FAKE_SUB) return { ok: true };
+  if (subBusy || picking || closing || quitAsking || restarting || quitting) return { ok: false, reason: 'busy' };
+  subBusy = true;
+  try {
+    const par = subParent(p.parent); if (!par) return { ok: false, reason: 'parent' };
+    const dr = L.subDraftCheck(subDrafts, p.token, p.parent, Date.now()); if (!dr.ok) return { ok: false, reason: dr.reason };
+    if (!claudeFound()) return { ok: false, reason: 'start' };
+    let squad = null;
+    if (p.squad !== null) { // 렌더러의 말을 믿지 않고 지금 main 이 직접 읽은 목록과 다시 대조한다(래퍼를 못 쓰면 팀을 적용할 수 없다)
+      const fresh = claudeWrapper() ? L.consentChoice(L.squadChoices(await readSquadsNow()), p.squad) : { ok: false };
+      if (!fresh.ok) return { ok: false, reason: 'squad' };
+      squad = fresh.squad;
+      if (subParent(p.parent) !== par || !L.subDraftCheck(subDrafts, p.token, p.parent, Date.now()).ok) return { ok: false, reason: 'busy' }; // 기다리는 사이 바뀌었다
+    }
+    const real = realDir(dr.draft.real); if (isMaruRoot(real)) return { ok: false, reason: 'maru' }; const now = Date.now(); const mono = monoMs();
+    const why = L.subLimitCheck({ childCount: totalChildren(), wsCount: wss.size, accepted: childAccepted, monoMs: mono, launches: budget.list, nowMs: now })
+      || L.childLaunchCheck({ quitting, windowOk: windowReady(), parentAlive: L.parentUsable({ exists: !!wsOf(p.parent), eligible: true }), children: totalChildren(), wsCount: wss.size, realNow: real, approvedReal: dr.draft.real });
+    if (why) { childLog('refused', why, 'ui'); return { ok: false, reason: why === 'cwd' ? 'dir' : why === 'from' ? 'parent' : why }; }
+    childAccepted = [...childAccepted.filter((t) => mono - t < L.CHILD_RATE_MS), mono].slice(-10);
+    const title = p.title || [...L.cleanQuestText(path.basename(real))].slice(0, L.SUB_TITLE_MAX).join('').trim(); // 비우면 폴더 이름
+    L.subDraftUse(subDrafts, p.token); // 만들기 전에 토큰을 쓴다: 이후 어떤 일이 실패해도 같은 토큰으로 다시 열어 하위 세션이 둘이 되는 일이 없다
+    const w = launchChild(par, { title, prompt: p.brief, project: null }, real, 'ui', squad, 'user');
+    let notified = false;
+    try {
+      if (p.notify) { // 마루 입력줄에 고정 문장 한 줄(Enter 없음). 준비 조건은 squads:request-create 와 같다. 못 하면 조용히 건너뛰고 목록에 짧게 알린다
+        const line = L.subNoticeLine(tr, w.title, subDisplay(real));
+        if (line && par.term && par.bracketed && !agentBusy(par) && !squadAsking) notified = writePrompt(par, line).ok;
+        if (!notified) setChildNote(par, { kind: 'subskip', title: w.title });
+      }
+    } catch { notified = false; try { setChildNote(par, { kind: 'subskip', title: w.title }); } catch { /* 알림 건너뜀 표시도 못 하면 그대로 둔다 */ } } // 하위 세션은 이미 열렸다
+    return { ok: true, id: w.id, notified };
+  } catch { return { ok: false, reason: 'fail' }; } finally { subBusy = false; }
+});
 let reqScanning = false; let reqWatcher = null; let reqScanTimer = null;
 const childChannelOn = () => PERSIST && !!ROOT && !TEST_UI;
 async function scanChildRequests() {
@@ -1763,7 +1897,7 @@ function startChildChannel() {
 ipcMain.handle('reports:get', async (e, id) => {
   const w = wsFrom(e, id);
   if (!w) return null;
-  if (TEST_UI === 'hierarchy') return w.fakeView && w.fakeView.reports ? { items: [
+  if (FAKE_HIER) return w.fakeView && w.fakeView.reports ? { items: [
     { at: Date.now() - 180000, title: 'blog-draft', project: 'blog/draft', text: '초안 3편 정리를 끝냈습니다.\n남은 일: 마지막 편의 사진 캡션.', bg: 0, known: true },
     { at: Date.now() - 400000, title: 'api-server', project: 'dev/api', text: '', bg: 0, known: true },
     { at: Date.now() - 600000, title: null, project: null, text: 'unknown sender <b>not html</b>', bg: 1, known: false }] } : { items: [] };
@@ -2068,7 +2202,7 @@ ipcMain.handle('days:detail', (e, day) => {
   if (on) { // 상세(day 읽기)가 준비되면 그것을, 아니면 달 캐시의 가벼운 목록을 detail 표지와 함께 준다(렌더러가 행을 먼저 그리고 상세는 나중에 채운다)
     const dd = calDayGet(day);
     if (dd.state === 'ok') events = { state: 'ok', detail: 'ok', items: dd.events };
-    else { const r = calMonthGet(day.slice(0, 7)); events = { state: r.state, detail: dd.state, items: r.state === 'ok' ? (r.events[day] || []) : [] }; }
+    else { const r = calMonthGet(day.slice(0, 7)); events = { state: r.state, detail: dd.state, perm: !!(r.perm || dd.perm), items: r.state === 'ok' ? (r.events[day] || []) : [] }; }
   }
   const d = proj.diaries.get(day) || null;
   return { day, isToday: day === todayStr(), diary: d ? { title: d.title, body: d.body } : null, groups: L.buildDayGroups({ entries: proj.raw.entries, day, registry: proj.raw.registry, state: projState }), calendarOn: on, events };

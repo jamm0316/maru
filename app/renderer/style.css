@@ -513,6 +513,12 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 .ws .chip{flex:none;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:15px;padding:0 6px;border-radius:8px;border:1px solid #4A3A2C;color:var(--or2)}
 .ws .l3{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;font-size:11px;color:var(--mute);min-width:0}
 .ws .l3 .loc{color:var(--or2)}.ws .l3 .rep{color:#8FCB8F}.ws .l3.cnote{color:var(--or2)}
+/* 하위 세션 직접 열기 단추: 마루 작업 공간 행에서만. 자리는 늘 잡아 두고(밀림 없음) 마우스를 올리거나 포커스가 있거나 활성 행일 때만 보인다 */
+.ws.hassub .ws-main{padding-bottom:28px} /* 단추 자리를 아래에 따로 둔다: 가로를 줄이지 않으므로 제목·상태·경로가 더 좁아지지 않는다 */
+.ws-sub{position:absolute;right:4px;bottom:4px;height:18px;padding:0 6px;border:1px solid #4A3A2C;border-radius:6px;background:var(--panel);color:var(--or2);font:inherit;font-size:11px;line-height:16px;white-space:nowrap;overflow-wrap:normal;cursor:pointer;opacity:0}
+.ws:hover .ws-sub,.ws:focus-within .ws-sub,.ws.active .ws-sub{opacity:1}
+.ws-sub:hover,.ws-sub:focus-visible{border-color:var(--or);color:var(--or);outline:none}
+.ws-sub:focus-visible{box-shadow:0 0 0 2px rgba(255,138,42,.3)}
 .ws-chev{flex:none;width:18px;align-self:stretch;margin-left:2px;border:0;background:transparent;color:var(--soft);font:inherit;font-size:13px;cursor:pointer;padding:0}
 .ws-chev:hover{color:var(--or)}.ws-chev:focus-visible{outline:2px solid var(--or);outline-offset:-2px;border-radius:6px}
 .ws-badge{flex:none;align-self:center;margin-right:6px;padding:2px 8px;border-radius:10px;border:1px solid var(--or);background:rgba(255,138,42,.14);color:var(--or2);font:inherit;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}
@@ -570,3 +576,18 @@ button.mv-tg{cursor:pointer}button.mv-tg:hover,button.mv-tg:focus-visible,.mv-tg
 #dlg-squadnew .hint,#dlg-consent .hint{word-break:keep-all}
 html[lang="en"] #dlg-squadnew .hint,html[lang="en"] #dlg-consent .hint{word-break:normal}
 .cs-team .hint{margin-top:4px}
+#dlg-sub .hint{word-break:keep-all}
+html[lang="en"] #dlg-sub .hint{word-break:normal}
+.sb-folder{display:flex;align-items:center;gap:10px;min-width:0}
+.sb-folder .btn{flex:none}
+.sb-path{min-width:0;flex:1 1 auto;color:var(--ink)}
+.sb-path:empty::before{content:attr(data-empty);color:var(--mute);font-family:inherit}
+#sb-name{font:inherit;font-size:14px;color:var(--ink);background:#0E0B08;border:1px solid #3A2A1C;border-radius:10px;padding:8px 12px;width:100%;box-sizing:border-box}
+#sb-brief{font:inherit;font-size:14px;line-height:1.5;color:var(--ink);background:#0E0B08;border:1px solid #3A2A1C;border-radius:10px;padding:10px 12px;resize:vertical;min-height:96px;max-height:220px;width:100%;box-sizing:border-box}
+#sb-name:focus,#sb-brief:focus{border-color:var(--or);outline:none;box-shadow:0 0 0 2px rgba(255,138,42,.25)}
+.sb-meta{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+.sb-meta .hint:last-child{flex:none}
+.sb-notify{display:flex;flex-direction:column;gap:4px}
+.sb-notify .tog{font-size:13px;color:var(--ink)}
+.sb-notify .hint{padding-left:22px}
+#sb-team .cs-k{margin-bottom:6px}

@@ -398,6 +398,11 @@ out=$(run_env -- "$REAL_PY" -I "$R/scripts/squads.py" session-agent ghost); rc=$
 # 초기 프롬프트와 함께여도 같은 규칙(프롬프트는 argv 맨 끝 -- 뒤)
 mkprompt 'hello' pq2.txt 2>/dev/null; out=$(wrapq MARU_CHILD_SQUAD=dev MARU_CHILD_PROMPT_FILE="$PD/pq2.txt")
 checkall "프롬프트 파일 + 팀: --agent 와 -- 프롬프트 둘 다" agent_is sq-dev-session '&&' has "$(argv_json)" '"--"' '&&' [ ! -s "$STUB_OUT.env" ]
+# 사용자가 직접 연 하위 세션(앱이 맡길 내용 없이 연 경우): 전달 파일 변수가 없거나 비어 있으면 보통의 빈 세션 — -- 인자도, "지시를 읽지 못했습니다" 고정 안내도 없다
+WARGS=(--session-id 11111111-2222-3333-4444-555555555555)
+out=$(wrap); checkall "맡길 내용 없음(전달 파일 변수 없음): argv 는 받은 인자뿐, -- 도 고정 안내도 없음" argv_is '["--session-id", "11111111-2222-3333-4444-555555555555"]' '&&' [ -z "$out" ]
+out=$(wrap MARU_CHILD_PROMPT_FILE=); checkall "전달 파일 변수가 빈 문자열이어도 같다(--, 고정 안내 없음)" argv_is '["--session-id", "11111111-2222-3333-4444-555555555555"]' '&&' [ -z "$out" ]
+rm -f "$STUB_OUT"; out=$(wrapq MARU_CHILD_SQUAD=dev); checkall "팀만(전달 파일 없음): --agent 는 붙고 -- 인자는 없음" agent_is sq-dev-session '&&' hasnt "$(argv_json)" '"--"' '&&' hasnt "$(argv_json)" '마루가 맡긴 지시'
 WARGS=()
 echo
 

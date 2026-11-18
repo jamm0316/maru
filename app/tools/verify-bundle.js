@@ -20,6 +20,11 @@ for (const f of ['install.sh', 'bin/maru', 'scripts/reflect.sh']) {
   let st; try { st = fs.statSync(path.join(payload, f)); } catch { fail('payload missing ' + f); }
   if (!(st.mode & 0o100)) fail('not executable: ' + f);
 }
+// 3b) 캘린더 도우미: 일반 파일이고 실행 비트가 있어야 한다
+{
+  let st; try { st = fs.lstatSync(path.join(res, 'native', 'maru-cal')); } catch { fail('missing native/maru-cal'); }
+  if (!st.isFile() || !(st.mode & 0o100)) fail('native/maru-cal is not an executable file');
+}
 // 4) 싣지 말아야 할 것: data/, .git, settings.local.json, test-*.sh, __pycache__, 심볼릭 링크
 (function walk(d, rel) {
   for (const n of fs.readdirSync(d)) {

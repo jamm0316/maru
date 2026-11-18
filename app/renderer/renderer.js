@@ -225,7 +225,7 @@
     wsList = r.list; activeId = ids.has(r.active) ? r.active : null;
     wsCollapsedIds = Array.isArray(r.collapsed) ? r.collapsed.filter((x) => typeof x === 'string') : [];
     syncConsent(r.consent);
-    renderWs();
+    renderWs(); sbParentGone();
     if (activeId !== prev || fresh.some((e) => e.id === activeId)) { closeDetail(false); showActive(true); } // 상세가 터미널을 가린 채로는 xterm 을 열지 않는다(숨은 컨테이너에서 open 금지)
     ensureStarted(terms.get(activeId));
     for (const w of r.list) if (w.auto === true && w.id !== activeId) ensureStarted(terms.get(w.id)); // 마루가 연 하위 세션은 보이지 않아도 시작한다(Enter 없이 맡긴 일이 시작되도록)
@@ -236,6 +236,7 @@
     if (n.kind === 'opened') return T('child.note.opened', { title: String(n.title || '') });
     if (n.kind === 'paste') return T('child.note.paste', { title: String(n.title || '') });
     if (n.kind === 'cancel') return T('child.note.cancel');
+    if (n.kind === 'subskip') return T('child.note.subskip', { title: String(n.title || '') });
     if (n.kind === 'prefill') return T('child.note.prefill');
     return T('child.note.refused', { reason: T(Lib.childReasonKey(n.reason), { n: Lib.CHILD_MAX }) });
   }
@@ -246,7 +247,7 @@
     const box = $('workspaces');
     const f = document.activeElement;
     const fr = f && box.contains(f) ? f.closest('.ws') : null;
-    const refocus = fr ? { id: fr.dataset.id, x: f.classList.contains('ws-x'), c: f.classList.contains('ws-chev'), b: f.classList.contains('ws-badge') } : null;
+    const refocus = fr ? { id: fr.dataset.id, x: f.classList.contains('ws-x'), c: f.classList.contains('ws-chev'), b: f.classList.contains('ws-badge'), s: f.classList.contains('ws-sub') } : null;
     box.replaceChildren();
     const nums = numberMap();
     const kidCount = new Map(); for (const w of wsList) if (w.parentId) kidCount.set(w.parentId, (kidCount.get(w.parentId) || 0) + 1);
@@ -256,7 +257,7 @@
       const kid = !!w.parentId && titleOf.has(w.parentId);
       if (kid && wsCollapsedIds.includes(w.parentId) && w.id !== activeId) continue; // 접힌 부모의 하위 세션은 숨긴다(활성이면 보인다)
       const on = w.id === activeId; const ux = w.ux || w.state; const k = stateKey(ux);
-      const row = el('div', 'ws' + (on ? ' active' : '') + (kid ? ' kid' + (lastOf.get(w.parentId) === w.id ? ' last' : '') : '') + (w.flash ? ' flash' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
+      const row = el('div', 'ws' + (on ? ' active' : '') + (w.sub === true ? ' hassub' : '') + (kid ? ' kid' + (lastOf.get(w.parentId) === w.id ? ' last' : '') : '') + (w.flash ? ' flash' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
       const kids = kidCount.get(w.id) || 0; const closedKids = kids > 0 && wsCollapsedIds.includes(w.id);
       if (kids > 0) {
         const ch = el('button', 'ws-chev', closedKids ? '▸' : '▾'); ch.type = 'button'; ch.setAttribute('aria-expanded', String(!closedKids));
@@ -292,13 +293,18 @@
         bd.addEventListener('click', (ev) => { ev.stopPropagation(); if (repOpenId === w.id) closeReports(true); else openReports(w.id, bd); });
         row.append(bd);
       }
+      if (w.sub === true) { // 이 마루 작업 공간 아래에 하위 세션을 직접 연다(위 + 는 그대로 새 작업 공간)
+        const sb = el('button', 'ws-sub', T('sub.open.btn')); sb.type = 'button'; sb.setAttribute('aria-label', T('sub.open.aria')); sb.title = T('sub.open.aria'); sb.setAttribute('aria-haspopup', 'dialog');
+        sb.addEventListener('click', (ev) => { ev.stopPropagation(); openSub(w.id, false); });
+        row.append(sb);
+      }
       const x = el('button', 'ws-x', '×'); x.type = 'button'; x.setAttribute('aria-label', T('ws.close.aria', { title: w.title }));
       x.addEventListener('click', async () => { try { await window.maru.closeWorkspace(w.id); } catch (e) { /* 무시 */ } syncWs(); });
       row.append(x); box.append(row);
     }
     if (refocus) {
       const r = [...box.children].find((n) => n.dataset.id === refocus.id);
-      const t = r && r.querySelector(refocus.x ? '.ws-x' : refocus.c ? '.ws-chev' : refocus.b ? '.ws-badge' : '.ws-main');
+      const t = r && r.querySelector(refocus.x ? '.ws-x' : refocus.s ? '.ws-sub' : refocus.c ? '.ws-chev' : refocus.b ? '.ws-badge' : '.ws-main');
       if (t) t.focus();
     }
     $('ws-add').disabled = wsList.length >= Lib.WS_MAX;
@@ -417,6 +423,91 @@
   }
   $('cs-ok').addEventListener('click', () => { if (!$('cs-ok').disabled) answerConsent('open'); });
   $('cs-cancel').addEventListener('click', () => answerConsent('cancel'));
+  // ---- 하위 세션 직접 열기: 폴더는 main 의 선택창으로만(렌더러는 표시용 문자열과 한 번 쓰는 토큰만 받는다). 열기는 토큰·제목·내용·팀·알림 여부만 보낸다 ----
+  const SB_MAX = 4000;
+  let sbParent = null; let sbToken = null; let sbSquad = null; let sbBusy = false;
+  function sbCount() { $('sb-count').textContent = T('sub.count', { n: [...$('sb-brief').value].length, m: SB_MAX }); }
+  function sbPaintTeams(prep) { // 맡을 팀: 동의 창과 같은 모양(`팀 없이` + 설치된 팀). 적용할 수 없으면 줄을 숨기고 이유만 알린다
+    const box = $('sb-teams'); box.replaceChildren(); sbSquad = null;
+    const teams = Array.isArray(prep.squads) ? prep.squads.filter((q) => q && typeof q.slug === 'string' && SQUAD_SLUG.test(q.slug) && typeof q.name === 'string') : [];
+    const none = teams.length === 0; const note = none && prep.noWrapper === true ? T('sub.noteam') : '';
+    $('sb-team-note').textContent = note; $('sb-team').hidden = none && !note;
+    for (const id of ['sb-team-k', 'sb-teams', 'sb-team-hint']) $(id).hidden = none;
+    if (none) return;
+    $('sb-team-k').textContent = T('consent.team'); $('sb-team-hint').textContent = T('consent.team.hint');
+    for (const q of [{ slug: null, name: T('consent.team.none'), personal: false }, ...teams]) {
+      const lab = el('label', 'cs-opt' + (q.slug === null ? ' on' : ''));
+      const r = el('input'); r.type = 'radio'; r.name = 'sb-team'; r.checked = q.slug === null;
+      r.addEventListener('change', () => { sbSquad = q.slug; for (const n of box.children) n.classList.toggle('on', n === lab); });
+      lab.append(r, el('span', 'nm', q.name));
+      if (q.personal) lab.append(el('span', 'tag', T('squad.personal')));
+      box.append(lab);
+    }
+  }
+  function sbSetFolder(display) { // display: main 이 만든 표시용 문자열(홈은 ~). 경로로 쓰지 않는다
+    sbToken = display ? sbToken : null;
+    $('sb-path').textContent = display || '';
+    const base = display ? display.split('/').filter(Boolean).pop() : ''; $('sb-name').placeholder = base || '';
+  }
+  function closeSubDialog() { closeModal($('dlg-sub')); }
+  function focusSubButton(parentId) { // 닫은 뒤(목록을 다시 그린 뒤) 그 부모 줄의 하위 세션 버튼으로, 줄이 없으면 터미널로
+    if (modalOpen()) return;
+    const row = [...$('workspaces').children].find((n) => n.dataset && n.dataset.id === parentId); const b = row && row.querySelector('.ws-sub');
+    if (b) b.focus(); else focusTerm();
+  }
+  function sbParentGone() { // 대화상자가 열린 사이 부모 작업 공간이 사라지면 닫는다
+    if (!sbParent || $('dlg-sub').hidden || sbBusy) return;
+    if (!wsList.some((w) => w.id === sbParent)) { closeSubDialog(); sbParent = null; sbToken = null; focusTerm(); }
+  }
+  function sbError(reason) {
+    const known = ['invalid', 'title', 'brief', 'dir', 'maru', 'expired', 'parent', 'children-max', 'ws-max', 'rate', 'budget', 'start', 'squad', 'busy'];
+    $('sb-err').textContent = T('sub.err.' + (known.includes(reason) ? reason : 'fail'), { n: Lib.CHILD_MAX });
+  }
+  async function openSub(parentId, auto) {
+    if (modalOpen() || sbBusy || typeof parentId !== 'string') return;
+    let prep = null; try { prep = await window.maru.subPrepare(parentId); } catch (x) { prep = null; }
+    if (!prep || !prep.ok || modalOpen()) { if (!prep || !prep.ok) flashNote(T('sub.err.parent')); return; }
+    sbParent = parentId; sbToken = null; sbBusy = false;
+    $('sb-title').textContent = T('sub.title'); $('sb-under').textContent = T('sub.under', { title: String(prep.title || '') });
+    $('sb-folder-k').textContent = T('sub.folder'); $('sb-pick').textContent = T('sub.folder.pick'); $('sb-folder-hint').textContent = T('sub.folder.hint');
+    $('sb-path').dataset.empty = T('sub.folder.none');
+    $('sb-name-k').textContent = T('sub.name'); $('sb-name-hint').textContent = T('sub.name.hint');
+    $('sb-brief-k').textContent = T('sub.brief'); $('sb-brief-hint').textContent = T('sub.brief.hint');
+    $('sb-notify-k').textContent = T('sub.notify'); $('sb-notify-hint').textContent = T('sub.notify.hint');
+    $('sb-ok').textContent = T('sub.ok'); $('sb-ok').disabled = false; $('sb-pick').disabled = false;
+    $('sb-name').value = ''; $('sb-brief').value = ''; $('sb-notify').checked = true; $('sb-err').textContent = '';
+    sbSetFolder(''); sbCount(); sbPaintTeams(prep);
+    openModal($('dlg-sub'), $('sb-pick'), { closable: () => !sbBusy });
+    if (auto) pickSubFolder(); // 시험 전용(MARU_APP_UI=subnew): main 이 지어낸 폴더를 이미 고른 것으로 돌려준다
+  }
+  async function pickSubFolder() {
+    if (sbBusy) return;
+    sbBusy = true; $('sb-pick').disabled = true; $('sb-err').textContent = '';
+    let r = null; try { r = await window.maru.subPickFolder(sbParent); } catch (x) { r = null; }
+    sbBusy = false; $('sb-pick').disabled = false;
+    if (r && r.ok && typeof r.token === 'string' && typeof r.display === 'string') { sbToken = r.token; sbSetFolder(r.display); }
+    else if (!r || r.reason !== 'cancel') sbError(r && typeof r.reason === 'string' ? r.reason : 'fail');
+    $('sb-pick').focus();
+  }
+  async function submitSub() {
+    if (sbBusy) return;
+    if (!sbToken) { $('sb-err').textContent = T('sub.err.nofolder'); $('sb-pick').focus(); return; }
+    sbBusy = true; $('sb-ok').disabled = true; $('sb-err').textContent = '';
+    let res = null;
+    try { res = await window.maru.subOpen({ parent: sbParent, token: sbToken, title: $('sb-name').value, brief: $('sb-brief').value, squad: sbSquad, notify: $('sb-notify').checked }); } catch (x) { res = null; }
+    sbBusy = false; $('sb-ok').disabled = false;
+    if (res && res.ok) { closeSubDialog(); await syncWs(); focusSubButton(sbParent); return; }
+    const reason = res && typeof res.reason === 'string' ? res.reason : 'fail';
+    if (reason === 'expired' || reason === 'dir' || reason === 'maru' || reason === 'invalid') { sbToken = null; sbSetFolder(''); sbError(reason); $('sb-pick').focus(); return; } // 폴더 선택이 만료됐거나 쓸 수 없다: 다시 고르게 한다
+    if (reason === 'squad') { let prep = null; try { prep = await window.maru.subPrepare(sbParent); } catch (x) { prep = null; } if (prep && prep.ok) sbPaintTeams(prep); }
+    sbError(reason);
+  }
+  $('sb-pick').addEventListener('click', pickSubFolder);
+  $('sb-ok').addEventListener('click', submitSub);
+  $('sb-cancel').addEventListener('click', () => { if (!sbBusy) { const id = sbParent; closeSubDialog(); focusSubButton(id); } });
+  $('sb-brief').addEventListener('input', sbCount);
+  $('sb-brief').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitSub(); } }); // Enter 는 줄바꿈, 제출은 Cmd/Ctrl+Enter
+  window.maru.onOpenSub((id) => { if (!modalOpen()) openSub(id, false); }); // 앱 메뉴 "하위 세션 열기…"
   // ---- 스쿼드 만들기: 글을 받아 main 에 넘기면 main 이 정리·검사해 마루 입력줄에 채운다(파일은 쓰지 않는다). Enter 는 사용자가 누른다 ----
   let snBusy = false;
   const SN_MAX = 300;
@@ -1851,7 +1942,7 @@
     if (d.calendarOn && (ev.state !== 'ok' || ev.items.length)) {
       const x = sec('day.sec.events');
       if (ev.state === 'pending') x.append(el('p', 'hint dv-hint', T('day.events.loading')));
-      else if (ev.state === 'fail') x.append(el('p', 'hint dv-hint', T('day.events.fail')));
+      else if (ev.state === 'fail') x.append(el('p', 'hint dv-hint', T(ev.perm ? 'day.events.perm' : 'day.events.fail')));
       else ev.items.forEach((e, i) => {
         const k = evKey(d.day, e); const open = dayExp.has(k); const id = 'dv-ev-' + i;
         const w = el('div', 'dv-evx' + (open ? ' open' : ''));
@@ -1873,7 +1964,7 @@
             if (bx !== dt) dt.append(bx);
           });
           if (ev.detail === 'pending') dt.append(el('div', 'hint evd-wait', T('day.events.loading')));
-          else if (ev.detail === 'fail') dt.append(el('div', 'hint evd-wait', T('day.events.fail'))); // 상세를 읽지 못했으면 상세가 없는 일정처럼 보이지 않게 알린다
+          else if (ev.detail === 'fail') dt.append(el('div', 'hint evd-wait', T(ev.perm ? 'day.events.perm' : 'day.events.fail'))); // 상세를 읽지 못했으면 상세가 없는 일정처럼 보이지 않게 알린다
           w.append(dt);
         }
         x.append(w);
@@ -2125,7 +2216,7 @@
     else if (init && init.uiOpen === 'update') openUpdate();
     else if (init && init.uiOpen === 'squadnew') openSquadNew(); // 시험 전용(MARU_APP_UI=squadnew): 화면 확인용
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'subnew') { const m = wsList.find((w) => w.sub === true); if (m) openSub(m.id, true); } if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
     setInterval(() => { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); }, 5000); // 일지·회고·일정은 main 이 읽어 둔 캐시를 가볍게 다시 묻는다
     refreshMeet(); setInterval(refreshMeet, 30000);

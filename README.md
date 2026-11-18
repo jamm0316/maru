@@ -96,6 +96,7 @@ Either way, you are choosing to trust an unsigned build. If you would rather not
 git clone <this repository>
 cd maru/app
 npm install      # also rebuilds node-pty; needs Node.js and Xcode Command Line Tools
+# optional: `npm run build:native` builds the EventKit calendar helper (needs Swift from Xcode Command Line Tools); the packaged app uses this helper; running from source uses the slower AppleScript path unless `MARU_APP_CAL_HELPER=1` is set
 npm start
 ```
 

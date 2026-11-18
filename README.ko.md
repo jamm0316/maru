@@ -96,6 +96,7 @@ xattr -dr com.apple.quarantine /Applications/Maru.app
 git clone <이 저장소>
 cd maru/app
 npm install      # node-pty도 다시 빌드합니다. Node.js와 Xcode Command Line Tools가 필요합니다
+# 선택: `npm run build:native` 으로 EventKit 캘린더 도우미를 빌드합니다(Swift 필요). 패키징한 앱이 이 도우미를 씁니다. 소스로 실행할 때는 `MARU_APP_CAL_HELPER=1` 을 주지 않으면 느린 AppleScript 방식으로 읽습니다
 npm start
 ```
 

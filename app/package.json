@@ -6,10 +6,11 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "build:native": "./scripts/build-native.sh",
     "test": "node test.js",
     "rebuild": "DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-rebuild -f -w node-pty",
     "postinstall": "DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-rebuild -f -w node-pty",
-    "dist": "CSC_IDENTITY_AUTO_DISCOVERY=false DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-builder --mac dmg --arm64 && node tools/verify-bundle.js"
+    "dist": "npm run build:native && CSC_IDENTITY_AUTO_DISCOVERY=false DEVELOPER_DIR=/Library/Developer/CommandLineTools electron-builder --mac dmg --arm64 && node tools/verify-bundle.js"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.1",
@@ -62,13 +63,21 @@
       ],
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
-      "identity": null
+      "identity": null,
+      "extendInfo": {
+        "NSCalendarsFullAccessUsageDescription": "Maru shows your calendar events next to your work log. Events stay in memory and are never saved.",
+        "NSCalendarsUsageDescription": "Maru shows your calendar events next to your work log. Events stay in memory and are never saved."
+      }
     },
     "dmg": {
       "sign": false
     },
     "afterPack": "tools/after-pack.js",
     "extraResources": [
+      {
+        "from": "native/bin/maru-cal",
+        "to": "native/maru-cal"
+      },
       {
         "from": "build/trayTemplate.png",
         "to": "tray/trayTemplate.png"

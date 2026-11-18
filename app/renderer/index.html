@@ -249,6 +249,33 @@
   </div>
 </div>
 
+<!-- 모달: 하위 세션 직접 열기(마루 작업 공간 아래). 폴더는 main 의 선택창으로만 고른다 -->
+<div class="backdrop" id="dlg-sub" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="sb-title" aria-describedby="sb-under">
+    <h2 class="dlg-title serif" id="sb-title"></h2>
+    <div class="hint" id="sb-under"></div>
+    <div class="field"><span class="lbl" id="sb-folder-k"></span>
+      <div class="sb-folder"><button type="button" class="btn" id="sb-pick" aria-describedby="sb-path sb-folder-hint"></button><span class="cs-path sb-path" id="sb-path"></span></div>
+      <div class="hint" id="sb-folder-hint"></div></div>
+    <label class="field"><span class="lbl" id="sb-name-k" for="sb-name"></span>
+      <input id="sb-name" type="text" maxlength="40" autocomplete="off" spellcheck="false" aria-describedby="sb-name-hint"></label>
+    <div class="hint" id="sb-name-hint"></div>
+    <label class="field"><span class="lbl" id="sb-brief-k" for="sb-brief"></span>
+      <textarea id="sb-brief" rows="5" maxlength="4000" spellcheck="false" aria-describedby="sb-brief-hint sb-count"></textarea></label>
+    <div class="sb-meta"><span class="hint" id="sb-brief-hint"></span><span class="hint" id="sb-count"></span></div>
+    <div class="cs-team" id="sb-team" hidden>
+      <div class="cs-k" id="sb-team-k"></div>
+      <div class="cs-teams" id="sb-teams" role="radiogroup" aria-labelledby="sb-team-k" aria-describedby="sb-team-hint"></div>
+      <div class="hint" id="sb-team-hint"></div>
+      <div class="hint cs-team-note" id="sb-team-note" role="status"></div>
+    </div>
+    <div class="sb-notify"><label class="tog"><input type="checkbox" id="sb-notify" checked aria-describedby="sb-notify-hint"><span id="sb-notify-k"></span></label>
+      <div class="hint" id="sb-notify-hint"></div></div>
+    <div class="err" id="sb-err" role="alert"></div>
+    <div class="btn-row"><button type="button" class="btn ghost" id="sb-cancel" data-i18n="common.cancel">취소</button><button type="button" class="btn primary" id="sb-ok"></button></div>
+  </div>
+</div>
+
 <!-- 모달: 프로젝트 이름 바꾸기 / 합치기 -->
 <div class="backdrop" id="dlg-proj" hidden>
   <div class="dialog narrow" role="dialog" aria-modal="true" aria-labelledby="pj-title">

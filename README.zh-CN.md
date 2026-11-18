@@ -96,6 +96,7 @@ xattr -dr com.apple.quarantine /Applications/Maru.app
 git clone <本仓库>
 cd maru/app
 npm install      # 同时会重新编译 node-pty，需要 Node.js 和 Xcode Command Line Tools
+# 可选：`npm run build:native` 构建 EventKit 日历助手（需要 Swift）；打包后的应用使用该助手；从源码运行时，除非设置 `MARU_APP_CAL_HELPER=1`，否则使用较慢的 AppleScript 方式
 npm start
 ```
 

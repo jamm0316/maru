@@ -551,7 +551,7 @@ t('캘린더: 제목의 RS/US 로 만든 위조 레코드는 버려진다', () =
 t('캘린더 스크립트는 고정 문자열 배열', () => {
   assert.ok(Array.isArray(L.CAL_SCRIPT) && L.CAL_SCRIPT.every((l) => typeof l === 'string' && !/[\r\n]/.test(l)));
   assert.ok(L.CAL_SCRIPT.includes('tell application "Calendar"'));
-  for (const l of ['ko', 'en']) assert.ok(/(반복 일정|Recurring events)/.test(I.t(l, 'set.cal.desc')));
+  for (const l of ['ko', 'en']) assert.ok(/(일정을 읽어|reads events from your Calendar)/.test(I.t(l, 'set.cal.desc')) && /(메모리에만|in memory)/.test(I.t(l, 'set.cal.desc')) && /(macOS가 캘린더 접근 허용을 묻습니다|macOS asks you to allow Calendar)/.test(I.t(l, 'set.cal.desc')) && !/(반복 일정은|Recurring events may)/.test(I.t(l, 'set.cal.desc'))); // 두 경로 모두 참인 문구: 읽음·메모리에만·처음 읽을 때 macOS 가 묻는다
 });
 
 // ---- i18n ----
@@ -1284,14 +1284,14 @@ t('calMonthScript: 고정 줄, 정수만 삽입, 범위 검증', () => {
   const sc = L.calMonthScript(2026, 11);
   assert.ok(Array.isArray(sc) && sc.every((x) => typeof x === 'string'));
   const i0 = sc.indexOf('set d0 to current date');
-  assert.deepStrictEqual(sc.slice(i0, i0 + 10), ['set d0 to current date', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set time of d0 to 0', 'if (day of d0) is not 1 then set d0 to d0 + (1 * hours)', 'copy d0 to d1', 'set year of d1 to 2026', 'set month of d1 to 12', 'if (day of d1) is not 1 then set d1 to d1 + (1 * hours)']);
+  assert.deepStrictEqual(sc.slice(i0, i0 + 16), ['set d0 to current date', 'set time of d0 to 43200', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set day of d0 to 1', 'set time of d0 to 0', 'if (hours of d0) is not 0 then set d0 to d0 + (1 * hours)', 'copy d0 to d1', 'set time of d1 to 43200', 'set day of d1 to 1', 'set year of d1 to 2026', 'set month of d1 to 12', 'set day of d1 to 1', 'set time of d1 to 0', 'if (hours of d1) is not 0 then set d1 to d1 + (1 * hours)']); // 정오에서 출발해 날짜를 옮긴 뒤 0시로(실행 시각과 무관), 0시가 없는 날만 1시간 보정
   const dec = L.calMonthScript(2026, 12); assert.ok(dec.includes('set year of d1 to 2027') && dec.includes('set month of d1 to 1'));
   const base = L.CAL_SCRIPT; assert.ok(base.includes('set d1 to d0 + (2 * days)') && !sc.includes('set d1 to d0 + (2 * days)'));
-  const rest = (a) => a.filter((x) => !/^set (d0|d1|day of d0|year of d[01]|month of d[01]|time of d0)\b|^copy d0 to d1$|^if \(day of d[01]\) is not 1 then/.test(x)); assert.deepStrictEqual(rest(sc), rest(base)); // 날짜 범위 줄만 다르다
+  const rest = (a) => a.filter((x) => !/^set (d0|d1|(day|year|month|time) of d[01])\b|^copy d0 to d1$|^if \(hours of d[01]\) is not 0 then/.test(x)); assert.deepStrictEqual(rest(sc), rest(base)); // 날짜 범위 줄만 다르다
   for (const [y, m] of [[1999, 1], [2101, 1], [2026, 0], [2026, 13], [2026.5, 1], ['2026', 11], [2026, '11'], [null, 1], [NaN, 1]]) assert.strictEqual(L.calMonthScript(y, m), null, y + '-' + m);
   assert.ok(sc.every((x) => !/\$|`|\\/.test(x) || base.includes(x)));
   assert.ok(!sc.some((x) => /^set d1 to d0$/.test(x))); // 별칭(같은 날짜 객체) 금지
-  assert.deepStrictEqual(sc.slice(i0, i0 + 10), L.calMonthDateSetup(2026, 11)); assert.strictEqual(L.calMonthDateSetup(2026, 13), null);
+  assert.deepStrictEqual(sc.slice(i0, i0 + L.calMonthDateSetup(2026, 11).length), L.calMonthDateSetup(2026, 11)); assert.strictEqual(L.calMonthDateSetup(2026, 13), null);
 });
 if (process.platform === 'darwin') t('calMonthDateSetup: osascript 로 d0=그 달 1일 00:00, d1=다음 달 1일(12월 포함)', () => {
   const { execFileSync } = require('child_process');
@@ -1327,10 +1327,10 @@ t('calDayScript: 고정 줄, 정수만 삽입, 범위·날짜 검증, 별칭 금
   assert.ok(Array.isArray(sc) && sc.every((x) => typeof x === 'string'));
   const i0 = sc.indexOf('set d0 to current date');
   assert.deepStrictEqual(sc.slice(i0, i0 + L.calDayDateSetup(2026, 11, 18).length), L.calDayDateSetup(2026, 11, 18));
-  assert.deepStrictEqual(L.calDayDateSetup(2026, 11, 18).slice(0, 6), ['set d0 to current date', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set day of d0 to 18', 'set time of d0 to 0']);
+  assert.deepStrictEqual(L.calDayDateSetup(2026, 11, 18).slice(0, 8), ['set d0 to current date', 'set time of d0 to 43200', 'set day of d0 to 1', 'set year of d0 to 2026', 'set month of d0 to 11', 'set day of d0 to 18', 'set time of d0 to 0', 'if (hours of d0) is not 0 then set d0 to d0 + (1 * hours)']);
   assert.ok(sc.includes('copy d0 to d1') && !sc.includes('set d1 to d0') && !sc.some((x) => /36 \* hours/.test(x)));
-  assert.deepStrictEqual(L.calDayDateSetup(2026, 12, 31).slice(7), ['copy d0 to d1', 'set time of d1 to 43200', 'set day of d1 to 1', 'set year of d1 to 2027', 'set month of d1 to 1', 'set day of d1 to 1', 'set time of d1 to 0', 'if (day of d1) is not 1 then set d1 to d1 + (1 * hours)']); // 다음 날짜는 JS 가 계산
-  assert.ok(L.calDayDateSetup(2026, 11, 18).includes('if (day of d0) is not 18 then set d0 to d0 + (1 * hours)'));
+  assert.deepStrictEqual(L.calDayDateSetup(2026, 12, 31).slice(8), ['copy d0 to d1', 'set time of d1 to 43200', 'set day of d1 to 1', 'set year of d1 to 2027', 'set month of d1 to 1', 'set day of d1 to 1', 'set time of d1 to 0', 'if (hours of d1) is not 0 then set d1 to d1 + (1 * hours)']); // 다음 날짜는 JS 가 계산
+  assert.ok(L.calDayDateSetup(2026, 11, 18).includes('if (hours of d0) is not 0 then set d0 to d0 + (1 * hours)'));
   assert.ok(!sc.includes('if sd < d0 then set sd to d0')); // 시작을 이 날 0시로 당기는 clamp 가 없다(월·오늘 스크립트는 그대로)
   assert.ok(L.calMonthScript(2026, 11).includes('if sd < d0 then set sd to d0') && L.CAL_SCRIPT.includes('if sd < d0 then set sd to d0'));
   for (const [y, m, d] of [[1999, 1, 1], [2101, 1, 1], [2026, 0, 1], [2026, 13, 1], [2026, 2, 29], [2026, 4, 31], [2026, 11, 0], [2026, 11, 31], [2026.5, 1, 1], ['2026', 11, 1], [2026, 11, '1'], [2026, 11, null], [2026, 11, NaN]]) assert.strictEqual(L.calDayScript(y, m, d), null, y + '-' + m + '-' + d);
@@ -1437,7 +1437,7 @@ t('달력 카드·하루 보기 연결(소스 구조)', () => {
   assert.ok(/'days:month', \(e, ym\) => \{\s*if \(!fromMain\(e\) \|\| !L\.parseYm\(ym\)\) return null;/.test(main)); // 보낸 창·형식을 main 이 다시 본다
   assert.ok(/'days:detail', \(e, day\) => \{\s*if \(!fromMain\(e\) \|\| !L\.validDay\(day\)/.test(main));
   assert.ok(/if \(!SMOKE && !FAKE_PROJ\) \{ readCalendar\(\)/.test(main) && /const calOn = \(\) => FAKE_DAY \|\| \(!SMOKE && !FAKE_PROJ/.test(main)); // 스모크·시험 모드에서는 캘린더를 읽지 않는다
-  assert.ok(/calMonths\.clear\(\)/.test(main) && /CAL_MONTH_MAX = 3/.test(main) && /timeout: 20000/.test(main));
+  assert.ok(/calMonths\.clear\(\)/.test(main) && /CAL_MONTH_MAX = 3/.test(main) && /CAL_OSA_MS/.test(main));
   for (const id of ['cal-prev', 'cal-next', 'cal-today', 'dv-close', 'dv-prev', 'dv-next']) assert.ok(new RegExp('<button type="button"[^>]*id="' + id + '"[^>]*aria-label=').test(html), id);
   assert.ok(/aria-pressed/.test(rd) && /aria-current', 'date'/.test(rd) && /detailMode = 'day'/.test(rd));
 });
@@ -3401,6 +3401,24 @@ t('전달 파일 정확히 한 번(F4): 래퍼를 쓸 수 있으면 환경변수
   let file = '/p/b.txt'; const first = L.promptHandoff({ file, wrapperOk: true }); file = null; const second = L.promptHandoff({ file, wrapperOk: true });
   assert.strictEqual(first.env, '/p/b.txt'); assert.strictEqual(second.env, null);
 });
+t('childBriefPlan: 전달 파일·내용 네 가지 조합(파일이 있으면 내용을 들고 있고, 파일 없이 내용만 있으면 지금 채운다)', () => {
+  assert.deepStrictEqual(L.childBriefPlan({ hasFile: true, text: 'x' }), { pasteNow: false, keepBrief: true });
+  assert.deepStrictEqual(L.childBriefPlan({ hasFile: true, text: '' }), { pasteNow: false, keepBrief: false });
+  assert.deepStrictEqual(L.childBriefPlan({ hasFile: false, text: 'x' }), { pasteNow: true, keepBrief: false });
+  assert.deepStrictEqual(L.childBriefPlan({ hasFile: false, text: '' }), { pasteNow: false, keepBrief: false });
+});
+t('briefAtSpawn: 시작 순간 래퍼를 못 쓰게 되면 들고 있던 내용을 입력줄에 채운다(래퍼를 쓰면 안 채운다)', () => {
+  const kept = L.childBriefPlan({ hasFile: true, text: 'brief' }).keepBrief ? 'brief' : null;
+  assert.strictEqual(L.briefAtSpawn(L.promptHandoff({ file: '/p/a.txt', wrapperOk: false }), kept), 'brief');
+  assert.strictEqual(L.briefAtSpawn(L.promptHandoff({ file: '/p/a.txt', wrapperOk: true }), kept), null);
+  assert.strictEqual(L.briefAtSpawn(L.promptHandoff({ file: '/p/a.txt', wrapperOk: false }), null), null); // 내용을 안 들고 있으면 채울 것이 없다
+  assert.strictEqual(L.briefAtSpawn(L.promptHandoff({ file: null, wrapperOk: false }), 'brief'), null);
+});
+t('isMaruRootDir: 실제 경로가 마루 폴더와 같을 때만 참', () => {
+  assert.strictEqual(L.isMaruRootDir('/a/maru', '/a/maru'), true);
+  assert.strictEqual(L.isMaruRootDir('/a/maru/sub', '/a/maru'), false);
+  assert.strictEqual(L.isMaruRootDir('/a/maru', null), false); assert.strictEqual(L.isMaruRootDir(null, null), false); assert.strictEqual(L.isMaruRootDir('', ''), false);
+});
 t('hierarchyOrder·visibleWsIds: 부모 뒤에 자식(만든 순서), ⌘숫자는 화면 순서·접힌 부모(고정 id)의 자식은 빠지고 활성 자식은 보인다', () => {
   const items = [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'a1', title: 'A1', parentId: 'a' }, { id: 'c', title: 'C' }, { id: 'b1', title: 'B1', parentId: 'b' }, { id: 'a2', title: 'A2', parentId: 'a' }];
   const ord = L.hierarchyOrder(items);
@@ -3752,6 +3770,257 @@ t('managedWsTitle: 관리형 홈의 기본/".maru" 제목만 제품 이름으로
   assert.strictEqual(L.managedWsTitle('.maru', '/h/other/.maru', roots, '마루'), '.maru'); // 관리형 홈이 아니면 그대로
   assert.strictEqual(L.managedWsTitle('.maru', '/h/.maru', [], '마루'), '.maru');
 });
+
+// ---- EventKit 캘린더 도우미(maru-cal) ----
+t('calHelperArgs: 검증된 정수만 인자 배열로, 잘못이면 null', () => {
+  assert.deepStrictEqual(L.calHelperArgs('today'), ['today']);
+  assert.deepStrictEqual(L.calHelperArgs('month', 2026, 11), ['month', '2026', '11']);
+  assert.deepStrictEqual(L.calHelperArgs('day', 2024, 2, 29), ['day', '2024', '2', '29']);
+  for (const bad of [['month', 1999, 1], ['month', 2101, 1], ['month', 2026, 0], ['month', 2026, 13], ['month', '2026', 1], ['month', 2026.5, 1], ['day', 2026, 2, 30], ['day', 2026, 11, 0], ['day', 2026, 11, '1'], ['day', 2026, 11], ['x'], [], ['month', NaN, 1]]) assert.strictEqual(L.calHelperArgs(...bad), null, JSON.stringify(bad));
+  assert.ok(L.calHelperArgs('month', 2026, 11).every((a) => /^[a-z0-9]+$/.test(a)));
+});
+t('calHelperExit·calStatusWord: 종료 코드와 상태 단어 매핑', () => {
+  assert.strictEqual(L.calHelperExit(0), 'ok'); assert.strictEqual(L.calHelperExit(3), 'perm');
+  for (const c of [1, 2, 4, null, undefined, 'x', 137]) assert.strictEqual(L.calHelperExit(c), 'fail');
+  assert.strictEqual(L.calStatusWord('authorized\n'), 'ok'); assert.strictEqual(L.calStatusWord('denied'), 'denied'); assert.strictEqual(L.calStatusWord('restricted'), 'denied');
+  assert.strictEqual(L.calStatusWord('notDetermined\n'), 'ask');
+  for (const w of ['', 'Authorized', 'writeOnly', null, 5]) assert.strictEqual(L.calStatusWord(w), 'unknown');
+  assert.ok(L.CAL_HELPER_FIRST_MS >= 70000 && L.CAL_HELPER_MS === 10000 && L.CAL_OSA_MS === 90000);
+});
+t('calChooseReader: 패키징 또는 개발 옵트인 + 일반 파일·실행 가능·소유자 확인·(패키징 시) Resources 안일 때만', () => {
+  const ok = { helper: '/a/maru-cal', isFile: true, executable: true, owned: true, packaged: false, devOptIn: true };
+  assert.strictEqual(L.calChooseReader(ok), 'helper');
+  assert.strictEqual(L.calChooseReader({ ...ok, devOptIn: false }), 'osascript'); // 소스 실행은 옵트인 없이는 osascript
+  assert.strictEqual(L.calChooseReader({ ...ok, devOptIn: undefined }), 'osascript');
+  assert.strictEqual(L.calChooseReader({ ...ok, owned: false }), 'osascript');
+  assert.strictEqual(L.calChooseReader({ ...ok, owned: undefined }), 'osascript');
+  assert.strictEqual(L.calChooseReader({ ...ok, isFile: false }), 'osascript');
+  assert.strictEqual(L.calChooseReader({ ...ok, executable: false }), 'osascript');
+  assert.strictEqual(L.calChooseReader({ ...ok, helper: '' }), 'osascript');
+  assert.strictEqual(L.calChooseReader(null), 'osascript');
+  const pk = { ...ok, packaged: true, devOptIn: false, realHelper: '/R/Resources/native/maru-cal', realResources: '/R/Resources' };
+  assert.strictEqual(L.calChooseReader(pk), 'helper');
+  assert.strictEqual(L.calChooseReader({ ...pk, realHelper: '/elsewhere/maru-cal' }), 'osascript');
+  assert.strictEqual(L.calChooseReader({ ...pk, realHelper: '/R/Resources2/maru-cal' }), 'osascript');
+  assert.strictEqual(L.calChooseReader({ ...pk, realHelper: null }), 'osascript');
+});
+t('캘린더 도우미 경로: execFile 인자 배열·셸 없음, 일정은 디스크·로그에 쓰지 않음, 읽기 함수 한 곳', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const a = main.indexOf('async function calRead('); const b = main.indexOf('let cal = { pending', a);
+  assert.ok(a > 0 && b > a);
+  const body = main.slice(a, b);
+  assert.ok(/exec\(helper, hargs,/.test(body) && /L\.calHelperArgs\(/.test(body));
+  assert.ok(!/shell\s*:|spawn\(|execSync|\/bin\/(ba|z)?sh|child_process/.test(body));
+  assert.ok(/CAL_OSA_MS/.test(body) && /CAL_HELPER_FIRST_MS/.test(body) && /CAL_HELPER_MS/.test(body));
+  assert.strictEqual((main.match(/\/usr\/bin\/osascript/g) || []).length, 1); // osascript 호출은 calRead 안 한 곳뿐
+  const cal = main.slice(main.indexOf('// ---- 캘린더(opt-in'), main.indexOf('// ---- 업그레이드'));
+  assert.ok(!/writeFile|appendFile|createWriteStream|console\.|saveProfile|logLine/.test(cal), '캘린더 구간에 파일 쓰기·로그 없음');
+  assert.ok(/calHelperOk \? L\.CAL_HELPER_MS : L\.CAL_HELPER_FIRST_MS/.test(body));
+  assert.ok(/if \(!calOn\(\)\) return[\s\S]{0,120}new AbortController\(\)[\s\S]{0,200}signal: ac\.signal/.test(body)); // 띄우기 직전 켜짐 확인 + 끄면 죽일 수 있는 신호
+  assert.ok(/for \(const ac of calAborts\) ac\.abort\(\)/.test(main));
+  const ch = main.slice(main.indexOf('function calHelperChoice('), a);
+  assert.ok(/app\.isPackaged && process\.env\.MARU_APP_CAL_HELPER !== '1'\) return null/.test(ch) && /lstatSync\(helper\)/.test(ch) && !/calPerm/.test(main));
+  assert.ok(/'status'/.test(main) && /L\.calStatusWord\(/.test(main)); // 설정 줄은 status 로 확인
+  assert.ok(/function calDropAll\(\) \{ cal = \{ pending: false, ok: false, events: \[\] \}; calMonths\.clear\(\); calDays\.clear\(\)/.test(main) && /if \(!profile \|\| !profile\.calendar\) \{ calDropAll\(\);/.test(main)); // 꺼지면 캐시 폐기
+  assert.ok(/if \(r\.perm\) c\.events = \{\}/.test(main) && /if \(r\.perm\) \{ c\.busy = false;[^\n]*c\.events = \[\]/.test(main) && /w === 'denied'\) \{ calDropAll\(\)/.test(main) && /calLastFail \? row\('cal', 'need', 'cal\.fail'/.test(main)); // 권한 없음이면 옛 일정 폐기, 요청 실패면 실패 줄
+  assert.ok(/calOn = \(\) => FAKE_DAY \|\| \(!SMOKE/.test(main));
+});
+t('캘린더 도우미: 소스는 Foundation·EventKit 만, 읽기 전용·네트워크·파일 쓰기 없음', () => {
+  const sw = fs.readFileSync(path.join(__dirname, 'native', 'maru-cal.swift'), 'utf8');
+  assert.deepStrictEqual([...sw.matchAll(/^import (\w+)/gm)].map((m) => m[1]).sort(), ['EventKit', 'Foundation']);
+  assert.ok(!/URLSession|NSURL|Socket|write\(to|FileManager|FileHandle\.standardOutput|\.save\(|saveEvent|removeEvent|EKEvent\(eventStore/.test(sw));
+  assert.ok(/requestFullAccessToEvents/.test(sw) && /requestAccess\(to: \.event\)/.test(sw) && /predicateForEvents\(withStart/.test(sw));
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+  assert.ok(pkg.build.extraResources.some((e) => e.from === 'native/bin/maru-cal' && e.to === 'native/maru-cal'));
+  assert.ok(/NSCalendarsFullAccessUsageDescription/.test(JSON.stringify(pkg.build.mac.extendInfo)) && /NSCalendarsUsageDescription/.test(JSON.stringify(pkg.build.mac.extendInfo)));
+  assert.ok(/build:native/.test(pkg.scripts.dist) && pkg.scripts['build:native']);
+  assert.ok(/native\/bin\//.test(fs.readFileSync(path.join(__dirname, '.gitignore'), 'utf8')));
+});
+t('캘린더 권한 없음 문구가 ko·en 모두 있고 렌더러가 쓴다', () => {
+  for (const l of ['ko', 'en']) { assert.ok(I.t(l, 'day.events.perm').length > 20); assert.ok(I.t(l, 'cal.ask').length > 5); }
+  assert.ok(/캘린더에서 Maru를 허용해 주세요/.test(I.t('ko', 'day.events.perm')));
+  assert.ok(/day\.events\.perm/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8')));
+});
+{
+  const bin = path.join(__dirname, 'native', 'bin', 'maru-cal');
+  const have = process.platform === 'darwin' && fs.existsSync(bin);
+  const selftest = (mode) => require('child_process').execFileSync(bin, ['selftest', mode], { encoding: 'utf8', timeout: 10000 });
+  (have ? t : (name) => console.log('skip ' + name + ' (maru-cal 없음)'))('maru-cal selftest 출력을 세 파서가 그대로 받는다(EventKit 접근 없음)', () => {
+    const now = new Date(); const y = now.getFullYear(), m = now.getMonth() + 1, d = now.getDate();
+    const today = L.parseCalendarOutput(selftest('today'), now);
+    assert.ok(today.some((e) => e.day === 'today' && e.allDay && e.title === 'Sample holiday') && today.some((e) => e.day === 'today' && e.time === '09:30' && e.title === 'Sample standup') && today.some((e) => e.day === 'tomorrow'));
+    assert.ok(today.every((e) => !/[\x00-\x1f]/.test(e.title)) && today.some((e) => e.title === 'Hostiletitlex')); // RS/US·제어 문자는 도우미가 제거
+    const raw = selftest('today'); assert.ok(raw.split('\x1e').filter(Boolean).every((r) => r.replace(/^[\r\n]+/, '').split('\x1f').length === 4));
+    const mo = L.parseCalendarMonth(selftest('month'), y, m); const ds = String(y) + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    assert.ok(mo[ds] && mo[ds].some((e) => e.title === 'Sample standup' && e.time === '09:30'));
+    const dy = L.parseCalendarDay(selftest('day'), y, m, d); assert.ok(Array.isArray(dy));
+    const st = dy.find((e) => e.title === 'Sample standup'); assert.ok(st && st.time === '09:30' && st.endTime === '10:00' && st.cal === 'Sample' && st.loc === 'Room A' && st.notes === 'Line one\nLine two');
+    assert.ok(dy.some((e) => e.allDay && e.title === 'Sample holiday' && e.endDay === ''));
+    const long = dy.find((e) => e.title.startsWith('LLLL')); assert.ok(long && long.loc.length <= 200 && long.cal.length <= 80); // 길이 상한(도우미 장소 200·이름 80, 파서도 같거나 작다)
+    const lr = selftest('day').split('\x1e').find((r) => r.includes('LLLL')).split('\x1f'); // 도우미 원문: 제목 80·이름 80·장소 200·메모 800자 이하
+    assert.deepStrictEqual([lr[3].length, lr[6].length, lr[7].length, lr[8].length], [80, 80, 200, 800]);
+    assert.ok(80 >= 60 && 800 >= 600); // 도우미 상한 >= 파서가 남기는 길이(제목 60·메모 600)
+    const many = (mode) => require('child_process').execFileSync(bin, ['selftest', mode, 'many'], { encoding: 'utf8', timeout: 10000 }).split('\x1e').filter(Boolean).length;
+    assert.strictEqual(many('day'), 60); assert.strictEqual(many('today'), 20); assert.ok(many('month') <= 372 && many('month') >= 12); // 하루 상세 60·오늘 20·달 하루 12·31*12
+    const mm = L.parseCalendarMonth(selftest('month').replace(/^/, ''), y, m); assert.ok(Object.values(mm).every((v) => v.length <= 12));
+    assert.ok(raw.length < 4000);
+    const dayRaw = selftest('day'); assert.ok(dayRaw.split('\x1e').filter(Boolean).every((r) => r.replace(/^[\r\n]+/, '').split('\x1f').length === 9));
+  });
+}
+
+// ---- 사용자가 직접 여는 하위 세션(열기 창) ----
+{
+  const TOK = 'a'.repeat(32); const PAR = '0123456789abcdef';
+  const ok = (o) => ({ parent: PAR, token: TOK, title: '', brief: '', squad: null, notify: true, ...o });
+  t('parseSubOpen: 정상값(제목·내용 비어도 됨, 팀 null)', () => {
+    assert.deepStrictEqual(L.parseSubOpen(ok({})), { ok: true, parent: PAR, token: TOK, title: '', brief: '', squad: null, notify: true });
+    const r = L.parseSubOpen(ok({ title: '  api 서버  ', brief: '첫 줄\r\n둘째 줄\t탭\u0007', squad: 'dev', notify: false }));
+    assert.deepStrictEqual([r.ok, r.title, r.brief, r.squad, r.notify], [true, 'api 서버', '첫 줄\n둘째 줄\t탭', 'dev', false]);
+  });
+  t('parseSubOpen: 제목 40자·내용 4000자 경계(코드포인트), 서식·bidi 문자는 지움', () => {
+    assert.strictEqual(L.parseSubOpen(ok({ title: '가'.repeat(40) })).ok, true);
+    assert.deepStrictEqual(L.parseSubOpen(ok({ title: '가'.repeat(41) })), { ok: false, reason: 'title' });
+    assert.strictEqual(L.parseSubOpen(ok({ title: '😀'.repeat(40) })).ok, true);
+    assert.strictEqual(L.parseSubOpen(ok({ brief: '가'.repeat(4000) })).ok, true);
+    assert.deepStrictEqual(L.parseSubOpen(ok({ brief: '가'.repeat(4001) })), { ok: false, reason: 'brief' });
+    assert.strictEqual(L.parseSubOpen(ok({ title: 'a\u202Eb\u200Bc' })).title, 'abc');
+    assert.deepStrictEqual(L.parseSubOpen(ok({ brief: 'x'.repeat(100000) })), { ok: false, reason: 'brief' });
+    assert.strictEqual(L.parseSubOpen(ok({ brief: '   \n\t ' })).brief, ''); // 공백뿐이면 빈 내용(전달 파일 없음)
+  });
+  t('parseSubOpen: 모양·타입이 틀리면 invalid(경로 키·추가 키·프로토타입 포함)', () => {
+    const bad = (o) => assert.deepStrictEqual(L.parseSubOpen(o), { ok: false, reason: 'invalid' });
+    bad(null); bad('x'); bad([]); bad(42); bad({});
+    bad({ ...ok({}), path: '/tmp' }); bad({ ...ok({}), cwd: '/tmp' }); bad({ ...ok({}), extra: 1 });
+    const miss = ok({}); delete miss.notify; bad(miss);
+    bad(ok({ parent: 'xyz' })); bad(ok({ parent: PAR.toUpperCase() })); bad(ok({ token: 'a'.repeat(31) })); bad(ok({ token: 'A'.repeat(32) })); bad(ok({ token: '../'.repeat(11) }));
+    bad(ok({ title: 5 })); bad(ok({ brief: null })); bad(ok({ notify: 'yes' })); bad(ok({ notify: 1 }));
+    for (const sq of ['Dev', '', ' dev', 'dev\n', '../x', 'a'.repeat(21), 7, {}, undefined]) bad(ok({ squad: sq }));
+    bad(JSON.parse('{"__proto__":{"x":1},"parent":"0123456789abcdef","token":"' + TOK + '","title":"","brief":"","squad":null,"notify":true}'));
+  });
+  t('초안 토큰: 만료(10분)·다른 부모·재사용 거부', () => {
+    const store = new Map(); const real = '/Users/someone/work/api'; const t0 = 1_000_000;
+    assert.strictEqual(L.subDraftAdd(store, { token: TOK, parentId: PAR, real, display: '~/work/api', nowMs: t0 }), true);
+    const c = L.subDraftCheck(store, TOK, PAR, t0 + 1000); assert.ok(c.ok && c.draft.real === real && c.draft.display === '~/work/api');
+    assert.deepStrictEqual(L.subDraftCheck(store, TOK, 'fedcba9876543210', t0 + 1000), { ok: false, reason: 'invalid' }); // 다른 부모
+    assert.deepStrictEqual(L.subDraftCheck(store, 'b'.repeat(32), PAR, t0), { ok: false, reason: 'invalid' }); // 모르는 토큰
+    assert.deepStrictEqual(L.subDraftCheck(store, 'zz', PAR, t0), { ok: false, reason: 'invalid' });
+    assert.ok(L.subDraftCheck(store, TOK, PAR, t0 + L.SUB_DRAFT_MS).ok); // 정확히 10분은 아직 유효
+    assert.deepStrictEqual(L.subDraftCheck(store, TOK, PAR, t0 + L.SUB_DRAFT_MS + 1), { ok: false, reason: 'expired' });
+    assert.strictEqual(store.size, 0); // 만료된 것은 치운다
+    L.subDraftAdd(store, { token: TOK, parentId: PAR, real, display: 'd', nowMs: t0 });
+    assert.strictEqual(L.subDraftUse(store, TOK), true);
+    assert.deepStrictEqual(L.subDraftCheck(store, TOK, PAR, t0 + 5), { ok: false, reason: 'invalid' }); // 한 번 쓰면 재사용 불가
+  });
+  t('초안 보관소: 부모당 하나·개수 상한·나쁜 입력 거부·만료분 정리', () => {
+    const store = new Map(); const real = '/Users/someone/work/api'; const mk = (c, p, now) => L.subDraftAdd(store, { token: c.repeat(32), parentId: p, real, display: 'd', nowMs: now });
+    assert.ok(mk('a', PAR, 0)); assert.ok(mk('b', PAR, 1)); // 같은 부모가 다시 고르면 이전 토큰은 무효
+    assert.strictEqual(L.subDraftCheck(store, 'a'.repeat(32), PAR, 2).ok, false); assert.ok(L.subDraftCheck(store, 'b'.repeat(32), PAR, 2).ok);
+    for (let i = 0; i < 12; i++) assert.ok(mk('0123456789abcdef'[i], i.toString(16).padStart(16, '0'), 10 + i));
+    assert.ok(store.size <= L.SUB_DRAFT_MAX);
+    assert.strictEqual(L.subDraftAdd(store, { token: 'x', parentId: PAR, real, display: 'd', nowMs: 0 }), false);
+    assert.strictEqual(L.subDraftAdd(store, { token: TOK, parentId: PAR, real: 'rel/path', display: 'd', nowMs: 0 }), false); // 절대 경로가 아니면 보관하지 않는다
+    assert.strictEqual(L.subDraftAdd(store, { token: TOK, parentId: PAR, real: '/a/../b', display: 'd', nowMs: 0 }), false);
+    assert.strictEqual(L.subDraftAdd({}, { token: TOK, parentId: PAR, real, display: 'd', nowMs: 0 }), false);
+    const s2 = new Map(); L.subDraftAdd(s2, { token: TOK, parentId: PAR, real, display: 'd', nowMs: 0 }); L.subDraftAdd(s2, { token: 'c'.repeat(32), parentId: 'fedcba9876543210', real, display: 'd', nowMs: L.SUB_DRAFT_MS + 5 });
+    assert.deepStrictEqual([...s2.keys()], ['c'.repeat(32)]); // 새로 더할 때 만료된 것은 치운다
+  });
+  t('subLimitCheck: 마루가 요청하는 경로와 같은 한도·순서(하위 수 → 작업 공간 수 → 분당 → 하루)', () => {
+    const base = { childCount: 0, wsCount: 1, accepted: [], monoMs: 100000, launches: [], nowMs: 1.8e12 };
+    assert.strictEqual(L.subLimitCheck(base), null);
+    assert.strictEqual(L.subLimitCheck({ ...base, childCount: L.CHILD_MAX }), 'children-max');
+    assert.strictEqual(L.subLimitCheck({ ...base, wsCount: L.WS_MAX }), 'ws-max');
+    assert.strictEqual(L.subLimitCheck({ ...base, childCount: L.CHILD_MAX, wsCount: L.WS_MAX }), 'children-max');
+    const acc = Array.from({ length: L.CHILD_RATE_MAX }, (_, i) => 100000 - i * 1000);
+    assert.strictEqual(L.subLimitCheck({ ...base, accepted: acc }), 'rate');
+    assert.strictEqual(L.subLimitCheck({ ...base, accepted: acc.map((x) => x - L.CHILD_RATE_MS) }), null); // 1분이 지나면 풀린다
+    assert.strictEqual(L.subLimitCheck({ ...base, launches: Array.from({ length: L.CHILD_DAY_MAX }, (_, i) => 1.8e12 - i) }), 'budget');
+    assert.strictEqual(L.subLimitCheck({ ...base, childCount: NaN }), 'children-max'); // 모르면 막는다
+    // 같은 한도 상수를 decideChildRequest 도 쓴다(숫자가 따로 놀지 않게 상수 이름으로 확인)
+    const src = fs.readFileSync(path.join(__dirname, 'lib.js'), 'utf8'); const dc = src.slice(src.indexOf('function decideChildRequest'), src.indexOf('function childLaunchCheck'));
+    assert.ok(/CHILD_MAX/.test(dc) && /WS_MAX/.test(dc) && /CHILD_RATE_MAX/.test(dc) && /budgetOk/.test(dc));
+  });
+  t('마루에게 알리기 한 줄: 고정 문장 + 정리한 제목·폴더, 개행·제어 문자 없음', () => {
+    const trl = (lang) => (k, p) => I.t(lang, k, p);
+    assert.strictEqual(L.subNoticeLine(trl('ko'), 'api-server', '~/work/api-server'), '하위 세션을 직접 열었어: api-server (~/work/api-server). 보고가 오면 이어서 봐 줘.');
+    assert.strictEqual(L.subNoticeLine(trl('en'), 'api-server', '~/work/api-server'), 'I opened a sub-session myself: api-server (~/work/api-server). Please pick it up when its report comes in.');
+    const dirty = L.subNoticeLine(trl('ko'), 'a\nb\r\u001b[2Jc\u202Ed', '~/x\n/y\u0007');
+    assert.ok(!/[\r\n\u0000-\u001f\u202E]/.test(dirty), JSON.stringify(dirty)); assert.ok(dirty.startsWith('하위 세션을'));
+    assert.strictEqual(L.subNoticeLine(trl('ko'), '', '~/x'), ''); assert.strictEqual(L.subNoticeLine(trl('ko'), 'a', '  \n '), ''); assert.strictEqual(L.subNoticeLine(null, 'a', 'b'), '');
+    assert.ok([...L.subNoticeLine(trl('en'), 'x'.repeat(500), '/y'.repeat(500))].length < 400); // 길이 상한
+    assert.ok(L.isSafeQuestStart(L.subNoticeLine(trl('ko'), '1 번', '~/x')) && L.isSafeQuestStart(L.subNoticeLine(trl('en'), '/rm', '~/x'))); // 제목이 앞에 오지 않으므로 숫자·/ 로 시작하는 제목도 안전
+    assert.strictEqual(L.cleanNoticePart('가'.repeat(100), 10).length, 10);
+  });
+  t('작업 공간 기록의 by: 사용자가 연 하위 세션만 저장·복원, 그 밖의 값은 버림', () => {
+    const cwd = '/Users/someone/work/api'; const ID1 = '1111111111111111'; const ID2 = '2222222222222222';
+    const list = [{ id: ID1, cwd: '/Users/someone/work/maru', title: 'maru' }, { id: ID2, cwd, title: 'api', parentId: ID1, origin: 'child', by: 'user' }];
+    const keep = L.workspacesToSave(list, ID1, false);
+    assert.strictEqual(keep.list[1].by, 'user'); assert.strictEqual(keep.list[0].by, undefined);
+    const raw = JSON.parse(L.workspacesJson(keep.list, keep.active)); assert.strictEqual(raw.workspaces[1].by, 'user');
+    const back = L.normalizeWorkspaces(raw, { exists: () => true }); assert.strictEqual(back.list[1].by, 'user'); assert.strictEqual(back.list[1].origin, 'child'); assert.ok(!('by' in back.list[0]));
+    const norm = (e) => L.normalizeWorkspaces({ workspaces: [{ cwd, title: 't', ...e }], active: 0 }, { exists: () => true }).list[0];
+    assert.ok(!('by' in norm({ origin: 'child', by: 'maru' }))); assert.ok(!('by' in norm({ origin: 'child', by: true }))); assert.ok(!('by' in norm({ origin: 'child' })));
+    assert.ok(!('by' in norm({ by: 'user' }))); // 하위 세션이 아니면 의미가 없다
+    assert.strictEqual(norm({ origin: 'child', by: 'user' }).by, 'user');
+    assert.ok(!('by' in L.workspacesToSave([{ id: ID1, cwd, title: 'x', by: 'user' }], ID1, false).list[0])); // 하위 세션이 아니면 저장하지 않는다
+    assert.ok(!('by' in L.workspacesToSave([{ id: ID1, cwd, title: 'x', origin: 'child', by: 'maru' }], ID1, false).list[0]));
+  });
+  t('childPromptText: 사용자가 연 세션은 별도 머리말, 마루의 요청은 예전과 같음', () => {
+    for (const lang of ['ko', 'en']) {
+      assert.strictEqual(L.childPromptText(lang, '본문'), L.CHILD_HEADER[lang] + '\n\n본문');
+      assert.strictEqual(L.childPromptText(lang, '본문', 'user'), L.CHILD_HEADER_USER[lang] + '\n\n본문');
+      assert.notStrictEqual(L.CHILD_HEADER_USER[lang], L.CHILD_HEADER[lang]);
+      assert.strictEqual(L.childPromptText(lang, '  \n', 'user'), ''); // 비면 프롬프트가 없다(전달 파일도 없다)
+    }
+    assert.strictEqual(L.childPromptText('ko', 'x', 'maru'), L.childPromptText('ko', 'x'));
+  });
+  t('i18n: 열기 창 문구가 ko·en 모두 있고 자리표시자가 같다', () => {
+    const keys = Object.keys(I.STR.ko).filter((k) => k.startsWith('sub.') || k === 'menu.newSub' || k === 'child.note.subskip');
+    assert.ok(keys.length >= 30);
+    for (const k of keys) { assert.ok(k in I.STR.en, k); const ph = (s) => (String(s).match(/\{\w+\}/g) || []).sort().join(','); assert.strictEqual(ph(I.STR.ko[k]), ph(I.STR.en[k]), k); }
+    assert.strictEqual(I.STR.ko['sub.open.aria'], '하위 세션 열기'); assert.strictEqual(I.STR.en['sub.open.aria'], 'Open a sub-session');
+    assert.strictEqual(I.STR.ko['sub.folder.pick'], '폴더 선택…'); assert.strictEqual(I.STR.ko['sub.notify'], '마루에게 알리기');
+    assert.strictEqual(I.STR.ko['sub.notify.hint'], '마루의 입력줄에 이 세션을 열었다는 한 줄을 넣습니다. 보내려면 Enter를 누르세요.');
+    // main 이 돌려주는 모든 이유에 문구가 있다
+    for (const r of ['invalid', 'title', 'brief', 'dir', 'maru', 'expired', 'parent', 'children-max', 'ws-max', 'rate', 'budget', 'start', 'squad', 'busy', 'fail', 'nofolder']) assert.ok(('sub.err.' + r) in I.STR.ko && ('sub.err.' + r) in I.STR.en, r);
+  });
+  t('소스 구조: 렌더러는 경로를 보내지 않고, main 은 보낸 쪽·인자를 검증하며, 마루 요청과 같은 launchChild 로 만든다', () => {
+    const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+    const handler = (name) => { const i = main.indexOf("ipcMain.handle('" + name + "'"); assert.ok(i > 0, name); return main.slice(i, main.indexOf('\nipcMain.handle(', i + 10) > 0 ? Math.min(main.indexOf('\nipcMain.handle(', i + 10), main.indexOf('\nlet reqScanning', i)) : main.length); };
+    for (const name of ['sub:prepare', 'sub:pick-folder', 'sub:open']) assert.ok(/^[^\n]*\n\s*if \(!fromMain\(e\)\) return \{ ok: false, reason: 'invalid' \};/.test(handler(name)), name + ' 은 첫 줄에서 보낸 쪽을 검사한다');
+    const open = handler('sub:open');
+    assert.ok(/L\.parseSubOpen\(payload\)/.test(open) && /L\.subDraftCheck\(/.test(open) && /L\.subDraftUse\(/.test(open) && /L\.subLimitCheck\(/.test(open) && /L\.childLaunchCheck\(/.test(open));
+    assert.ok(/L\.consentChoice\(L\.squadChoices\(await readSquadsNow\(\)\), p\.squad\)/.test(open), '팀은 main 이 직접 읽은 목록과 다시 대조');
+    assert.ok(/launchChild\(par, \{ title, prompt: p\.brief, project: null \}, real, 'ui', squad, 'user'\)/.test(open), '같은 launchChild, by=user');
+    assert.ok(/subParent\(p\.parent\)/.test(open) && /maruEligible/.test(main.slice(main.indexOf('function subParent'), main.indexOf('function subParent') + 200)), '부모 자격은 마루 요청과 같은 maruEligible');
+    assert.ok(/launchChild\(par, d\.req, d\.real, item\.name, ans\.squad\)/.test(main), '마루 요청 경로도 같은 함수');
+    assert.strictEqual(main.split('function launchChild(').length, 2); // 만드는 함수는 하나뿐
+    assert.ok(!/addWorkspace\(/.test(open), 'sub:open 은 addWorkspace 를 직접 부르지 않는다');
+    assert.ok(/writePrompt\(par, line\)/.test(open) && /agentBusy\(par\)/.test(open) && /par\.bracketed/.test(open) && /kind: 'subskip'/.test(open), '알림 줄: squads:request-create 와 같은 준비 조건, 못 하면 조용히 건너뜀');
+    assert.ok(!/\\r|\\n|'\\x1b\[200~'/.test(open.replace(/\/\/[^\n]*/g, '')), '알림은 writePrompt(붙여넣기 감싸기·Enter 없음)로만');
+    const pick = handler('sub:pick-folder');
+    assert.ok(/dialog\.showOpenDialog/.test(pick) && /realDir\(r\.filePaths\[0\]\)/.test(pick) && /L\.validAbsDir\(real\)/.test(pick) && /defaultPath: os\.homedir\(\)/.test(pick) && !/defaultPath: [^,]*w\.cwd/.test(pick) && /isMaruRoot\(real\)/.test(pick), '폴더는 main 의 선택창, 마루 요청과 같은 realDir 검증, 처음 위치는 홈 폴더, 마루 자신의 폴더는 거절');
+    assert.ok(/isMaruRoot\(real\)/.test(open) && open.indexOf('L.subDraftUse(') < open.indexOf('launchChild(') && open.indexOf('launchChild(') < open.indexOf('subNoticeLine'), '열기: 마루 폴더 재검사, 토큰은 만들기 전에 쓰고, 알림은 만든 뒤');
+    assert.ok(/return \{ ok: true, token, display: subDisplay\(real\) \}/.test(pick) && !/return \{[^}]*\breal\b[^}]*\}/.test(pick.replace(/return \{ ok: true, token, display: subDisplay\(real\) \}/g, '')), '렌더러에는 토큰과 표시용 문자열만');
+    // 렌더러·preload 는 경로를 주고받지 않는다
+    const sbSrc = rd.slice(rd.indexOf('// ---- 하위 세션 직접 열기'), rd.indexOf('// ---- 스쿼드 만들기: 글을 받아'));
+    assert.ok(sbSrc.length > 2000 && !/filePaths|webUtils|\.path\b|showOpenDialog|showDirectoryPicker|webkitdirectory|type = 'file'/.test(sbSrc));
+    assert.ok(/subOpen\(\{ parent: sbParent, token: sbToken, title: [^,]+, brief: [^,]+, squad: sbSquad, notify: [^}]+\}\)/.test(sbSrc), '열기에는 부모 id·토큰·제목·내용·팀·알림 여부만');
+    const preOpen = pre.slice(pre.indexOf('  subOpen:'), pre.indexOf('  onOpenSub:'));
+    assert.ok(/parent:.*token:.*title:.*brief:.*squad:.*notify:/s.test(preOpen) && !/path|cwd|folder/i.test(preOpen.replace(/\/\/.*/g, '')));
+    assert.ok(/ipcRenderer\.invoke\('sub:pick-folder', String\(parentId\)/.test(pre));
+    assert.ok(/textContent/.test(sbSrc) && !/innerHTML|insertAdjacentHTML/.test(sbSrc), '디스크·main 에서 온 값은 textContent 로만');
+    assert.ok(/menu\.newSub/.test(main) && /ui:open-sub/.test(main));
+  });
+  t('launchChild: 맡길 내용이 비면 전달 파일을 만들지 않고, 마루 요청은 예전 그대로', () => {
+    const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+    const lc = main.slice(main.indexOf('function launchChild('), main.indexOf('const PREFILL_TIMEOUT_MS'));
+    assert.ok(/const text = L\.childPromptText\(curLang\(\), req\.prompt, by\)/.test(lc));
+    assert.ok(/if \(text && claudeWrapper\(\)\) file = L\.writeChildPromptFile/.test(lc) && /L\.childBriefPlan\(\{ hasFile: !!file, text \}\)/.test(lc) && /plan\.pasteNow/.test(lc));
+    assert.ok(/by \}\);\n/.test(lc) || /squad: claudeWrapper\(\) \? squad : null, by \}/.test(lc), 'by 를 작업 공간 기록에 남긴다');
+    assert.ok(/by: \(x\.origin === 'child' \|\| L\.validWsId\(x\.parentId\)\) && x\.by === 'user' \? 'user' : null/.test(main), 'addWorkspace 가 하위 세션일 때만 by 를 받는다');
+    assert.ok(/by: e\.by \}\)/.test(main) && /squad: w\.squad, by: w\.by \}/.test(main), '복원·저장 양쪽에 by');
+  });
+}
 
 (async () => {
   for (const f of pending) await f();

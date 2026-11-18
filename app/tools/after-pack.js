@@ -31,6 +31,9 @@ exports.default = async function afterPack(ctx) {
       console.log('  • stripped', path.relative(unpacked, f));
     }
   }
+  // 캘린더 도우미(Resources/native/maru-cal): 번들 서명 전에 개별 ad-hoc 서명(번들 서명은 Resources 안 실행 파일을 따로 서명하지 않는다)
+  const helper = path.join(bundle, 'Contents', 'Resources', 'native', 'maru-cal');
+  if (fs.existsSync(helper)) execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', helper], { stdio: 'inherit' });
   execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--timestamp=none', bundle], { stdio: 'inherit' });
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'inherit' }); // 실패하면 예외 -> 빌드 실패
   console.log('  • ad-hoc signed and verified', bundle);
