@@ -69,6 +69,10 @@ window.MARU_COPY = {
     "s2.doc.b": "Goals, decisions, open questions and current state live in one document that Maru and every project session read, so they work from the same facts. It is a plain Markdown file, so you can read and edit it too.",
     "s2.day.t": "A calendar to look back through.",
     "s2.day.b": "Pick a day and see what was done, decided and left open, grouped by project. Overnight, Maru also writes a short note for recent days, built only from that day's journal. If you turn on Calendar access, that day's events sit beside it; they stay in memory and are never saved.",
+    "s2.app.t": "Every session in one window.",
+    "s2.app.b": "The list on the left shows Maru and the project sessions with their status. A session with an answer you have not looked at yet gets an orange dot, which clears when you open it. Drag to reorder, and move between sessions, collapse groups or jump to the start or end of your prompt from the keyboard.",
+    "s2.skill.t": "Skills arrive as proposals, with checks.",
+    "s2.skill.b": "A proposed skill comes with checks for whether the job is done, and only checks backed by evidence are written, such as a command result or a comparison against the source. When you ask for a fix to something a skill produced, the correction is proposed as an edit to that skill. Nothing is installed before you approve it.",
     "s2.foot": "The structure borrows from how human memory is described — working, short-term and long-term memory, and consolidation during sleep — and from published research on agent memory.",
 
     "s3.label": "03 — What you get",
@@ -434,6 +438,10 @@ window.MARU_COPY = {
     "s2.doc.b": "목표, 결정, 아직 정하지 않은 것, 현재 상태가 한 문서에 담기고, Maru와 모든 프로젝트 세션이 그 문서를 읽습니다. 그래서 모두 같은 사실을 바탕으로 일합니다. 일반 Markdown 파일이라 직접 읽고 고칠 수도 있습니다.",
     "s2.day.t": "달력으로 돌아보기.",
     "s2.day.b": "날짜를 고르면 그날 한 일, 결정, 남은 일이 프로젝트별로 보입니다. 밤사이에는 최근 며칠의 하루 회고를 짧은 글로 적어 둡니다. 그날 일지에 적힌 것만 근거로 씁니다. 캘린더 접근을 켜면 그날 일정도 함께 보이고, 일정은 메모리에만 두고 저장하지 않습니다.",
+    "s2.app.t": "모든 세션을 한 화면에서.",
+    "s2.app.b": "왼쪽 목록에 Maru와 프로젝트 세션이 상태와 함께 보입니다. 아직 보지 않은 답변이 있는 세션에는 주황 점이 붙고, 열면 사라집니다. 순서는 끌어서 바꾸고, 세션 이동과 묶음 접기, 입력 중인 글의 맨 앞·끝 이동은 키보드로 합니다.",
+    "s2.skill.t": "스킬은 확인 항목과 함께 제안됩니다.",
+    "s2.skill.b": "제안된 스킬에는 일이 끝났는지 확인할 항목이 붙습니다. 실행 결과나 원본과의 대조처럼 증거로 확인되는 것만 적습니다. 스킬로 만든 결과를 고쳐 달라고 하면, 그 교정은 그 스킬의 수정안으로 제안됩니다. 어느 것도 승인하기 전에는 설치되지 않습니다.",
     "s2.foot": "이 구조는 사람의 기억을 설명하는 방식(작업 기억, 단기 기억, 장기 기억, 수면 중 정리)과 에이전트 기억에 관한 공개 연구에서 빌려 왔습니다.",
 
     "s3.label": "03 — 할 수 있는 일",
