@@ -133,6 +133,9 @@ check "consolidate 자리표시자 집합 동일" ph "$REPO/prompts/consolidate-
 R=$(cat "$REPO/prompts/reflect-prompt.en.md"); C=$(cat "$REPO/prompts/consolidate-prompt.en.md")
 checkall "영어 reflect 에 표지가 그대로 있음" has "$R" 'exactly `No changes`' '&&' has "$R" '`done`, `decision`, `todo`' '&&' has "$R" '`<tag>|0||`' '&&' has "$R" '`[한 일]`' '&&' has "$R" '`[결정]`' '&&' has "$R" '`[남은 일]`' '&&' has "$R" '**Why:**' '&&' has "$R" '**How to apply:**' '&&' has "$R" '- [Title](slug.md) — hook' '&&' has "$R" '<tag>|<importance>|<title>|<prompt>' '&&' has "$R" '<tag>|<slug>|<title>'
 checkall "영어 consolidate 에 표지가 그대로 있음" has "$C" 'exactly `No changes`' '&&' has "$C" 'Promoted: file1.md, file2.md' '&&' has "$C" 'source: journal YYYY-MM-DD' '&&' has "$C" '`[결정]`' '&&' has "$C" '`[남은 일]`' '&&' has "$C" '`<tag>|0||`' '&&' has "$C" 'delete.txt'
+KOP=$(cat "$REPO/prompts/reflect-prompt.md")
+checkall "ko reflect 에 완료 확인·교정 행선지·총괄 확인 규칙 토큰" has "$KOP" '## 완료 확인' '&&' has "$KOP" '확인하지 못한 항목은 통과로 치지 말고' '&&' has "$KOP" '교정의 행선지' '&&' has "$KOP" '교정은 스킬 수정으로' '&&' has "$KOP" '[스킬 /이름]' '&&' has "$KOP" '`[도구 Skill: …]`' '&&' has "$KOP" '직접 확인하는 단계'
+checkall "en reflect 에 같은 규칙 토큰(기계 토큰은 글자 그대로)" has "$R" '## Done checks' '&&' has "$R" '## 완료 확인' '&&' has "$R" 'not counted as passed' '&&' has "$R" 'Where corrections go' '&&' has "$R" 'Corrections become skill edits' '&&' has "$R" '`[스킬 /name]`' '&&' has "$R" '`[도구 Skill: …]`' '&&' has "$R" 'checks those criteria itself'
 check "영어 프롬프트가 영어로 쓰라고 지시" sh -c 'grep -q "write everything you produce in English" "$1/prompts/reflect-prompt.en.md" && grep -q "write everything you produce in English" "$1/prompts/consolidate-prompt.en.md"' _ "$REPO"
 check "영어 프롬프트에 절대 경로(홈)가 없음" sh -c '! grep -q "/Users/\|/home/" "$1/prompts/reflect-prompt.en.md" "$1/prompts/consolidate-prompt.en.md"' _ "$REPO"
 

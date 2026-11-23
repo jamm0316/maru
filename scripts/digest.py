@@ -3,7 +3,7 @@
 사용: digest.py <transcript> <out> [--from-line N]
 N번째 줄 이후(앞의 N줄은 이미 처리됨)만 다룬다. stdout: "<사용자 턴 수> <전체 줄 수>"
 """
-import json, sys
+import json, re, sys
 
 args = sys.argv[1:]
 from_line = 0
@@ -13,11 +13,15 @@ if "--from-line" in args:
     del args[i:i + 2]
 src, out = args[0], args[1]
 CLIP = 2000
+CMD_NAME = re.compile(r"<command-name>([^<>\n]{1,80})</command-name>")
+SKILL_NAME = re.compile(r"^/?[a-z0-9][a-z0-9:_-]{0,60}$")
 lines, cwd, turns, total = [], "", 0, 0
 
 def clip(s, n=CLIP):
     s = s.strip()
-    return s if len(s) <= n else s[:n] + f"...[{len(s)-n}자 생략]"
+    s = s if len(s) <= n else s[:n] + f"...[{len(s)-n}자 생략]"
+    # 둘째 줄부터 들여쓴다: 붙여넣은 글 안의 `[스킬 /…]`·`[사용자] …` 같은 줄이 다이제스트의 표지 줄로 보이지 않게(표지는 줄 맨 앞에서만 시작한다)
+    return s.replace("\r", "").replace("\n", "\n  ")
 
 with open(src, encoding="utf-8", errors="replace") as f:
     for idx, raw in enumerate(f):
@@ -50,6 +54,10 @@ with open(src, encoding="utf-8", errors="replace") as f:
                 txt = b["text"]
                 if t == "user":
                     if txt.lstrip().startswith(("<system-reminder", "<command-", "<local-command")):
+                        # 슬래시 명령은 이름만 남긴다(인자·본문은 버린다). 스킬 호출과 내장 명령은 같은 형식이라 구분하지 않는다.
+                        m = CMD_NAME.search(txt) if txt.lstrip().startswith("<command-") else None
+                        if m and SKILL_NAME.match(m.group(1).strip()):
+                            lines.append(f"[스킬 /{m.group(1).strip().lstrip('/')}]")
                         continue
                     turns += 1
                     lines.append(f"[사용자] {clip(txt)}")
