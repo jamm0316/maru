@@ -4,7 +4,7 @@
 
 위치: 저장소 내장 squads/<slug>/ (추적) 와 개인 data/squads/<slug>/ (비추적). 같은 slug 면 개인 것이 우선.
 에이전트 이름은 셸이 만든다: sq-<slug>-lead, sq-<slug>-<role> (파일 안의 name 은 무시). 이 접두가 소속의 근거다.
-스쿼드 파일(모델·사용자가 쓴 데이터)은 믿지 않는다: 형식·크기·문자·도구를 엄격히 검사하고, 고정 머리말은 코드에 둔다."""
+스쿼드 파일(모델·사용자가 쓴 데이터)은 믿지 않는다: 형식·크기·문자·도구·스킬(팀원만, 개인 스킬 폴더에 있는 것 최대 3개)을 엄격히 검사하고, 고정 머리말은 코드에 둔다."""
 import hashlib
 import json
 import os
@@ -55,6 +55,11 @@ NAME_MAX = 24
 SQUAD_DESC_MAX = 200
 AGENT_DESC_MAX = 300
 TAGS_MAX = 5
+SKILL_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+SKILLS_PER_MEMBER_MAX = 3
+SKILL_FILE_MAX = 32768      # SKILL.md 하나의 크기 상한(바이트)
+SKILLS_BYTES_MAX = 49152    # 팀원 하나에 싣는 스킬 본문 합계 상한(바이트)
+SKILLS_DIR = os.path.abspath(os.environ.get("MARU_SKILLS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "skills"))   # 개인 스킬만(어느 작업 폴더에서나 보인다)
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,19}")
 MODELS = ("haiku", "sonnet", "opus", "inherit")
 TOOLS_OK = ("Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebFetch", "WebSearch", "Agent", "Skill", "TodoWrite", "NotebookEdit")
@@ -306,6 +311,37 @@ def parse_tools(raw, rel, warns):
     return out
 
 
+def parse_skills(raw, rel, is_lead, warns):
+    """팀원의 skills 목록 -> 실을 스킬 이름 목록. 문제가 있어도 Reject 하지 않고 그 스킬만 빼며 경고한다(스킬 하나 때문에 스쿼드가 꺼지면 안 된다).
+    총괄(--agent 메인 스레드)에는 스킬을 미리 실을 수 없어 무시한다."""
+    raw = raw.strip()
+    if is_lead:
+        if raw: warns.append("%s: 총괄은 스킬을 미리 실을 수 없어 skills 무시" % rel)
+        return []
+    if raw.startswith("[") and raw.endswith("]"): raw = raw[1:-1]
+    out, total = [], 0
+    for t in (x.strip().strip("\"'") for x in raw.split(",")):
+        if not t: continue
+        if not SKILL_RE.fullmatch(t):
+            warns.append("%s: 스킬 이름 '%s' 형식 오류 제외" % (rel, t[:40])); continue
+        if t in out: continue
+        p = os.path.join(SKILLS_DIR, t, "SKILL.md")
+        try:
+            st = os.stat(p)
+            if not stat.S_ISREG(st.st_mode): raise OSError()
+        except OSError:
+            warns.append("%s: 스킬 '%s' 가 지금은 설치돼 있지 않아 제외(나중에 설치하면 실린다)" % (rel, t)); continue
+        if len(out) >= SKILLS_PER_MEMBER_MAX:
+            warns.append("%s: 스킬은 팀원당 %d개까지라 '%s' 제외" % (rel, SKILLS_PER_MEMBER_MAX, t)); continue
+        if st.st_size > SKILL_FILE_MAX:
+            warns.append("%s: 스킬 '%s' 가 %d바이트를 넘어 제외" % (rel, t, SKILL_FILE_MAX)); continue
+        if total + st.st_size > SKILLS_BYTES_MAX:
+            warns.append("%s: 스킬 합계가 %d바이트를 넘어 '%s' 제외" % (rel, SKILLS_BYTES_MAX, t)); continue
+        total += st.st_size
+        out.append(t)
+    return out
+
+
 def parse_agent(data, rel, is_lead, squad_name, warns, risks):
     text = decode_clean(data, rel)
     meta, body = parse_md(text, rel)
@@ -328,8 +364,9 @@ def parse_agent(data, rel, is_lead, squad_name, warns, risks):
     for t in tools:
         if t in RISKY_TOOLS:
             risks.append("%s: %s 도구에 %s 가 있음" % (rel, "총괄" if is_lead else "팀원", t))
+    skills = parse_skills(meta.get("skills", ""), rel, is_lead, warns)   # 위험 신호로 세지 않는다: 사용자가 직접 설치한 개인 스킬이고, 확인 창·목록의 팀원 줄에 이름을 보인다
     risks.extend(find_risks(rel, desc + "\n" + body))
-    return {"description": desc, "model": model, "tools": tools, "body": body}
+    return {"description": desc, "model": model, "tools": tools, "skills": skills, "body": body}
 
 
 def load_squad(path, slug):
@@ -411,7 +448,7 @@ def session_name(slug):
 
 
 def build_agents(sq):
-    """-> [(이름, {description, prompt, tools[, model]})]  총괄 먼저. 고정 머리말을 코드에서 붙인다(언어는 LANG: ko|en, 같은 보장)."""
+    """-> [(이름, {description, prompt, tools[, model][, skills(팀원만)]})]  총괄 먼저. 고정 머리말을 코드에서 붙인다(언어는 LANG: ko|en, 같은 보장)."""
     en = LANG == "en"
     s, nm = sq["slug"], sanitize_embed(sq["name"])
     names = ", ".join("sq-%s-%s" % (s, m["role"]) for m in sq["members"])
@@ -446,6 +483,7 @@ def build_agents(sq):
             mdesc = "[%s 스쿼드 팀원 · 총괄 전용, 마루가 직접 부르지 않는다] %s" % (nm, sanitize_embed(m["description"]))
         e = {"description": mdesc, "prompt": head + m["body"], "tools": m["tools"]}
         if m["model"] != "inherit": e["model"] = m["model"]
+        if m["skills"]: e["skills"] = list(m["skills"])   # 서브에이전트로 불리는 팀원에만 된다(총괄·세션 진입점은 메인 스레드라 싣지 않는다)
         out.append((an, e))
     return out
 
@@ -563,7 +601,7 @@ def cmd_meta(args):
         squads.append({"slug": s, "name": sq["name"], "description": sq["description"],
                        "source": "personal" if sq["source"] == "개인" else "builtin",
                        "lead": {"agent": "sq-%s-lead" % s, "model": sq["lead"]["model"]},
-                       "members": [{"role": m["role"], "agent": "sq-%s-%s" % (s, m["role"]), "model": m["model"]} for m in sq["members"]]})
+                       "members": [{"role": m["role"], "agent": "sq-%s-%s" % (s, m["role"]), "model": m["model"], "skills": list(m["skills"])} for m in sq["members"]]})
     skipped = []
     for target, why in excluded:
         skipped.append({"slug": target.split("/", 1)[1] if "/" in target else "", "reason": why})
@@ -594,7 +632,7 @@ def describe(sq, out):
     if sq["tags"]: out.append("  태그: %s" % ", ".join(sq["tags"]))
     for n, e in build_agents(sq):
         if "tools" not in e: continue   # 세션 진입점(sq-<slug>-session)은 멤버가 아니라서 목록에 올리지 않는다
-        out.append("  %s  (%s)  tools: %s" % (n, e.get("model", "inherit"), ", ".join(e["tools"])))
+        out.append("  %s  (%s)  tools: %s%s" % (n, e.get("model", "inherit"), ", ".join(e["tools"]), (" · skills: " + ", ".join(e["skills"])) if e.get("skills") else ""))
 
 
 def cmd_list(args):
@@ -640,7 +678,7 @@ def check_json(path, slug):
         return 1
     out = {"ok": True, "slug": slug, "name": st(sq["name"], NAME_MAX), "description": st(sq["description"], SQUAD_DESC_MAX),
            "lead": {"model": sq["lead"]["model"], "tools": list(sq["lead"]["tools"])},
-           "members": [{"role": m["role"], "model": m["model"], "tools": list(m["tools"])} for m in sq["members"]],
+           "members": [{"role": m["role"], "model": m["model"], "tools": list(m["tools"]), "skills": list(m["skills"])} for m in sq["members"]],
            "warns": [st(w) for w in sq["warns"]], "risks": [st(r) for r in sq["risks"]],
            "existsPersonal": os.path.lexists(os.path.join(PERSONAL_DIR, slug)),
            "existsBuiltin": os.path.isdir(os.path.join(BUILTIN_DIR, slug)) or (LANG == "en" and os.path.isdir(os.path.join(BUILTIN_EN_DIR, slug))),

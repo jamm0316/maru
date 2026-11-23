@@ -36,7 +36,7 @@ REAL_GIT=$(find_real git) || REAL_GIT=""
 JQ=$(command -v jq 2>/dev/null || echo /usr/bin/jq); JQ_DIR=$(dirname "$JQ")
 
 FAKE_HOME=$T/home; PROJ=$FAKE_HOME/.claude/projects; DATA=$T/data; B=$T/builtin; EMPTYB=$T/emptyb
-mkdir -p "$T/good" "$T/fb" "$T/nopy" "$FAKE_HOME" "$DATA" "$B" "$EMPTYB" "$T/work"
+mkdir -p "$T/skills-empty" "$T/good" "$T/fb" "$T/nopy" "$FAKE_HOME" "$DATA" "$B" "$EMPTYB" "$T/work"
 printf '%s\n' '#!/bin/sh' "exec \"$REAL_PY\" \"\$@\"" > "$T/good/python3"; chmod +x "$T/good/python3"
 touch "$T/stamp"
 # 가짜 claude: 인자를 줄마다 하나씩 기록하고 종료
@@ -53,7 +53,7 @@ run_env() {
   local extra=()
   while [ "$1" != "--" ]; do extra+=("$1"); shift; done; shift
   env -i HOME="$FAKE_HOME" PATH="$BASEPATH" MARU_TOOL_DIRS="$T/good" MARU_DATA="$DATA" MARU_WORK="$T/work" PROJECTS="$PROJ" \
-    MARU_SQUADS_BUILTIN="$B" TMPDIR="$T" FAKE_OUT="$T/claude.args" ${extra[@]+"${extra[@]}"} "$@" 2>&1
+    MARU_SQUADS_BUILTIN="$B" MARU_SKILLS_DIR="$T/skills-empty" TMPDIR="$T" FAKE_OUT="$T/claude.args" ${extra[@]+"${extra[@]}"} "$@" 2>&1
 }
 SQ() { run_env -- "$REAL_PY" -I "$REPO/scripts/squads.py" "$@"; }
 SQen() { run_env MARU_LANG=en -- "$REAL_PY" -I "$REPO/scripts/squads.py" "$@"; }
@@ -470,6 +470,59 @@ checkall "스킬 제안은 그대로 동작하고 squad-proposals 를 스킬로 
 checkall "로그에 남는 폴더 이름의 ESC·bidi 문자는 지워짐" hasnt "$log" "$ESC" '&&' hasnt "$log" "$BIDI" '&&' has "$log" "거부(이름)"
 check "제안 메모 파일 생성" [ -f "$RDATA/squad-proposals/aaa.note.txt" ]
 check "자동 설치 없음(data/squads 없음)" [ ! -e "$RDATA/squads" ]
+
+echo "== 팀원 스킬(skills)"
+SK=$T/skills; mkdir -p "$SK"
+mkskill() { mkdir -p "$SK/$1"; head -c "${2:-100}" /dev/zero | tr '\0' 'x' > "$SK/$1/SKILL.md"; }   # <이름> [바이트]
+mkskill sk-a; mkskill sk-b; mkskill sk-c; mkskill sk-d; mkskill sk-big 32769; mkskill sk-m1 20000; mkskill sk-m2 20000; mkskill sk-m3 20000
+mkdir -p "$SK/sk-nofile"
+SQS() { run_env MARU_SKILLS_DIR="$SK" -- "$REAL_PY" -I "$REPO/scripts/squads.py" "$@"; }
+ws() { # <skills 값> -> 팀원 worker 의 skills 를 바꾼 스쿼드를 $B/sk 에 만든다
+  rm -rf "$B/sk"; mksquad "$B/sk"
+  printf '%s\n' '---' 'description: 시험 일꾼' 'model: haiku' 'tools: Read' "skills: $1" '---' '맡은 일만 해라.' > "$B/sk/worker.md"
+}
+sk_of() { jget "print(json.dumps(d[\"sq-sk-$1\"].get(\"skills\", \"NONE\")))"; }
+mksquad "$B/plain"; plain_before=$(SQS json | tail -n 1 | jget 'print(json.dumps(d["sq-plain-worker"],sort_keys=True), json.dumps(d["sq-plain-helper"],sort_keys=True))')
+rm -rf "$B/plain"
+ws '[sk-a, sk-b]'
+js=$(SQS json | tail -n 1)
+check "유효한 스킬이 팀원 JSON 항목에 실림" [ "$(printf '%s' "$js" | sk_of worker)" = '["sk-a", "sk-b"]' ]
+check "skills 키 없는 팀원 항목엔 skills 키가 없음" [ "$(printf '%s' "$js" | sk_of helper)" = '"NONE"' ]
+checkall "총괄·세션 진입점 항목엔 skills 키가 없음" [ "$(printf '%s' "$js" | sk_of lead)" = '"NONE"' ] '&&' [ "$(printf '%s' "$js" | sk_of session)" = '"NONE"' ]
+chk=$(SQS check --json "$B/sk"); 
+check "check --json 의 members 에 skills" [ "$(printf '%s' "$chk" | jget 'print(json.dumps({m["role"]:m["skills"] for m in d["members"]}, sort_keys=True))')" = '{"helper": [], "worker": ["sk-a", "sk-b"]}' ]
+check "스킬만으로는 위험 신호가 생기지 않는다(앱 확인 창으로 설치 가능)" [ "$(printf '%s' "$chk" | jget 'print(d["risks"])')" = "[]" ]
+check "meta 의 members 에 skills" [ "$(SQS meta | jget 'print(json.dumps({m["role"]:m["skills"] for m in d["squads"][0]["members"]}, sort_keys=True))')" = '{"helper": [], "worker": ["sk-a", "sk-b"]}' ]
+check "list 줄에 ' · skills: a, b'" has "$(SQS list)" "tools: Read · skills: sk-a, sk-b"
+check "skills 없는 팀원의 list 줄엔 skills 표시 없음" hasnt "$(SQS list | grep sq-sk-helper)" "skills"
+check "쉼표 목록(대괄호 없음·따옴표·중복)도 같은 방식으로 읽음" [ "$(ws '"sk-a", sk-a, sk-c'; SQS json | tail -n 1 | sk_of worker)" = '["sk-a", "sk-c"]' ]
+# 총괄 skills 무시 + 경고
+ws 'sk-a'; printf '%s\n' '---' 'description: 시험 총괄' 'model: sonnet' 'tools: Read' 'skills: sk-a' '---' '나눠라.' > "$B/sk/lead.md"
+o=$(SQS check --json "$B/sk")
+checkall "lead skills 는 무시되고 경고" has "$o" "lead.md: 총괄은 스킬을 미리 실을 수 없어 skills 무시" '&&' [ "$(printf '%s' "$o" | jget 'print(d["lead"].keys() >= {"model","tools"}, "skills" in d["lead"])')" = "True False" ] '&&' [ "$(SQS json | tail -n 1 | sk_of lead)" = '"NONE"' ]
+check "lead 의 빈 skills 는 경고 없음" hasnt "$(ws 'sk-a'; printf '%s\n' '---' 'description: 시험 총괄' 'skills:' '---' 'x' > "$B/sk/lead.md"; SQS check --json "$B/sk")" "총괄은 스킬을"
+# 이름·존재·크기
+ws 'sk-a, Bad_Name, nope-skill, sk-nofile'
+o=$(SQS check --json "$B/sk")
+checkall "잘못된 이름·없는 스킬·SKILL.md 없는 폴더는 빠지고 경고, 스쿼드는 통과" [ "$(printf '%s' "$o" | jget 'print(d["ok"], d["members"][1]["skills"])')" = "True ['sk-a']" ] '&&' has "$o" "스킬 이름 'Bad_Name' 형식 오류 제외" '&&' has "$o" "스킬 'nope-skill' 가 지금은 설치돼 있지 않아 제외" '&&' has "$o" "스킬 'sk-nofile' 가 지금은 설치돼 있지 않아 제외"
+ws "$(printf 'x%.0s' $(seq 1 70)), sk-a"
+check "긴 잘못된 이름은 경고에 40자로 잘려 나옴" has "$(SQS check --json "$B/sk")" "'$(printf 'x%.0s' $(seq 1 40))' 형식 오류"
+ws 'sk-a, sk-b, sk-c, sk-d'
+o=$(SQS check --json "$B/sk")
+checkall "4번째 스킬은 빠지고 경고" [ "$(printf '%s' "$o" | jget 'print(d["members"][1]["skills"])')" = "['sk-a', 'sk-b', 'sk-c']" ] '&&' has "$o" "팀원당 3개까지라 'sk-d' 제외"
+ws 'sk-big, sk-a'
+o=$(SQS check --json "$B/sk")
+checkall "SKILL.md 가 32768바이트를 넘으면 빠지고 경고" [ "$(printf '%s' "$o" | jget 'print(d["members"][1]["skills"])')" = "['sk-a']" ] '&&' has "$o" "스킬 'sk-big' 가 32768바이트를 넘어 제외"
+mkskill sk-exact 32768; ws 'sk-exact'
+check "정확히 32768바이트는 허용" [ "$(SQS check --json "$B/sk" | jget 'print(d["members"][1]["skills"])')" = "['sk-exact']" ]
+ws 'sk-m1, sk-m2, sk-m3'
+o=$(SQS check --json "$B/sk")
+checkall "합계 49152바이트 초과분은 빠지고 경고" [ "$(printf '%s' "$o" | jget 'print(d["members"][1]["skills"])')" = "['sk-m1', 'sk-m2']" ] '&&' has "$o" "스킬 합계가 49152바이트를 넘어 'sk-m3' 제외"
+ws 'sk-a'
+check "스킬 없는 SKILLS 폴더(기본 빈 폴더)에서는 모든 스킬이 빠지고 스쿼드는 유지" [ "$(run_env -- "$REAL_PY" -I "$REPO/scripts/squads.py" check --json "$B/sk" | jget 'print(d["ok"], d["members"][1]["skills"])')" = "True []" ]
+rm -rf "$B/sk"; mksquad "$B/plain"
+check "skills 키 없는 스쿼드의 팀원 항목은 이전과 바이트 단위로 같음" [ "$(SQS json | tail -n 1 | jget 'print(json.dumps(d["sq-plain-worker"],sort_keys=True), json.dumps(d["sq-plain-helper"],sort_keys=True))')" = "$plain_before" ]
+rm -rf "$B/plain"
 
 echo "== 가드"
 check "프롬프트에 스쿼드 제안 절" grep -q '^## 스쿼드 제안' "$REPO/prompts/reflect-prompt.md"

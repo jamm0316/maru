@@ -2089,7 +2089,7 @@ ipcMain.handle('inbox:install-squad', (e, slug, shownDigest) => inboxAction(e, a
   if (c.risks.length) return { ok: false, reason: 'risky', risks: c.risks }; // 위험 신호가 있으면 앱은 설치하지 않는다(터미널에서 --ack-warnings 는 사용자가 직접)
   if (c.existsPersonal) return { ok: false, reason: 'exists' }; // 앱은 --replace 를 쓰지 않는다
   const sum = L.summarizeSquadCheck(c);
-  const roster = sum.roster.map((x) => x.role + ' (' + x.model + '): ' + (x.tools.join(', ') || '-')).join('\n');
+  const roster = sum.roster.map((x) => x.role + ' (' + x.model + '): ' + (x.tools.join(', ') || '-') + (x.skills && x.skills.length ? ' · skills: ' + x.skills.join(', ') : '')).join('\n');
   const yes = await confirmBox(tr('dlg.sqInstall.title', { name: c.name }), tr('dlg.sqInstall.detail', { slug, n: sum.members, roster }), tr('inbox.act.install'));
   if (!yes) return { ok: false, reason: 'cancel' };
   if (!currentApproval('squad', slug)) return { ok: false, reason: 'invalid' };

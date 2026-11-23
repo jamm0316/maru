@@ -2123,7 +2123,13 @@ t('inbox: parseSquadCheck 는 형식을 엄격히 검증한다', () => {
   const c = L.parseSquadCheck(sqCheck({}), 'team');
   assert.deepStrictEqual([c.ok, c.name, c.members.length, c.risks, c.existsPersonal, c.digest.length], [true, '팀', 2, [], false, 64]);
   assert.deepStrictEqual(L.summarizeSquadCheck(c), { members: 2, models: ['sonnet', 'haiku'], tools: ['Agent', 'Read', 'Grep'],
-    roster: [{ role: 'lead', model: 'sonnet', tools: ['Agent', 'Read'] }, { role: 'a', model: 'haiku', tools: ['Read'] }, { role: 'b', model: 'sonnet', tools: ['Read', 'Grep'] }] }); // 총괄·팀원별 도구
+    roster: [{ role: 'lead', model: 'sonnet', tools: ['Agent', 'Read'] }, { role: 'a', model: 'haiku', tools: ['Read'], skills: [] }, { role: 'b', model: 'sonnet', tools: ['Read', 'Grep'], skills: [] }] }); // 총괄·팀원별 도구
+  // 팀원 skills: 없으면 [], 유효하면 roster 로 전달, 잘못되면 전체 거부
+  { const o = JSON.parse(sqCheck({ members: [{ role: 'a', model: 'haiku', tools: ['Read'] }] })); delete o.members[0].skills; assert.deepStrictEqual(L.parseSquadCheck(JSON.stringify(o), 'team').members[0].skills, []); } // skills 키가 없는 옛 출력도 받는다
+  const withSk = (sk) => sqCheck({ members: [{ role: 'a', model: 'haiku', tools: ['Read'], skills: sk }] });
+  assert.deepStrictEqual(L.parseSquadCheck(withSk(['sk-a', 'b2']), 'team').members[0].skills, ['sk-a', 'b2']);
+  assert.deepStrictEqual(L.summarizeSquadCheck(L.parseSquadCheck(withSk(['sk-a']), 'team')).roster, [{ role: 'lead', model: 'sonnet', tools: ['Agent', 'Read'] }, { role: 'a', model: 'haiku', tools: ['Read'], skills: ['sk-a'] }]);
+  for (const bad of [['a', 'b', 'c', 'd'], ['Bad'], ['-x'], [1], 'sk-a', null, ['a'.repeat(65)], ['a b']]) assert.strictEqual(L.parseSquadCheck(withSk(bad), 'team'), null, JSON.stringify(bad));
   assert.strictEqual(L.parseSquadCheck(sqCheck({}), 'other'), null); // 요청한 slug 와 다르면 거부
   assert.strictEqual(L.parseSquadCheck(sqCheck({}), '../team'), null);
   for (const bad of [{ digest: 'zz' }, { digest: 'A'.repeat(64) }, { lead: { model: 'gpt', tools: [] } }, { lead: { model: 'sonnet', tools: ['Rm'] } }, { members: [] }, { members: [{ role: 'lead!', model: 'haiku', tools: [] }] }, { risks: 'x' }, { name: 'x‮y' }, { name: '' }, { existsPersonal: 'no' }, { ok: 'true' }]) assert.strictEqual(L.parseSquadCheck(sqCheck(bad), 'team'), null, JSON.stringify(bad));

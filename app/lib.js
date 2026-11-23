@@ -2651,13 +2651,14 @@ function parseSquadCheck(text, expectSlug) {
   if (o.ok === false) return typeof o.reason === 'string' ? { ok: false, slug: expectSlug, reason: cleanDisplay(o.reason, 200) } : null;
   if (o.ok !== true || typeof o.digest !== 'string' || !/^[0-9a-f]{64}$/.test(o.digest)) return null;
   const tools = (a) => (Array.isArray(a) && a.length <= 16 && a.every((x) => SQUAD_TOOLS_OK.includes(x)) ? [...new Set(a)] : null);
+  const skills = (a) => (a === undefined ? [] : (Array.isArray(a) && a.length <= 3 && a.every((x) => typeof x === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(x)) ? [...new Set(a)] : null)); // 팀원 미리 실을 스킬(없으면 [])
   const strs = (a) => (Array.isArray(a) && a.length <= 30 && a.every((x) => typeof x === 'string') ? a.map((x) => cleanDisplay(x, 200)).filter(Boolean) : null);
   if (!isPlainObject(o.lead) || !SQUAD_MODELS.includes(o.lead.model) || !tools(o.lead.tools)) return null;
   if (!Array.isArray(o.members) || o.members.length < 1 || o.members.length > SQUAD_MEMBERS_MAX) return null;
   const members = [];
   for (const m of o.members) {
-    if (!isPlainObject(m) || typeof m.role !== 'string' || !SQUAD_SLUG_RE.test(m.role) || !SQUAD_MODELS.includes(m.model) || !tools(m.tools)) return null;
-    members.push({ role: m.role, model: m.model, tools: tools(m.tools) });
+    if (!isPlainObject(m) || typeof m.role !== 'string' || !SQUAD_SLUG_RE.test(m.role) || !SQUAD_MODELS.includes(m.model) || !tools(m.tools) || !skills(m.skills)) return null;
+    members.push({ role: m.role, model: m.model, tools: tools(m.tools), skills: skills(m.skills) });
   }
   const warns = strs(o.warns); const risks = strs(o.risks);
   const name = squadText(typeof o.name === 'string' ? o.name : null, SQUAD_NAME_MAX, 1); const description = squadText(typeof o.description === 'string' ? o.description : null, SQUAD_DESC_MAX, 0);
@@ -2667,7 +2668,7 @@ function parseSquadCheck(text, expectSlug) {
 // 확인 창에 보일 요약: 팀원 수(총괄 제외), 모델·도구의 중복 없는 목록, 총괄·팀원별 roster
 function summarizeSquadCheck(c) {
   const all = [c.lead, ...c.members];
-  const roster = [{ role: 'lead', model: c.lead.model, tools: c.lead.tools }, ...c.members.map((m) => ({ role: m.role, model: m.model, tools: m.tools }))]; // 확인 창에 총괄·팀원별 도구를 그대로 보인다
+  const roster = [{ role: 'lead', model: c.lead.model, tools: c.lead.tools }, ...c.members.map((m) => ({ role: m.role, model: m.model, tools: m.tools, skills: m.skills }))]; // 확인 창에 총괄·팀원별 도구를 그대로 보인다
   return { members: c.members.length, models: [...new Set(all.map((x) => x.model))], tools: [...new Set([].concat(...all.map((x) => x.tools)))], roster };
 }
 
