@@ -246,6 +246,58 @@ t('parseAgentState', () => {
   assert.ok(L.isSessionId('abcd1234') && L.isSessionId('6054e0aa-03e5-4050-b22e-c186ad026154'));
   for (const bad of ['short', '../../etc/passwd1', 'a b c d e f g h', 'x'.repeat(65), '', null]) assert.strictEqual(L.isSessionId(bad), false);
 });
+t('Cmd+↑/↓: 입력란 전체의 맨 앞/끝', () => {
+  const d = (key, o) => ({ type: 'keydown', key, metaKey: true, ...o });
+  assert.strictEqual(L.isBufNavKey(d('ArrowUp'), false, false), true);
+  assert.strictEqual(L.isBufNavKey(d('ArrowDown'), true, true), true);
+  assert.strictEqual(L.isBufNavKey({ type: 'keyup', key: 'ArrowUp', metaKey: true }, false, true), true); // keyup 도 삼킨다
+  assert.strictEqual(L.isBufNavKey(d('ArrowUp'), true, false), false); // vim 등
+  for (const o of [{ shiftKey: true }, { altKey: true }, { ctrlKey: true }, { isComposing: true }, { keyCode: 229 }, { metaKey: false }]) assert.strictEqual(L.isBufNavKey(d('ArrowUp', o), false, true), false);
+  assert.strictEqual(L.isBufNavKey(d('ArrowLeft'), false, true), false);
+  const B = '─'.repeat(40);
+  const scr = ['출력', B, '❯ aaa', '  bbb', '  ccc', B, '  ? for shortcuts'];
+  assert.strictEqual(L.promptEdgeRows(scr, 2, true), 0);
+  assert.strictEqual(L.promptEdgeRows(scr, 4, true), 2);
+  assert.strictEqual(L.promptEdgeRows(scr, 3, true), 1);
+  assert.strictEqual(L.promptEdgeRows(scr, 2, false), 2);
+  assert.strictEqual(L.promptEdgeRows(scr, 4, false), 0);
+  // 커서가 입력란 밖이거나 경계선을 못 찾으면 0(이력으로 넘어가지 않게 줄 안에서만 움직인다)
+  assert.strictEqual(L.promptEdgeRows(scr, 6, true), 0);
+  assert.strictEqual(L.promptEdgeRows(scr, 0, false), 0);
+  assert.strictEqual(L.promptEdgeRows(scr, 1, true), 0);
+  assert.strictEqual(L.promptEdgeRows(['$ ls', 'a b', '$ '], 2, true), 0);
+  assert.strictEqual(L.promptEdgeRows(['╭' + B + '╮', '│ > aaa', '│   bbb', '╰' + B + '╯'], 2, true), 1);
+  for (const bad of [[null, 2, true], [scr, -1, true], [scr, 99, true], [scr, 1.5, true]]) assert.strictEqual(L.promptEdgeRows(...bad), 0);
+  assert.strictEqual(L.isPromptBorder('  ' + B + ' label'), true);
+  assert.strictEqual(L.isPromptBorder('─── 짧음'), false);
+  assert.strictEqual(L.bufNavSeq(true, 2, false), '\x1b[A\x1b[A\x01');
+  assert.strictEqual(L.bufNavSeq(false, 1, true), '\x1bOB\x05');
+  assert.strictEqual(L.bufNavSeq(true, 0, false), '\x01');
+  assert.strictEqual(L.bufNavSeq(false, -3, false), '\x05');
+  assert.strictEqual(L.bufNavSeq(true, 9999, false).length, 200 * 3 + 1);
+});
+t('Cmd+Shift+↑/↓: 위·아래 대상으로 이동, 맨 처음·끝에서는 멈춘다', () => {
+  const d = (key, o) => ({ type: 'keydown', key, metaKey: true, shiftKey: true, ...o });
+  assert.strictEqual(L.isStepKey(d('ArrowUp')), true);
+  assert.strictEqual(L.isStepKey(d('ArrowDown')), true);
+  for (const o of [{ shiftKey: false }, { metaKey: false }, { altKey: true }, { ctrlKey: true }, { isComposing: true }, { keyCode: 229 }]) assert.strictEqual(L.isStepKey(d('ArrowUp', o)), false);
+  assert.strictEqual(L.isStepKey(d('ArrowLeft')), false);
+  assert.strictEqual(L.isBufNavKey(d('ArrowUp'), false, true), false); // 두 단축키는 겹치지 않는다
+  const ids = Array.from({ length: 11 }, (_, i) => 'w' + i);
+  const ts = L.numberTargets(ids, ['p1', 'p2'], Infinity);
+  assert.strictEqual(ts.length, 13); // 번호(9개) 제한 없이 전부
+  const ws = (id) => ({ kind: 'workspace', id }); const pj = (id) => ({ kind: 'project', id });
+  assert.deepStrictEqual(L.stepTarget(ts, ws('w3'), 1), ws('w4'));
+  assert.deepStrictEqual(L.stepTarget(ts, ws('w3'), -1), ws('w2'));
+  assert.deepStrictEqual(L.stepTarget(ts, ws('w10'), 1), pj('p1')); // 마지막 작업 공간에서 아래: 첫 프로젝트
+  assert.deepStrictEqual(L.stepTarget(ts, pj('p1'), -1), ws('w10')); // 첫 프로젝트에서 위: 마지막 작업 공간
+  assert.strictEqual(L.stepTarget(ts, ws('w0'), -1), null); // 맨 처음
+  assert.strictEqual(L.stepTarget(ts, pj('p2'), 1), null); // 맨 끝
+  assert.strictEqual(L.stepTarget(ts, pj('없음'), 1), null);
+  assert.strictEqual(L.stepTarget(ts, null, 1), null);
+  assert.strictEqual(L.stepTarget(ts, ws('w1'), 2), null);
+  assert.strictEqual(L.stepTarget(L.numberTargets(['a'], [], Infinity), ws('a'), 1), null);
+});
 t('keyToSeq Cmd+←/→: Claude Code 화면은 alternate screen 이어도 보낸다', () => {
   const d = (key, o) => ({ type: 'keydown', key, metaKey: true, ...o });
   assert.strictEqual(L.keyToSeq(d('ArrowLeft'), true, true), '\x01');

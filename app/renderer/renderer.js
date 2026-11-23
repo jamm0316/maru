@@ -67,7 +67,7 @@
   let detailMode = 'project'; // 'project' | 'inbox' | 'memory' | 'day': 가운데 상세가 무엇인지(모두 detailOpen 으로 터미널을 가린다)
   let detailOpen = false; let detailKey = null; let detail = null; let detailSig = ''; let detailSeq = 0; // 프로젝트 상세(아래 '프로젝트' 절). 열려 있으면 터미널은 숨기기만 한다
   const terms = new Map(); // id -> { id, term, fit, host, gl, opened, started, starting }
-  let activeId = null;
+  let activeId = null; let stepReady = true;
   let wsList = [];
   function createTerm(id) {
     const host = el('div', 'term-host'); host.hidden = true; $('terminal').append(host);
@@ -90,6 +90,8 @@
     const flushNl = () => { if (pendNl === null) return; const s = pendNl; pendNl = null; clearTimeout(pendTimer); nlAt = Date.now(); if (!modalOpen()) window.maru.ptyWrite(id, s); };
     host.addEventListener('compositionstart', () => { composing = true; endedAt = 0; }, true);
     host.addEventListener('compositionend', () => { composing = false; endedAt = Date.now(); if (pendNl !== null) { clearTimeout(pendTimer); pendTimer = setTimeout(flushNl, 60); } }, true);
+    let navAt = 0; let navDrawn = true; // Cmd+↑/↓ 로 ↑/↓ 를 보낸 시각, 그 뒤 화면이 다시 그려졌는지
+    term.onWriteParsed(() => { navDrawn = true; });
     term.attachCustomKeyEventHandler((e) => {
       if (modalOpen()) return false;
       if (Lib.isShiftEnter(e)) {
@@ -104,6 +106,24 @@
       const alt = term.buffer.active.type === 'alternate'; // vim 등 alternate screen 에서는 Cmd+←/→ 를 그대로 둔다. 단 Claude Code(fullscreen 렌더러도 alternate screen)는 예외
       if (e.type === 'keydown' && e.key === 'Escape' && e.isTrusted && !e.isComposing && e.keyCode !== 229 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.repeat) window.maru.ptyEsc(id); // 중단 감지용 알림만(키는 그대로 pty 로 간다)
       const cc = !!(wsList.find((x) => x.id === id) || {}).cc;
+      if (Lib.isStepKey(e)) return false; // Cmd+Shift+↑/↓ 는 전역 핸들러가 처리한다(터미널로 보내지 않는다)
+      if (Lib.isBufNavKey(e, alt, cc)) { // Cmd+↑/↓: 입력란 전체의 맨 앞/끝. keypress·keyup 도 같이 삼킨다
+        if (e.type === 'keydown') {
+          e.preventDefault();
+          if (e.repeat) return false;
+          const up = e.key === 'ArrowUp'; let rows = 0;
+          // 방금 보낸 이동이 화면에 반영되기 전에는 줄 수를 다시 세지 않는다(낡은 화면으로 세면 ↑ 가 남아 이전 입력 이력으로 넘어간다)
+          const settled = navAt === 0 || (navDrawn && Date.now() - navAt >= 150);
+          if (cc && settled) { // Claude Code 화면에서만 줄 수를 센다(셸은 줄 안에서만 움직인다)
+            const b = term.buffer.active; const lines = [];
+            for (let i = 0; i < term.rows; i++) { const ln = b.getLine(b.baseY + i); lines.push(ln ? ln.translateToString(true) : ''); }
+            rows = Lib.promptEdgeRows(lines, b.cursorY, up);
+          }
+          if (rows > 0) { navAt = Date.now(); navDrawn = false; }
+          window.maru.ptyWrite(id, Lib.bufNavSeq(up, rows, !!(term.modes && term.modes.applicationCursorKeysMode)));
+        }
+        return false;
+      }
       const seq = Lib.keyToSeq(e, alt, cc);
       if (seq === null) return !(Lib.isNewlineKey(e) || Lib.isLineNavKey(e, alt, cc)); // Shift+Enter 의 keypress 가 Enter(전송)로 새지 않게, Cmd+←/→ 의 keypress·keyup 도 같이 삼킨다
       if (e.type === 'keydown') { e.preventDefault(); window.maru.ptyWrite(id, seq); }
@@ -2002,6 +2022,25 @@
     if (detailOpen && detailMode === 'project' && detailKey === id) return; // 이미 열려 있으면 그대로
     openDetail(id);
   });
+
+  // ---- ⌘⇧↑/↓: 왼쪽 패널의 위·아래 대상으로(작업 공간 끝에서 아래는 첫 프로젝트로, 첫 프로젝트에서 위는 마지막 작업 공간으로). 맨 처음·맨 끝에서는 멈춘다 ----
+  document.addEventListener('keydown', (e) => {
+    if (!Lib.isStepKey(e) || modalOpen()) return;
+    const t = e.target;
+    if (t && t.closest && !t.closest('.xterm') && ((t.tagName === 'INPUT' && /^(text|search|url|email|password|number|tel|)$/.test(t.type || '')) || t.tagName === 'TEXTAREA' || t.isContentEditable)) return; // 글자 입력칸에서는 원래 뜻(처음·끝까지 선택)을 둔다
+    e.preventDefault(); e.stopPropagation();
+    if (!stepReady) return; // 앞 이동(작업 공간 전환)이 끝난 뒤에만 다음으로
+    const targets = Lib.numberTargets(Lib.visibleWsIds(Lib.hierarchyOrder(wsList), wsCollapsedIds, activeId), Lib.visibleProjectKeys(projView.open, projView.collapsed), Infinity);
+    const wsCur = activeId ? { kind: 'workspace', id: activeId } : null;
+    const pjCur = detailOpen && detailMode === 'project' && detailKey ? { kind: 'project', id: detailKey } : null;
+    const cur = pjCur && targets.some((x) => x.kind === 'project' && x.id === pjCur.id) ? pjCur : wsCur; // 목록에 없는 프로젝트(접힌 묶음·분류 안 됨)를 보고 있으면 활성 작업 공간을 기준으로
+    const to = Lib.stepTarget(targets, cur, e.key === 'ArrowUp' ? -1 : 1);
+    if (!to) return;
+    closeWsMenu(false); closeMenu(false); closeUpdate(false);
+    if (to.kind === 'project') { openDetail(to.id); focusTerm(); return; }
+    stepReady = false;
+    (async () => { try { closeDetail(true); if (to.id !== activeId) { await window.maru.activateWorkspace(to.id); await syncWs(); } focusTerm(); } catch (x) { /* 무시 */ } finally { stepReady = true; } })();
+  }, true);
 
   // ---- 전역 키·바깥 클릭 ----
   document.addEventListener('keydown', (e) => {

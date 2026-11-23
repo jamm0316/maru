@@ -507,6 +507,40 @@ function isLineNavKey(e, altScreen, claudeUi) {
   return (!altScreen || !!claudeUi) && !!e && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !!e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
 }
 
+// Cmd+↑/↓(다른 보조키 없음): 입력란 전체의 맨 앞 / 맨 끝. 조합 중·alternate screen 규칙은 Cmd+←/→ 와 같다.
+function isBufNavKey(e, altScreen, claudeUi) {
+  return (!altScreen || !!claudeUi) && !!e && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !!e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
+}
+// Claude Code 입력란의 위·아래 경계선(─ 가 이어진 줄. 옛 모양의 ╭╰ 도 받는다)
+function isPromptBorder(s) { return typeof s === 'string' && /^[╭╰]?─{8,}/.test(s.trim()); }
+// 화면 줄(lines)과 커서 줄(cursorY)로, 커서에서 입력란 첫 줄(up) 또는 마지막 줄까지 몇 줄인지 센다.
+// Claude Code 에는 입력 전체의 맨 앞·끝으로 가는 키가 없고, 첫 줄에서 ↑ 를 더 누르면 이전 입력 이력으로 넘어간다. 그래서 줄 수를 정확히 세어 그만큼만 보낸다.
+// 커서가 입력란 안(위·아래 모두 경계선이 보임)이 아니면 0: 그때는 줄 안에서만 움직인다.
+function promptEdgeRows(lines, cursorY, up) {
+  if (!Array.isArray(lines) || !Number.isInteger(cursorY) || cursorY < 0 || cursorY >= lines.length || isPromptBorder(lines[cursorY])) return 0;
+  let a = -1; let b = -1;
+  for (let i = cursorY - 1; i >= 0; i--) if (isPromptBorder(lines[i])) { a = i; break; }
+  for (let i = cursorY + 1; i < lines.length; i++) if (isPromptBorder(lines[i])) { b = i; break; }
+  if (a < 0 || b < 0) return 0;
+  return up ? cursorY - a - 1 : b - cursorY - 1;
+}
+// 맨 앞: ↑ 를 rows 번 보낸 뒤 Ctrl+A. 맨 끝: ↓ 를 rows 번 보낸 뒤 Ctrl+E. appCursor: 터미널이 application cursor keys 모드인지
+function bufNavSeq(up, rows, appCursor) {
+  const n = Number.isInteger(rows) && rows > 0 ? Math.min(rows, 200) : 0;
+  return ((appCursor ? '\x1bO' : '\x1b[') + (up ? 'A' : 'B')).repeat(n) + (up ? '\x01' : '\x05');
+}
+// Cmd+Shift+↑/↓(다른 보조키 없음): 왼쪽 패널에서 위·아래 대상(작업 공간, 이어서 프로젝트)으로 이동
+function isStepKey(e) {
+  return !!e && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !!e.metaKey && !!e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
+}
+// targets: numberTargets() 결과(개수 제한 없이), cur: 지금 보고 있는 { kind, id }, d: -1(위) | 1(아래). 맨 처음·맨 끝에서는 null(돌아가지 않는다)
+function stepTarget(targets, cur, d) {
+  if (!Array.isArray(targets) || !cur || (d !== 1 && d !== -1)) return null;
+  const i = targets.findIndex((t) => t && t.kind === cur.kind && t.id === cur.id);
+  if (i < 0) return null;
+  return targets[i + d] || null;
+}
+
 // 작업 공간이 Claude Code 화면인지: 마루가 claude 를 띄웠고(launched) 훅 상태가 busy/idle/waiting 으로 알려졌거나, 아직 상태가 없어도 claude 가 설치돼 있어 exec 됐을 때
 function isClaudeUi({ launched, state, claudeFound } = {}) {
   return !!launched && (state === 'busy' || state === 'idle' || state === 'waiting' || (state === 'none' && !!claudeFound));
@@ -3827,7 +3861,7 @@ const api = {
   claudeUpAfter, PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, claudeCandidates, nvmVersionDirs, parseClaudeProbe, CLAUDE_PROBE_CMD, setupCommand, buildSetupScript, SETUP_KINDS, SETUP_INSTALL_CMD, firstMeetingBanner,
   INBOX_NOTIF_MAX, PROPOSAL_FILE_MAX, PROPOSAL_TOTAL_MAX, PROPOSAL_FILES_MAX, logAtMs, plausibleLogAt, fmtLogAt, seenToStore, PROPOSAL_LIST_MAX, INBOX_SEEN_MAX_BYTES, validProposalSlug, cleanDisplay, cleanProposalText, proposalMeta, scanProposalDir, listProposals, proposalDetail, trashProposalDir, skillRequestText, parseSquadCheck, summarizeSquadCheck, validateInboxSeen, parseInboxSeen, readInboxSeenFile, saveInboxSeen, markUnseen, newestAt, relativeAgo,
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
-  DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey,
+  DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey, isBufNavKey, isPromptBorder, promptEdgeRows, bufNavSeq, isStepKey, stepTarget,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
   hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isShiftEnter, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
