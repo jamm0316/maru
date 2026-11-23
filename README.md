@@ -39,6 +39,10 @@ Every night at 03:30 a scheduled job tidies up: duplicates merge, what mattered 
 
 **Project sessions and reports.** Maru can open a session in a project folder under itself and hand it a briefing. Before it opens, a confirmation window shows exactly what will be handed over, and the session starts only when you click **Open**. Each time the session finishes a turn, it leaves a report, and Maru passes it on to you on your next message. Reports are treated as unverified data, not as instructions.
 
+**Move between sessions in one window.** The list on the left shows Maru and the project sessions with their status. A session with an answer you have not looked at yet gets an orange dot, which clears when you open it. Drag a session to reorder it, and drag a panel edge to resize it. ⌘⇧↑/↓ moves to the session above or below, ⌘⇧←/→ collapses or expands a group, and ⌘↑/↓ jumps to the start or end of what you are typing. Typing `->`, `<-` or `<->` in the prompt turns it into →, ← or ↔.
+
+**Skills and teams arrive only as proposals.** A skill proposed after reflection comes with checks for whether the job is done. Only checks backed by evidence are written, such as a command result or a comparison against the source. When you ask for a fix to something a skill produced, the correction is proposed as an edit to that skill, not stored as a memory. Each squad member can be given skills to read up front. Nothing is installed before you approve it.
+
 **One design doc per project.** Goals, decisions, open questions and current state live in one plain Markdown file that Maru and every project session read, so they work from the same facts. You can read and edit it too.
 
 **Everything is plain files on your Mac.** Memory, the journal and the design docs are readable text. Memory has a change history you can browse and undo. Maru works through Claude Code, so your conversations go to Claude the same way they already do.
