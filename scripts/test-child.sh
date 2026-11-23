@@ -1414,6 +1414,36 @@ checkall "상태 기록이 3800바이트를 넘으면 cwd 를 생략(다른 필�
 rec=$(as_state busy "$(jq -nc --arg c "$("$REAL_PY" -c 'print("/" + "가"*300)')" '{cwd:$c}')")
 check "3800바이트 이하면 긴 한글 cwd 도 유지" [ "$(printf '%s' "$rec" | "$REAL_PY" -I -c 'import json,sys;print("cwd" in json.load(sys.stdin))')" = True ]
 
+echo "== agent-state.sh: 원격 제어(rc) 필드"
+mkdir -p "$T/nopy"
+as_rc() { # <python 디렉터리> <BRIDGE 값 또는 UNSET> <상태> <JSON>
+  rm -rf "$AS/data"; local e=(); [ "$2" = UNSET ] || e=(CLAUDE_CODE_BRIDGE_SESSION_ID="$2")
+  printf '%s' "$4" | env -i HOME="$FAKE_HOME" PATH="$BASEPATH" MARU_TOOL_DIRS="$1" MARU_APP_SESSION="$ASID" ${e[@]+"${e[@]}"} "$AS/scripts/agent-state.sh" "$3" >/dev/null 2>&1
+  cat "$AS/data/state/app/$ASID.json" 2>/dev/null
+}
+rchas() { case "$1" in *'"rc":true'*) return 0;; *) return 1;; esac; }
+normal_json() { norc "$1" && "$REAL_PY" -I -c 'import json,sys;json.loads(sys.argv[1])' "$1"; }
+norc() { [ -n "$1" ] || return 1; case "$1" in *'"rc"'*) return 1;; *) return 0;; esac; } # 기록은 있고 rc 필드는 없다
+for st in busy idle waiting; do
+  rec=$(as_rc "$T/good" "session_01AbC-x" "$st" '{"model":"m1"}')
+  check "python 경로 $st: 환경변수가 있으면 rc:true(값은 저장 안 함)" sh -c 'echo "$1" | grep -q "\"rc\":true" && ! echo "$1" | grep -q "session_01" && "$2" -I -c "import json,sys;d=json.loads(sys.argv[1]);assert d[\"rc\"] is True and d[\"state\"]==sys.argv[2]" "$1" "$3"' _ "$rec" "$REAL_PY" "$st"
+  rec=$(as_rc "$T/nopy" "session_01AbC-x" "$st" '{"model":"m1"}')
+  check "python 없는 폴백 $st: rc:true 가 들어가고 유효한 JSON" sh -c 'echo "$1" | grep -q "\"rc\":true" && ! echo "$1" | grep -q "session_01" && "$2" -I -c "import json,sys;d=json.loads(sys.argv[1]);assert d == {\"state\":sys.argv[2],\"at\":d[\"at\"],\"rc\":True}" "$1" "$3"' _ "$rec" "$REAL_PY" "$st"
+done
+rec=$(as_rc "$T/good" UNSET busy '{}'); check "python 경로: 환경변수가 없으면 rc 필드 없음" norc "$rec"
+rec=$(as_rc "$T/nopy" UNSET busy '{}'); check "폴백: 환경변수가 없으면 rc 필드 없음" norc "$rec"
+rec=$(as_rc "$T/good" "" idle '{}'); check "빈 값이면 rc 필드 없음" norc "$rec"
+for badv in 'a b' 'a"b' 'a\b' 'a;b' '../x' "$(printf 'a%.0s' $(seq 129))" 'x'$'\n''y' '한글'; do
+  for d in "$T/good" "$T/nopy"; do
+    rec=$(as_rc "$d" "$badv" busy '{}')
+    check "형식이 틀린 값(${badv:0:12})은 rc 필드 없음·유효한 JSON ($(basename "$d"))" normal_json "$rec"
+  done
+done
+rec=$(as_rc "$T/good" "$(printf 'a%.0s' $(seq 128))" busy '{}'); check "128자는 허용" rchas "$rec"
+rec=$(as_rc "$T/good" "a" busy '{}'); check "1자는 허용" rchas "$rec"
+rec=$(as_rc "$T/good" "ok-1" idle '{"cwd":"/tmp/z","background_tasks":[{"status":"running"}]}'); check "rc 는 cwd·bg 와 함께 쓰여도 유효" [ "$("$REAL_PY" -I -c 'import json,sys;d=json.loads(sys.argv[1]);print(d["rc"], d["cwd"], d["bg"])' "$rec")" = "True /tmp/z 1" ]
+rec=$(as_rc "$T/good" "ok-1" busy "$(jq -nc --arg c "/$("$REAL_PY" -c 'print("가"*1100)')" '{cwd:$c}')"); check "cwd 가 크면 cwd 만 빠지고 rc 는 유지" [ "$("$REAL_PY" -I -c 'import json,sys;d=json.loads(sys.argv[1]);print("cwd" in d, d.get("rc"))' "$rec")" = "False True" ]
+
 echo "== 부작용·비밀 점검"
 check "실제 data/ 에 쓰지 않음(이 시험이 만든 파일 없음)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" \( -path '*/state/app/*' -o -path '*/projects/*' -o -name 'design-history.git' \) 2>/dev/null | head -1)" ]
 check "실제 ~/.claude 에 쓰지 않음(임시 HOME 만 사용)" [ -d "$FAKE_HOME/.claude/projects" ]

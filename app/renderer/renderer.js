@@ -594,7 +594,9 @@
       const l1 = el('span', 'l1'); const nm = el('span', 'nm');
       if (editing) { const inp = makeWsInput(w, edit); nm.append(inp); wsEdit.input = inp; } else nm.append(el('span', 'n', w.title));
       l1.append(nm); if (w.unread) { const ud = el('span', 'ws-unread'); ud.setAttribute('aria-hidden', 'true'); l1.append(ud); } l1.append(el('span', 'st ' + k, T('agent.' + k)));
-      const l2 = el('span', 'l2'); l2.append(el('span', 's', w.path)); if (num) l2.append(kbdHint(num));
+      const l2 = el('span', 'l2');
+      if (w.rc === 'on') { const rt = el('span', 'ws-rc', T('rc.tag')); rt.setAttribute('aria-label', T('rc.tag.aria')); l2.append(rt); } // 원격 켜짐 표시: 둘째 줄 맨 앞(상태 글자·안 읽은 점·하위 단추·× 자리와 겹치지 않는다)
+      l2.append(el('span', 's', w.path)); if (num) l2.append(kbdHint(num));
       c.append(l1, l2);
       const extra = [];
       if (w.project) extra.push(el('span', 'chip', w.project)); // 프로젝트 이름표는 둘째 줄에(제목이 잘리지 않게)
@@ -645,6 +647,7 @@
     $('term-name').textContent = a ? a.title : T('app.title');
     $('term-cwd').textContent = a ? a.path : '';
     renderBusy(a ? a.state : 'none', a ? a.bg : 0, a ? a.ux : null);
+    renderRc();
     if (repOpenId) repRefresh();
     if (projHintWs !== wsList.length) renderProjects(projView); // 작업 공간 수가 바뀌면 프로젝트 줄의 번호도 바뀐다
   }
@@ -917,6 +920,31 @@
     const today = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     return at.startsWith(today) ? at.slice(11, 16) : at.slice(5, 10) + ' ' + at.slice(11, 16);
   }
+
+  // ---- 원격 제어 토글(터미널 위 막대): 상태는 main 이 정한 w.rc 를 그대로 그린다. 눌러도 main 이 문장을 보내고 확인된 증거가 올 때까지 표시가 바뀌지 않는다 ----
+  const RC_STATES = ['off', 'on', 'turning-on', 'turning-off', 'unknown'];
+  function renderRc() {
+    const b = $('rc-toggle'); if (!b) return;
+    const a = wsList.find((w) => w.id === activeId);
+    b.hidden = !a || detailOpen; // 활성 작업 공간이 없거나 상세 화면이 터미널을 가리면 숨긴다
+    if (b.hidden) return;
+    const st = RC_STATES.includes(a.rc) ? a.rc : 'off';
+    b.dataset.rc = st; b.setAttribute('aria-checked', String(st === 'on' || st === 'turning-on'));
+    b.querySelector('.rc-label').textContent = T('rc.label.' + st);
+    b.title = T('rc.title'); b.setAttribute('aria-description', T('rc.title'));
+    b.disabled = a.cc !== true || a.state === 'exited'; // Claude 화면이 아니거나 끝난 세션이면 숨기지 않고 끈다
+  }
+  const rcErrKey = (r) => 'rc.err.' + (['no-session', 'shell', 'not-ready', 'waiting', 'busy', 'unknown', 'draft', 'pending', 'inactive', 'busy-ui'].includes(r) ? r : 'invalid');
+  async function rcClick() {
+    const b = $('rc-toggle'); if (!activeId || b.disabled) return;
+    if (modalOpen() || detailOpen) { note(T('rc.err.busy-ui')); return; }
+    let res = null;
+    try { res = await window.maru.rcToggle(activeId); } catch (x) { res = null; }
+    if (!res || !res.ok) note(T(rcErrKey(res && res.reason)));
+    else { syncWs(); focusTerm(); } // 성공: 터미널로 포커스를 돌려 사용자가 곧바로 Claude 의 확인 질문에 답할 수 있게 한다
+  }
+  $('rc-toggle').addEventListener('click', rcClick);
+  window.maru.onRcToggle(() => { rcClick(); }); // 앱 메뉴도 같은 처리
 
   let noteTimer = null;
   function note(msg) {
@@ -1260,7 +1288,7 @@
   async function openInboxDetail(kind, slug) {
     detailMode = 'inbox'; detailOpen = true; detailKey = null; detail = null; detailSig = ''; detailSeq++; dayKey = null; daySeq++;
     inboxDet = { kind, slug, loading: true }; const my = ++inboxDetSeq;
-    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = false; $('day-view').hidden = true; if (memView) memView.hide();
+    renderRc(); $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = false; $('day-view').hidden = true; if (memView) memView.hide();
     $('id-note').textContent = '';
     if (lastPanels) renderProjects(lastPanels.projects);
     renderCal(); // 고른 날 강조·aria-pressed 를 바로 지운다
@@ -1514,7 +1542,7 @@
   function openDetail(key) {
     detailMode = 'project'; inboxDet = null; inboxDetSeq++; $('inbox-detail').hidden = true; $('day-view').hidden = true; dayKey = null; daySeq++; if (memView) memView.hide();
     detailKey = key; detailOpen = true; detail = null; detailSig = '';
-    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = false;
+    renderRc(); $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = false;
     $('pd-note').textContent = '';
     if (lastPanels) renderProjects(lastPanels.projects);
     renderCal();
@@ -1529,7 +1557,7 @@
   function closeDetail(refocus) {
     if (!detailOpen) return;
     detailOpen = false; detailKey = null; detail = null; detailSig = ''; detailSeq++; inboxDet = null; inboxDetSeq++; dayKey = null; daySeq++;
-    $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('day-view').hidden = true; if (memView) memView.hide(); $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0;
+    $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('day-view').hidden = true; if (memView) memView.hide(); $('terminal').hidden = false; $('term-empty').hidden = wsList.length > 0; renderRc();
     if (lastPanels) renderProjects(lastPanels.projects);
     renderCal();
     showActive(false); // 숨겨 둔 동안 바뀐 크기를 다시 맞추고 그린다(pty 는 그대로 살아 있다)
@@ -2264,7 +2292,7 @@
     closeMenu(false); closeUpdate(false);
     detailMode = 'day'; inboxDet = null; inboxDetSeq++; detailKey = null; detail = null; detailSig = ''; detailSeq++; detailOpen = true;
     dayKey = day; dayData = null; daySig = ''; daySeq++; clearTimeout(dayPendTimer);
-    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true; if (memView) memView.hide();
+    renderRc(); $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true; if (memView) memView.hide();
     $('day-view').hidden = false;
     $('day-view').setAttribute('aria-label', T('day.aria'));
     $('dv-title').textContent = fmtIntl(ymdDate(day), { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
@@ -2381,7 +2409,7 @@
   function openMemory(initialMode) {
     if (detailOpen && detailMode === 'memory') return;
     detailMode = 'memory'; inboxDet = null; inboxDetSeq++; dayKey = null; daySeq++; detailKey = null; detail = null; detailSig = ''; detailSeq++; detailOpen = true;
-    $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('day-view').hidden = true;
+    renderRc(); $('terminal').hidden = true; $('term-empty').hidden = true; $('proj-detail').hidden = true; $('inbox-detail').hidden = true; $('day-view').hidden = true;
     if (lastPanels) renderProjects(lastPanels.projects);
     renderCal();
     memView.show(initialMode).then(() => $('mv-title').focus());

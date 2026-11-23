@@ -854,7 +854,87 @@ function parseAgentRecord(text) {
   if (o && validModelId(o.model)) rec.model = o.model;
   if (o && validRecCwd(o.cwd)) rec.cwd = o.cwd; // 선택: 훅이 알려 주는 현재 위치(절대 경로). 틀린 값은 버린다
   if (o && Number.isInteger(o.bg) && o.bg >= 1 && o.bg <= 99) rec.bg = o.bg; // 선택: 메인 턴은 끝났고(idle) 백그라운드 서브에이전트가 도는 수. 틀린 값은 버리고 기록은 받는다
+  if (o && o.rc === true) rec.rc = true; // 선택: 원격 제어가 연결된 세션의 훅이 적는다. 불리언 true 만 받는다(문자열·숫자는 연결 아님). 없으면 연결 아님
   return rec;
+}
+
+// ---- 원격 제어(Remote Control) 토글: 순수 함수 ----
+// pty 출력에서 ANSI 를 벗기고, 마커 "/remote-control is active" 가 청크 경계에 걸쳐도 찾도록 짧은 꼬리(256자)만 들고 있다. 임의 바이트에도 안전하다
+const RC_TAIL_MAX = 256; const RC_SCAN_MAX = 1 << 20; const RC_MARKER = '/remote-control is active';
+function rcScan(tail, data) {
+  const t = typeof tail === 'string' ? tail.slice(-RC_TAIL_MAX) : '';
+  if (typeof data !== 'string' || !data) return { tail: t, active: false };
+  const d = data.length > RC_SCAN_MAX ? data.slice(-RC_SCAN_MAX) : data; // 너무 큰 청크는 끝부분만 본다(메모리·시간 상한)
+  let s = t + d;
+  s = s.replace(/\x1b\[\d{0,3}C/g, ' ') // 커서 오른쪽 이동은 공백으로 그려지는 일이 있어 공백으로 본다
+    .replace(/\x1b\][^\x07\x1b]{0,512}(?:\x07|\x1b\\)/g, '').replace(/\x1bP[^\x1b]{0,512}\x1b\\/g, '')
+    .replace(/\x1b\[[0-9;?<>=! ]{0,64}[@-~]/g, '').replace(/\x1b[@-Z\\-_]/g, '');
+  // 끝에 잘린 이스케이프는 다음 청크와 이어 벗기도록 꼬리에 남기고, 이번 검색에서는 뺀다
+  const cut = /\x1b(?:\[[0-9;?<>=! ]{0,64}|\][^\x07\x1b]{0,512}\x1b?|P[^\x1b]{0,512}\x1b?)?$/.exec(s);
+  const held = cut ? cut[0] : ''; if (cut) s = s.slice(0, cut.index);
+  s = s.replace(/\s+/g, ' ');
+  const i = s.indexOf(RC_MARKER);
+  if (i >= 0) return { tail: (s.slice(i + RC_MARKER.length) + held).slice(-RC_TAIL_MAX), active: true }; // 찾은 부분은 버려 같은 줄을 다시 세지 않는다
+  return { tail: (s + held).slice(-RC_TAIL_MAX), active: false };
+}
+// 입력줄에 보내지 않은 글이 있을 수 있는가(추측이다: 마지막 Enter·Ctrl+C·Ctrl+U 뒤에 사용자가 뭔가 눌렀으면 true). 터미널의 자동 응답(포커스·커서 위치·장치 속성·OSC·DCS)은 세지 않는다.
+// 방향키(이력 불러오기)·Esc·Tab·Backspace·Shift+Enter(ESC+CR)·붙여넣기도 입력이다. 비우는 것은 Enter(\r)·Ctrl+C·Ctrl+U 뿐이고 덩어리 안에서는 마지막 것이 정한다. 모르겠으면 dirty 를 유지한다
+function draftStep(dirty, data) {
+  let d = !!dirty;
+  if (typeof data !== 'string' || !data) return d;
+  const re = /\x1b\[200~[\s\S]*?(?:\x1b\[201~|$)|\x1b\][^\x07\x1b]{0,512}(?:\x07|\x1b\\)|\x1bP[^\x1b]{0,512}\x1b\\|\x1b\[([0-9;?<>=!-\/ ]*)([@-~])|\x1b[\r\n]|[\s\S]/g;
+  let m;
+  while ((m = re.exec(data)) !== null) {
+    const c = m[0];
+    if (c.startsWith('\x1b[200~')) d = true; // 붙여넣기: 안의 Enter 는 전송이 아니다
+    else if (c.startsWith('\x1b]') || c.startsWith('\x1bP')) continue; // OSC·DCS 응답
+    else if (m[2] !== undefined) { // CSI: 응답(?·>·<·= 로 시작, 또는 포커스 I/O·커서 위치 R·장치 속성 c·y·n·t)은 건너뛰고 나머지(방향키·Home/End·Delete·Shift+Tab 등)는 입력
+      if (!/^[?<>=]/.test(m[1]) && !(m[1] === '' && (m[2] === 'I' || m[2] === 'O')) && !'Rcynt'.includes(m[2])) d = true;
+    } else if (c === '\r' || c === '\x03' || c === '\x15') d = false;
+    else d = true; // 글자·Esc·Tab·Backspace·\n·ESC+CR(Shift+Enter) 등 나머지 입력
+  }
+  return d;
+}
+// 터미널의 "/remote-control is active" 는 글자일 뿐이라 모델·문서·사용자가 찍어도 나타난다. 사용자가 켜 달라고 한 직후(5분 안)이고 그 뒤에 훅 기록이 아직 없을 때만 증거로 받는다
+const RC_MARKER_MS = 5 * 60 * 1000;
+function rcMarkerOk({ asked, askedAt, hookAt, now } = {}) {
+  if (asked !== 'on' || !Number.isFinite(askedAt) || !Number.isFinite(now)) return false;
+  if (!(now - askedAt >= 0 && now - askedAt < RC_MARKER_MS)) return false;
+  return !(Number.isFinite(hookAt) && hookAt > askedAt); // 요청보다 새 훅 기록이 있으면 그것이 정한다
+}
+// 원격 제어 표시 상태. 증거 = 훅 기록의 rc(hookRc, hookAt)와 터미널 마커(seenAt, 켜짐). 시각은 now 로 눌러 미래 시각이 요청을 이기지 못하게 한다.
+// 요청(asked, askedAt)보다 새 증거가 요청과 같은 방향이면 증거가 이긴다. 60초 안에서는 증거가 없거나 반대면(연결이 끝나기 전에 쓴 기록일 수 있다) 진행 중으로 본다. 60초 뒤: 새 증거가 있으면 증거, 없고 요청이 바탕과 다르면 unknown
+const RC_PENDING_MS = 60000;
+function rcView(c) {
+  const { hookRc, hookAt, seenAt, asked, askedAt, now } = c || {};
+  const fin = Number.isFinite; const cl = (t) => (fin(now) && t > now ? now : t);
+  let evAt = -Infinity; let on = false;
+  if (typeof hookRc === 'boolean' && fin(hookAt)) { evAt = cl(hookAt); on = hookRc; }
+  if (fin(seenAt) && seenAt > 0 && cl(seenAt) >= evAt) { evAt = cl(seenAt); on = true; } // 같은 시각이면 터미널 마커(켜짐)를 따른다
+  const base = on ? 'on' : 'off';
+  if (!((asked === 'on' || asked === 'off') && fin(askedAt))) return base;
+  const newer = evAt > askedAt; const agrees = (asked === 'on') === on;
+  if (!fin(now) || now - askedAt < RC_PENDING_MS) return newer && agrees ? base : (asked === 'on' ? 'turning-on' : 'turning-off');
+  if (newer) return base;
+  return agrees ? base : 'unknown';
+}
+// 토글 문장을 보내도 되는가: { ok } | { ok:false, reason }.
+// view: rcView 결과(진행 중이면 pending, unknown 이면 보내지 않는다). state: busy 는 거부(권한·질문 창이 훅보다 먼저 떠 있을 수 있다), waiting 도 거부.
+// idle 은 출력이 READY_QUIET_MS 이상 조용해야 하고, none(훅 기록 전)은 ready(입력줄이 떴다는 fillStep 판정)일 때만
+function rcCanSend(c) {
+  const { hasTerm, shellFront, bracketed, state, dirty, cc, view, quietMs, ready } = c || {};
+  if (!hasTerm || cc !== true) return { ok: false, reason: 'no-session' };
+  if (shellFront) return { ok: false, reason: 'shell' };
+  if (view === 'turning-on' || view === 'turning-off') return { ok: false, reason: 'pending' };
+  if (view === 'unknown') return { ok: false, reason: 'unknown' };
+  if (bracketed !== true) return { ok: false, reason: 'not-ready' };
+  if (state === 'waiting') return { ok: false, reason: 'waiting' };
+  if (state === 'busy') return { ok: false, reason: 'busy' };
+  if (state === 'idle') { if (!(Number.isFinite(quietMs) && quietMs >= READY_QUIET_MS)) return { ok: false, reason: 'not-ready' }; }
+  else if (state === 'none') { if (ready !== true) return { ok: false, reason: 'not-ready' }; }
+  else return { ok: false, reason: 'not-ready' };
+  if (dirty) return { ok: false, reason: 'draft' };
+  return { ok: true };
 }
 
 // idle 이면서 백그라운드 서브에이전트가 도는 수(없으면 0). 기록의 at 이 ttlMs 보다 오래됐으면(SubagentStop 이 안 온 낡은 값) 0
@@ -3937,7 +4017,7 @@ const api = {
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey, isBufNavKey, isPromptBorder, promptEdgeRows, bufNavSeq, isStepKey, stepTarget, isFoldKey, foldTarget, arrowInput,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
   hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isShiftEnter, imeCanReset, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
-  parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
+  parseBattery, parseDiskFree, parseLogEvents, mergeBriefing, rcScan, draftStep, rcView, rcCanSend, rcMarkerOk, RC_PENDING_MS, RC_MARKER_MS, RC_TAIL_MAX,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
   SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth, calDayScript, calDayDateSetup, parseCalendarDay, calNotes, CAL_HELPER_FIRST_MS, CAL_HELPER_MS, CAL_OSA_MS, calHelperArgs, calHelperExit, calStatusWord, calChooseReader, calDayJobStale, calDayVictim, calDayAfterFail, CAL_DAY_FRESH_MS,

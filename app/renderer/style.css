@@ -85,6 +85,21 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family
 .term-wrap{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;background:#0E0B08;border:1px solid #3A2A1C;border-radius:12px;box-shadow:0 0 0 1px rgba(255,138,42,.08),0 0 40px rgba(255,138,42,.06);overflow:hidden}
 .term-bar{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mute);font-family:var(--mono);flex:none}
 .term-bar .accent{color:var(--or)}.term-bar .right{margin-left:auto}
+.rc-toggle{margin-left:12px;display:inline-flex;align-items:center;gap:8px;flex:none;padding:3px 8px;border:1px solid transparent;border-radius:12px;background:transparent;color:var(--mute);font:inherit;cursor:pointer;white-space:nowrap}
+.rc-toggle[hidden]{display:none}
+.rc-toggle:hover:not(:disabled){border-color:var(--line);color:var(--soft)}
+.rc-toggle:focus-visible{outline:2px solid var(--or);outline-offset:1px}
+.rc-toggle:disabled{opacity:.45;cursor:default}
+.rc-track{position:relative;flex:none;width:26px;height:14px;border-radius:7px;border:1px solid #4A3A2C;background:var(--panel);box-sizing:border-box}
+.rc-thumb{position:absolute;top:1px;left:1px;width:10px;height:10px;border-radius:5px;background:#6E5F50;transition:transform .15s,background .15s}
+.rc-toggle[aria-checked=true] .rc-track{border-color:var(--or);background:rgba(255,138,42,.18)}
+.rc-toggle[aria-checked=true] .rc-thumb{transform:translateX(12px);background:var(--or)}
+.rc-toggle[aria-checked=true]{color:var(--or2)}
+.rc-toggle[data-rc=turning-on] .rc-thumb,.rc-toggle[data-rc=turning-off] .rc-thumb,.rc-toggle[data-rc=unknown] .rc-thumb{animation:pulse 1.4s ease-in-out infinite}
+.rc-toggle[data-rc=turning-on] .rc-thumb{transform:translateX(12px)}
+.rc-toggle[data-rc=unknown] .rc-thumb{transform:translateX(6px);background:var(--or2)}
+@media (prefers-reduced-motion:reduce){.rc-thumb{transition:none;animation:none!important}}
+.ws .ws-rc{flex:none;font-size:10px;line-height:14px;padding:0 5px;border-radius:7px;border:1px solid var(--or);color:var(--or2);white-space:nowrap}
 #terminal{flex:1 1 auto;min-height:0;position:relative}
 .term-host{position:absolute;inset:0;padding:10px 12px}
 .term-host[hidden]{display:none}

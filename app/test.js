@@ -4237,6 +4237,171 @@ t('캘린더 권한 없음 문구가 ko·en 모두 있고 렌더러가 쓴다', 
   });
 }
 
+// ---- 원격 제어(Remote Control) 토글 ----
+t('parseAgentRecord: rc 는 불리언 true 일 때만(문자열·숫자·null 은 연결 아님)', () => {
+  const base = '"state":"idle","at":"2026-01-01T00:00:00Z"';
+  assert.strictEqual(L.parseAgentRecord('{' + base + ',"rc":true}').rc, true);
+  for (const v of ['"true"', '1', '0', 'false', 'null', '"yes"', '[true]', '{}', '"1"']) assert.ok(!('rc' in L.parseAgentRecord('{' + base + ',"rc":' + v + '}')), v);
+  assert.ok(!('rc' in L.parseAgentRecord('{' + base + '}')), '필드가 없으면 연결 아님');
+  assert.deepStrictEqual(L.parseAgentRecord('{' + base + ',"rc":true,"bg":2}'), { state: 'idle', atMs: Date.parse('2026-01-01T00:00:00Z'), bg: 2, rc: true });
+  assert.strictEqual(L.parseAgentRecord('{' + base + ',"rc":true,"x":"' + 'a'.repeat(L.AGENT_STATE_MAX || 9000) + '"}'), null, '크기 상한은 그대로');
+});
+t('rcScan: 마커를 찾고 ANSI·청크 경계·긴 입력을 견딘다', () => {
+  const M = '/remote-control is active';
+  assert.deepStrictEqual(L.rcScan('', 'hello'), { tail: 'hello', active: false });
+  assert.strictEqual(L.rcScan('', M + ' · Continue here, on your phone, or at https://x.example/y').active, true);
+  assert.strictEqual(L.rcScan('', '\x1b[1m\x1b[38;2;1;2;3m' + M + '\x1b[0m').active, true, '앞뒤 ANSI');
+  assert.strictEqual(L.rcScan('', '/remote-control\x1b[0m\x1b[1m is\x1b[22m active').active, true, '마커 가운데 ANSI');
+  assert.strictEqual(L.rcScan('', '/remote-control\x1b[1Cis\x1b[1Cactive').active, true, '커서 이동으로 그린 공백');
+  assert.strictEqual(L.rcScan('', '/remote-control\x1b]0;title\x07 is active').active, true, '가운데 OSC');
+  assert.strictEqual(L.rcScan('', '/remote-control\r\n  is   active').active, true, '공백·줄바꿈 정규화');
+  // 청크 경계: 어디서 잘라도 두 번째 호출에서 찾는다
+  for (let i = 1; i < M.length; i++) { const a = L.rcScan('', 'xx ' + M.slice(0, i)); assert.strictEqual(a.active, false, String(i)); assert.strictEqual(L.rcScan(a.tail, M.slice(i)).active, true, 'split ' + i); }
+  // ANSI 이스케이프가 청크 경계에 걸려도
+  const raw = '/remote-control\x1b[38;2;10;20;30m is active';
+  for (let i = 1; i < raw.length; i++) { const a = L.rcScan('', raw.slice(0, i)); assert.strictEqual(L.rcScan(a.tail, raw.slice(i)).active, true, 'esc split ' + i); }
+  assert.strictEqual(L.rcScan('', '/remote-control is activ').active, false);
+  assert.strictEqual(L.rcScan('', '/remote-control was active').active, false);
+  assert.strictEqual(L.rcScan('', 'remote-control is active').active, false, '슬래시 없음');
+  // 찾은 뒤에는 같은 줄을 다시 세지 않는다
+  const f = L.rcScan('', M); assert.strictEqual(L.rcScan(f.tail, ' more').active, false);
+  // 꼬리 상한과 큰 입력
+  const big = 'a'.repeat(5 << 20); const r = L.rcScan('', big); assert.ok(r.tail.length <= L.RC_TAIL_MAX && r.active === false);
+  assert.strictEqual(L.rcScan('', M + 'z'.repeat(2 << 20)).active, false, '1MB 보다 앞의 마커는 보지 않는다(상한)');
+  assert.strictEqual(L.rcScan('', 'z'.repeat(2 << 20) + M).active, true);
+  assert.ok(L.rcScan('q'.repeat(100000), 'x').tail.length <= L.RC_TAIL_MAX, '긴 꼬리를 받아도 상한');
+  let tail = ''; for (let i = 0; i < 2000; i++) tail = L.rcScan(tail, '\x1b]'.repeat(50) + 'x'.repeat(300)).tail; assert.ok(tail.length <= L.RC_TAIL_MAX, '끝나지 않는 OSC 가 이어져도 상한');
+  // 임의 바이트·이상한 입력
+  for (const bad of [null, undefined, 5, {}, [], '']) assert.strictEqual(L.rcScan('', bad).active, false);
+  assert.strictEqual(L.rcScan(null, 'a').tail, 'a'); assert.strictEqual(L.rcScan(7, 'a').tail, 'a');
+  let seed = 7; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  let tl = ''; for (let i = 0; i < 300; i++) { let d = ''; const n = Math.floor(rnd() * 400); for (let j = 0; j < n; j++) d += String.fromCharCode(Math.floor(rnd() * 0x30000)); const x = L.rcScan(tl, d); assert.ok(x.tail.length <= L.RC_TAIL_MAX && typeof x.active === 'boolean'); tl = x.tail; }
+});
+t('draftStep: 마지막으로 눌린 관련 키가 정한다', () => {
+  const D = L.draftStep;
+  assert.strictEqual(D(false, 'a'), true); assert.strictEqual(D(false, '한'), true); assert.strictEqual(D(false, ' '), true);
+  assert.strictEqual(D(false, '\x1b[200~paste\x1b[201~'), true, '붙여넣기'); assert.strictEqual(D(false, '\x1b[200~\x1b[201~'), true, '빈 붙여넣기도');
+  assert.strictEqual(D(false, '\x1b[200~line1\rline2'), true, '끝나지 않은 붙여넣기'); assert.strictEqual(D(false, '\x1b[200~a\rb\x1b[201~'), true, '붙여넣기 안의 Enter');
+  assert.strictEqual(D(true, '\x1b[200~a\r\x1b[201~'), true);
+  assert.strictEqual(D(true, '\r'), false); assert.strictEqual(D(true, '\x03'), false); assert.strictEqual(D(true, '\x15'), false);
+  assert.strictEqual(D(false, 'abc\r'), false, '쓰고 Enter'); assert.strictEqual(D(false, '\rabc'), true, 'Enter 뒤 글자'); assert.strictEqual(D(true, 'x\x03y'), true);
+  assert.strictEqual(D(false, 'a\x15'), false); assert.strictEqual(D(true, '\x1b[A\r'), false); assert.strictEqual(D(false, '\r\x1b[A'), true);
+  assert.strictEqual(D(false, '\x1b[200~x\x1b[201~\r'), false, '붙여넣고 Enter');
+  // 이력 불러오기·편집 키도 글이 생길 수 있다
+  for (const d of ['\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D', '\x1b[H', '\x1b[F', '\x1b[3~', '\x1b[1;5D', '\x1b[Z', '\x1b', '\x7f', '\t', '\x19', '\x12', '\n', '\x1b\r', '\x1b[1;2A']) { assert.strictEqual(D(false, d), true, JSON.stringify(d)); assert.strictEqual(D(true, d), true, JSON.stringify(d)); }
+  assert.strictEqual(D(true, '\x1b\r'), true, 'Shift+Enter(ESC+CR)는 전송이 아니다'); assert.strictEqual(D(true, '\n'), true);
+  // 터미널 자동 응답은 바꾸지 않는다
+  for (const d of ['\x1b[I', '\x1b[O', '\x1b[12;40R', '\x1b[?1;2c', '\x1b[>0;276;0c', '\x1b[?0u', '\x1b[<0;5;5M', '\x1b]10;rgb:ffff/ffff/ffff\x07', '\x1b]11;rgb:0000/0000/0000\x1b\\', '\x1bP1$r0m\x1b\\', '\x1b[?2004;2$y', '']) { assert.strictEqual(D(false, d), false, JSON.stringify(d)); assert.strictEqual(D(true, d), true, JSON.stringify(d)); }
+  assert.strictEqual(D(false, '\x1b[I\x1b[A'), true); assert.strictEqual(D(true, '\x1b[A\x1b[I'), true); assert.strictEqual(D(true, '\r\x1b[I'), false);
+  for (const bad of [null, undefined, 3, {}]) { assert.strictEqual(D(true, bad), true); assert.strictEqual(D(false, bad), false); }
+  assert.strictEqual(D(undefined, 'a'), true); assert.strictEqual(D(undefined, '\x1b[I'), false);
+  assert.strictEqual(D(false, 'x'.repeat(1 << 20)), true);
+});
+t('rcMarkerOk: 마커는 켜 달라고 한 직후, 새 훅 기록이 없을 때만', () => {
+  const K = L.rcMarkerOk; const N = 10000000; const M = L.RC_MARKER_MS; assert.strictEqual(M, 300000);
+  assert.strictEqual(K({ asked: 'on', askedAt: N - 1000, hookAt: NaN, now: N }), true);
+  assert.strictEqual(K({ asked: null, askedAt: 0, now: N }), false, '요청 없음(모델·문서가 찍은 글자)'); assert.strictEqual(K({ now: N }), false); assert.strictEqual(K(), false);
+  assert.strictEqual(K({ asked: 'off', askedAt: N - 1000, now: N }), false, '끄는 중에는 받지 않는다');
+  assert.strictEqual(K({ asked: 'on', askedAt: N - M + 1, now: N }), true, '5분 직전'); assert.strictEqual(K({ asked: 'on', askedAt: N - M, now: N }), false, '정확히 5분'); assert.strictEqual(K({ asked: 'on', askedAt: N - M - 1, now: N }), false);
+  assert.strictEqual(K({ asked: 'on', askedAt: N - 1000, hookAt: N - 500, now: N }), false, '요청보다 새 훅 기록');
+  assert.strictEqual(K({ asked: 'on', askedAt: N - 1000, hookAt: N - 1000, now: N }), true, '같은 시각은 새롭지 않다'); assert.strictEqual(K({ asked: 'on', askedAt: N - 1000, hookAt: N - 2000, now: N }), true, '요청보다 오래된 기록');
+  assert.strictEqual(K({ asked: 'on', askedAt: N + 5, now: N }), false, '미래의 요청'); assert.strictEqual(K({ asked: 'on', askedAt: NaN, now: N }), false); assert.strictEqual(K({ asked: 'on', askedAt: N - 1, now: NaN }), false);
+});
+t('rcView: 증거·요청·60초 경계의 모든 갈래', () => {
+  const V = L.rcView; const N = 1000000; const P = L.RC_PENDING_MS; assert.strictEqual(P, 60000);
+  assert.strictEqual(V({ now: N }), 'off', '증거 없음');
+  assert.strictEqual(V({ hookRc: false, hookAt: N - 5, now: N }), 'off'); assert.strictEqual(V({ hookRc: true, hookAt: N - 5, now: N }), 'on');
+  assert.strictEqual(V({ seenAt: N - 5, now: N }), 'on', '터미널 마커만'); assert.strictEqual(V({ seenAt: 0, now: N }), 'off');
+  assert.strictEqual(V({ hookRc: false, hookAt: N - 10, seenAt: N - 5, now: N }), 'on'); assert.strictEqual(V({ hookRc: false, hookAt: N - 5, seenAt: N - 10, now: N }), 'off');
+  assert.strictEqual(V({ hookRc: false, hookAt: N - 5, seenAt: N - 5, now: N }), 'on', '같은 시각이면 마커');
+  assert.strictEqual(V({ hookRc: 'true', hookAt: N - 5, now: N }), 'off'); assert.strictEqual(V({ hookRc: true, hookAt: NaN, now: N }), 'off');
+  // 진행 중(60초 안): 새 증거가 없거나 반대면 진행 중, 같은 방향이면 증거
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 1, now: N }), 'turning-on'); assert.strictEqual(V({ asked: 'off', askedAt: N - 1, now: N }), 'turning-off', '이미 꺼져 있어도 증거가 올 때까지');
+  assert.strictEqual(V({ asked: 'off', askedAt: N - 1, hookRc: true, hookAt: N - 100, now: N }), 'turning-off', '오래된 증거');
+  assert.strictEqual(V({ asked: 'on', askedAt: N - (P - 1), now: N }), 'turning-on', '59.999초');
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 10, hookRc: true, hookAt: N - 5, now: N }), 'on', '새 증거가 요청과 같다');
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 10, seenAt: N - 5, now: N }), 'on');
+  assert.strictEqual(V({ asked: 'off', askedAt: N - 10, hookRc: false, hookAt: N - 5, now: N }), 'off');
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 10, hookRc: false, hookAt: N - 5, now: N }), 'turning-on', '연결이 끝나기 전에 쓴 기록(반대)은 진행 중을 지키지 않는다');
+  assert.strictEqual(V({ asked: 'off', askedAt: N - 10, hookRc: true, hookAt: N - 5, now: N }), 'turning-off');
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 10, hookRc: true, hookAt: N - 10, now: N }), 'turning-on', '같은 시각은 새 증거가 아니다');
+  // 60초 뒤
+  assert.strictEqual(V({ asked: 'on', askedAt: N - P, now: N }), 'unknown', '정확히 60초'); assert.strictEqual(V({ asked: 'on', askedAt: N - P - 1, now: N }), 'unknown');
+  assert.strictEqual(V({ asked: 'off', askedAt: N - P, hookRc: true, hookAt: N - 70000, now: N }), 'unknown');
+  assert.strictEqual(V({ asked: 'off', askedAt: N - P, now: N }), 'off', '꺼 달라고 했고 바탕도 꺼짐'); assert.strictEqual(V({ asked: 'on', askedAt: N - P, hookRc: true, hookAt: N - 70000, now: N }), 'on');
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 100000, hookRc: false, hookAt: N - 5, now: N }), 'off', '새 증거(반대)가 있으면 증거');
+  assert.strictEqual(V({ asked: 'off', askedAt: N - 100000, hookRc: true, hookAt: N - 5, now: N }), 'on'); assert.strictEqual(V({ asked: 'on', askedAt: N - 100000, hookRc: true, hookAt: N - 5, now: N }), 'on');
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 100000, hookRc: true, hookAt: N - 100000, now: N }), 'on', '요청과 같은 시각 증거는 새롭지 않지만 바탕과 요청이 같다');
+  // 미래 시각 증거는 now 로 누른다: 요청보다 앞서지 못한다
+  assert.strictEqual(V({ asked: 'on', askedAt: N - 10, hookRc: false, hookAt: N + 999999, now: N }), 'turning-on', '미래 at 은 now 로 눌려 새 증거(반대)일 뿐');
+  assert.strictEqual(V({ asked: 'off', askedAt: N - 100000, hookRc: true, hookAt: N + 999999, now: N }), 'on');
+  assert.strictEqual(V({ asked: 'on', askedAt: N + 50, hookRc: true, hookAt: N + 100, now: N }), 'turning-on', '요청이 미래여도 증거(now)보다 새롭다');
+  for (const a of ['x', '', null, undefined, 1, true]) assert.strictEqual(V({ asked: a, askedAt: N - 1, now: N }), 'off', String(a));
+  assert.strictEqual(V({ asked: 'on', askedAt: NaN, now: N }), 'off'); assert.strictEqual(V(), 'off'); assert.strictEqual(V(null), 'off');
+  assert.ok(['off', 'on', 'turning-on', 'turning-off', 'unknown'].includes(V({ asked: 'on', askedAt: 5, now: NaN })));
+});
+t('rcCanSend: 보내도 되는 때와 이유', () => {
+  const ok = { hasTerm: true, shellFront: false, bracketed: true, state: 'idle', dirty: false, cc: true, view: 'off', quietMs: 400, ready: false }; const C = (o) => L.rcCanSend({ ...ok, ...o });
+  const R = (o) => assert.deepStrictEqual(C(o), { ok: false, reason: o.__r }); void R;
+  assert.deepStrictEqual(C({}), { ok: true }); assert.deepStrictEqual(C({ view: 'on' }), { ok: true });
+  assert.deepStrictEqual(C({ quietMs: 399 }), { ok: false, reason: 'not-ready' }, 'idle 은 400ms 조용해야'); assert.deepStrictEqual(C({ quietMs: undefined }), { ok: false, reason: 'not-ready' }); assert.deepStrictEqual(C({ quietMs: 5000 }), { ok: true });
+  assert.deepStrictEqual(C({ state: 'busy' }), { ok: false, reason: 'busy' }, '작업 중에는 보내지 않는다');
+  assert.deepStrictEqual(C({ state: 'none', ready: true }), { ok: true }); assert.deepStrictEqual(C({ state: 'none', ready: false }), { ok: false, reason: 'not-ready' }); assert.deepStrictEqual(C({ state: 'none', ready: 'yes' }), { ok: false, reason: 'not-ready' });
+  assert.deepStrictEqual(C({ hasTerm: false }), { ok: false, reason: 'no-session' }); assert.deepStrictEqual(C({ cc: false }), { ok: false, reason: 'no-session' }); assert.deepStrictEqual(C({ cc: undefined }), { ok: false, reason: 'no-session' });
+  assert.deepStrictEqual(C({ shellFront: true }), { ok: false, reason: 'shell' });
+  assert.deepStrictEqual(C({ bracketed: false }), { ok: false, reason: 'not-ready' }); assert.deepStrictEqual(C({ bracketed: undefined }), { ok: false, reason: 'not-ready' });
+  assert.deepStrictEqual(C({ state: 'waiting' }), { ok: false, reason: 'waiting' });
+  for (const st of ['pending', 'exited', 'unavailable', 'unknown', '', undefined]) assert.deepStrictEqual(C({ state: st }), { ok: false, reason: 'not-ready' }, String(st));
+  assert.deepStrictEqual(C({ dirty: true }), { ok: false, reason: 'draft' }); assert.deepStrictEqual(C({ dirty: true, state: 'waiting' }), { ok: false, reason: 'waiting' }, '권한 질문이 먼저'); assert.deepStrictEqual(C({ dirty: true, state: 'busy' }), { ok: false, reason: 'busy' });
+  assert.deepStrictEqual(C({ view: 'unknown' }), { ok: false, reason: 'unknown' }, 'unknown 은 보내지 않는다'); assert.deepStrictEqual(C({ view: 'unknown', state: 'none', ready: true }), { ok: false, reason: 'unknown' });
+  assert.deepStrictEqual(C({ view: 'turning-on' }), { ok: false, reason: 'pending' }); assert.deepStrictEqual(C({ view: 'turning-off' }), { ok: false, reason: 'pending' });
+  assert.deepStrictEqual(C({ shellFront: true, hasTerm: false }), { ok: false, reason: 'no-session' });
+  assert.deepStrictEqual(L.rcCanSend(), { ok: false, reason: 'no-session' });
+});
+t('원격 토글 시나리오: 이력 불러오기 뒤 거부, 마커·진행 중·unknown 흐름', () => {
+  // 방향키로 이력을 불러오면 draft 가 켜져 보내지 않는다
+  let draft = L.draftStep(false, '\x1b[A'); const send = (o) => L.rcCanSend({ hasTerm: true, shellFront: false, bracketed: true, state: 'idle', dirty: draft, cc: true, view: 'off', quietMs: 1000, ...o });
+  assert.deepStrictEqual(send(), { ok: false, reason: 'draft' }); draft = L.draftStep(draft, '\x15'); assert.deepStrictEqual(send(), { ok: true }, 'Ctrl+U 로 비우면 보낸다');
+  // 요청 없이 마커가 찍혀도 증거가 아니다(main 은 rcMarkerOk 가 true 일 때만 seenAt 을 적는다)
+  const N = 5e6; assert.strictEqual(L.rcMarkerOk({ asked: null, askedAt: 0, hookAt: NaN, now: N }), false);
+  // 켜 달라고 했고 마커가 받아들여진 뒤 → on 이 되고, 다음 누름은 끄기
+  const askedAt = N - 3000; assert.strictEqual(L.rcMarkerOk({ asked: 'on', askedAt, hookAt: NaN, now: N }), true);
+  assert.strictEqual(L.rcView({ asked: 'on', askedAt, seenAt: N, now: N }), 'on');
+  // 마커 뒤 더 새로운 훅 기록(꺼짐)이 오면 그것이 이긴다
+  assert.strictEqual(L.rcView({ asked: 'on', askedAt, seenAt: N - 1000, hookRc: false, hookAt: N, now: N }), 'turning-on', '60초 안에서는 반대 훅 기록이 와도 진행 중');
+  assert.strictEqual(L.rcView({ asked: 'on', askedAt, seenAt: N - 1000, hookRc: false, hookAt: N + 1, now: N + 61000 }), 'off', '60초 뒤에는 새 증거가 이긴다');
+  // 60초 지나 unknown 이면 클릭은 거부
+  const v = L.rcView({ asked: 'on', askedAt: N - 61000, now: N }); assert.strictEqual(v, 'unknown'); assert.deepStrictEqual(send({ view: v }), { ok: false, reason: 'unknown' });
+});
+t('원격 토글 연결: main 은 고정 문장만 쓰고, 렌더러·메뉴·i18n·preload 가 맞물린다', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const rd = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+  assert.ok(main.includes("const RC_COMMAND = '\\x1b[200~/remote-control\\x1b[201~\\r';"), '고정 문장');
+  const fn = main.slice(main.indexOf('function rcToggle('), main.indexOf("ipcMain.handle('rc:toggle'"));
+  assert.strictEqual((fn.match(/term\.write\(/g) || []).length, 1); assert.ok(fn.includes('w.term.write(RC_COMMAND)'));
+  assert.ok(/picking \|\| closing \|\| quitAsking \|\| restarting/.test(fn) && /w\.id !== activeId/.test(fn) && /L\.rcCanSend\(/.test(fn) && /view,/.test(fn));
+  assert.ok(!/typedN/.test(fn.replace(/\/\/.*/g, '')), 'typedN 은 올리지 않는다');
+  assert.ok(/L\.fillStep\(/.test(fn) && /claudeUpNow\(w\)/.test(fn), 'none 의 준비 판정은 prefillChild 와 같은 fillStep');
+  assert.ok(/L\.rcMarkerOk\(/.test(main), '마커는 rcMarkerOk 를 거친다');
+  assert.ok(/ipcMain\.handle\('rc:toggle', \(e, id\) => \{\n  const w = wsFrom\(e, id\);/.test(main), '발신자·작업 공간 검사');
+  assert.ok(/rc: rcViewOf\(w, rec, now\)/.test(main) && /L\.rcScan\(w\.rcTail, d\)/.test(main) && /L\.draftStep\(w\.draft, data\)/.test(main));
+  assert.strictEqual((main.match(/rcReset\(w\)/g) || []).length >= 6, true, 'pty 가 새로 뜨거나 끝나는 모든 자리에서 초기화');
+  assert.strictEqual((main.match(/w\.draft = true/g) || []).length, 4, '프로그램이 입력줄에 채우는 네 자리(writePrompt·files:drop·prefillChild·첫 만남)');
+  const mi = main.slice(main.indexOf("label: tr('menu.rc')"), main.indexOf("label: tr('menu.rc')") + 260);
+  assert.ok(/label: tr\('menu\.rc'\)/.test(main) && !/accelerator/.test(mi.split('click')[0]), '메뉴에 단축키 없음');
+  assert.ok(/sendToRenderer\('ui:rc-toggle'\)/.test(mi) && !/rcToggle\(/.test(mi), '메뉴는 렌더러의 같은 처리를 거친다(main 이 직접 부르지 않는다)');
+  assert.ok(/onRcToggle\(\(\) => \{ rcClick\(\); \}\)/.test(rd) && /ui:rc-toggle/.test(pre));
+  assert.ok(/async function rcClick\(\) \{[^]*?modalOpen\(\) \|\| detailOpen[^]*?window\.maru\.rcToggle/.test(rd), '단추·메뉴 모두 열린 창·상세 화면을 확인');
+  assert.ok(/rcToggle: \(id\) => ipcRenderer\.invoke\('rc:toggle', String\(id\)\)/.test(pre));
+  assert.ok(/id="rc-toggle"[^>]*role="switch"[^>]*aria-checked="false"/.test(html) && /<button type="button" id="rc-toggle"/.test(html));
+  assert.ok(/window\.maru\.rcToggle\(activeId\)/.test(rd) && !/rc-toggle'\)\.focus\(/.test(rd), '렌더 때 포커스를 훔치지 않는다');
+  const I = require('./i18n.js'); const keys = Object.keys(I.STR.ko).filter((k) => k.startsWith('rc.') || k === 'menu.rc');
+  assert.ok(keys.length >= 18); for (const k of keys) { assert.ok(I.STR.en[k], 'en ' + k); assert.ok(!/—/.test(I.STR.ko[k] + I.STR.en[k]), k); }
+  for (const st of ['off', 'on', 'turning-on', 'turning-off', 'unknown']) assert.ok(I.STR.ko['rc.label.' + st] && I.STR.en['rc.label.' + st]);
+  assert.strictEqual(I.STR.ko['rc.err.draft'], '입력줄에 쓰던 글이 있을 수 있습니다. 보내거나 Ctrl+U 로 비운 뒤 다시 누르세요.');
+  for (const r of ['unknown', 'busy', 'pending', 'waiting', 'draft', 'shell', 'not-ready', 'no-session']) assert.ok(I.STR.ko['rc.err.' + r] && I.STR.en['rc.err.' + r], r);
+});
+
 (async () => {
   for (const f of pending) await f();
   fs.rmSync(tmp, { recursive: true, force: true });

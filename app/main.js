@@ -65,6 +65,7 @@ const VERSION = app.getVersion();
 const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsdrag', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
 const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew' || TEST_UI === 'wsmenu' || TEST_UI === 'wsrename' || TEST_UI === 'wsdrag'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을, wsmenu 는 둘째 행의 우클릭 메뉴를, wsrename 은 둘째 행의 이름 편집을 연 채로 둔다, wsdrag 는 끌어 놓기 표시를 화면에 보인다)
+const FAKE_RC = ['on', 'off', 'turning-on', 'turning-off', 'unknown'].includes(process.env.MARU_APP_RC || '') ? process.env.MARU_APP_RC : null; // 시험 전용: MARU_APP_UI=hierarchy 에서 모든 작업 공간의 원격 표시를 이 값으로 고정(화면 캡처용)
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX && !FAKE_HIER && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
@@ -498,6 +499,8 @@ function writeFxState(w) {
   try { fs.mkdirSync(STATE_DIR(), { recursive: true }); fs.writeFileSync(stateFile(w), JSON.stringify({ state: w.fx.state, at: new Date().toISOString() }) + '\n'); } catch { /* 시험용 */ }
 }
 
+// 원격 제어 표시용 상태(작업 공간마다, 메모리에만): rcTail 터미널 마커 검색 꼬리, rcSeenAt 마커를 본 시각, rcAsked/rcAskedAt 사용자가 토글을 요청한 방향·시각, draft 입력줄에 보내지 않은 글이 있을 것 같은가
+function rcReset(w) { w.rcTail = ''; w.rcSeenAt = 0; w.rcAsked = null; w.rcAskedAt = 0; w.draft = false; }
 function spawnPty(w, cols, rows) {
   if (w.term) return true;
   if (w.unavailable) { if (dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } else { dropPromptFile(w); return false; } } // 디스크가 다시 연결됐으면 시작 가능
@@ -523,11 +526,16 @@ function spawnPty(w, cols, rows) {
   const fresh = !resume && !w.fx && !SMOKE && resumeActive() ? crypto.randomUUID().toLowerCase() : null; // 새 세션의 uuid 는 앱이 정한다(--session-id): 그 uuid 가 이 작업 공간의 claudeSid
   if (resume) { w.claudeSid = resume; w.claudeSidAt = Date.now(); } else if (fresh) { w.claudeSid = fresh; w.claudeSidAt = Date.now(); saveWsLater(); } else if (!w.fx) { w.claudeSid = null; w.claudeSidAt = null; }
   if (w.startNote) { w.noteKind = w.startNote; w.noteShownAt = null; w.startNote = null; } // 이어 열었거나 새로 시작한 이유(탭 안내용): 처음 보일 때까지 남고, 보인 뒤 몇 초만 // 앱을 다시 켜며 이어 열었거나 새로 시작한 이유(탭 안내용, 몇 초만)
-  w.awaitClaude = !!w.expectClaude || !!resume; w.expectClaude = false; w.sawOff = false; w.claudeUp = false; w.typedN = 0;
+  w.awaitClaude = !!w.expectClaude || !!resume; w.expectClaude = false; w.sawOff = false; w.claudeUp = false; w.typedN = 0; rcReset(w);
   self.onData((d) => {
     if (w.term !== self) return;
     w.lastOutputAt = Date.now();
     trackBracketed(w, d);
+    const rs = L.rcScan(w.rcTail, d); w.rcTail = rs.tail;
+    if (rs.active) { // 터미널에 "/remote-control is active" 가 보였다. 글자일 뿐이라 켜 달라고 한 직후(5분)이고 그 뒤 훅 기록이 아직 없을 때만 증거로 받는다
+      const hr = readAgentState(w); const nw = Date.now();
+      if (L.rcMarkerOk({ asked: w.rcAsked, askedAt: w.rcAskedAt, hookAt: hr ? hr.atMs : NaN, now: nw })) { w.rcSeenAt = nw; wsChanged(false); }
+    }
     if (SMOKE) smokeOut += d;
     sendToRenderer('pty:data', w.id, d);
     if (SMOKE) checkSmoke();
@@ -537,14 +545,14 @@ function spawnPty(w, cols, rows) {
     const fb = L.resumeFailureDecision({ resumed: w.launchResumed === true, exitCode, ageMs: Date.now() - (w.startedAt || 0), ready: w.claudeUp === true, fellBack: w.fellBack === true });
     if (fb === 'fallback' && w.fromTodo) w.resumeFailed = true; // 할 일 클릭으로 연 탭: 흐름이 알아서 "원래 세션을 열 수 없음" 경로로 간다
     else if (fb === 'fallback') { // 이어 열기 실패(No conversation found 등): 저장된 세션을 지우고 한 번만 새 세션으로 다시 띄운다(되풀이 금지)
-      w.term = null; w.bracketed = false; w.resumeSid = null; w.claudeUp = false; removeStateFile(w);
+      w.term = null; w.bracketed = false; w.resumeSid = null; w.claudeUp = false; rcReset(w); removeStateFile(w);
       w.fellBack = true; w.claudeSid = null; w.claudeSidAt = null; w.prevSid = null; w.startNote = 'failed';
       sendToRenderer('pty:data', w.id, '\x1b[2J\x1b[3J\x1b[H');
       spawnPty(w, w.cols || 80, w.rows || 24);
       return;
     }
     dropPromptFile(w); w.reqKey = null;
-    w.term = null; w.bracketed = false; w.exited = true; w.resumeSid = null; w.claudeUp = false; removeStateFile(w); // 실행에 실패한 이어 열기 표시를 남기지 않는다
+    w.term = null; w.bracketed = false; w.exited = true; w.resumeSid = null; w.claudeUp = false; rcReset(w); removeStateFile(w); // 실행에 실패한 이어 열기 표시를 남기지 않는다
     sendToRenderer('pty:exit', w.id, exitCode);
     wsChanged(false);
   });
@@ -570,7 +578,7 @@ function spawnPty(w, cols, rows) {
 // pty 의 프로세스 그룹에 SIGHUP(터미널을 닫을 때와 같다). 2초 안에 안 끝나면 SIGKILL.
 const dying = new Set();
 function killPty(w) {
-  const old = w.term; w.term = null; w.bracketed = false; w.reqKey = null; removeStateFile(w);
+  const old = w.term; w.term = null; w.bracketed = false; w.reqKey = null; rcReset(w); removeStateFile(w);
   if (!old) return;
   let dead = false; const pid = old.pid;
   dying.add(pid); // 닫는 중인 그룹: 이 사이에 앱이 끝나면 killAllSync 가 마저 정리한다
@@ -582,7 +590,7 @@ function killPty(w) {
 // 종료 경로: 모든 프로세스 그룹에 SIGHUP → 짧게(300ms) 기다림 → SIGKILL. 타이머에 기대지 않고 동기로 끝낸다.
 function killAllSync() {
   const pids = [...dying]; dying.clear();
-  for (const w of wsOrder()) { if (w.term) { pids.push(w.term.pid); w.term = null; w.bracketed = false; } removeStateFile(w); }
+  for (const w of wsOrder()) { if (w.term) { pids.push(w.term.pid); w.term = null; w.bracketed = false; rcReset(w); } removeStateFile(w); }
   if (!pids.length) return;
   for (const pid of pids) { try { process.kill(-pid, 'SIGHUP'); } catch { /* 이미 종료 */ } }
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); } catch { /* 무시 */ }
@@ -756,8 +764,9 @@ const wsView = () => {
       parentId: o.depth === 1 ? w.parentId : null, depth: o.depth, project: w.project || null, team: L.teamChip(w.squad, FAKE_SQ_UI ? fakeSquads() : squads), loc: L.currentLocation({ recCwd: rec && rec.cwd, cwd: w.cwd, cwdReal: w.cwdReal }),
       reports: own ? own.count : 0, reportAt, flash: !!w.flashUntil && w.flashUntil > now, auto: !!w.autoStart && !w.term && !w.exited && !w.unavailable,
       cnote: w.childNote && now - w.childNote.at < CNOTE_MS ? { kind: w.childNote.kind, reason: w.childNote.reason || null, title: w.childNote.title || null } : null,
-      subs: w.parentId ? L.childSubNames(readSubs(w)) : [], unread: !!w.unread };
-    return FAKE_HIER && w.fakeView ? { ...v, ...w.fakeView, state: w.fakeView.state || state } : v;
+      subs: w.parentId ? L.childSubNames(readSubs(w)) : [], unread: !!w.unread, rc: rcViewOf(w, rec, now) }; // rc 는 시간에 따라 바뀐다: 렌더러가 1초마다 ws:get 을 하므로 60초 진행 중 표시가 끝나는 순간도 따로 알릴 필요가 없다
+    if (FAKE_HIER && w.fakeView) return { ...v, ...(FAKE_RC ? { rc: FAKE_RC, cc: true } : {}), ...w.fakeView, state: w.fakeView.state || state }; // fakeView 에 rc 를 직접 줄 수도 있다
+    return v;
   });
 };
 const attention = () => wsOrder().filter((w) => { const s = derivedState(w, wsState(w)); return s === 'busy' || s === 'waiting' || s === 'unknown'; }); // 상태를 알 수 없는 실행 중 세션도 종료 확인에 센다
@@ -961,6 +970,9 @@ function buildMenu() {
     { label: tr('menu.terminal'), submenu: [{
       label: tr('menu.restart'), accelerator: 'CmdOrCtrl+Shift+R',
       click: () => { restartActive(); },
+    }, {
+      label: tr('menu.rc'), // 단축키 없음
+      click: () => { sendToRenderer('ui:rc-toggle'); }, // 렌더러가 단추와 같은 처리(열린 창·상세 화면 확인)를 거쳐 rc:toggle 을 부른다
     }] },
     { label: tr('set.title'), submenu: [{
       label: tr('menu.openSettings'), accelerator: 'CmdOrCtrl+,',
@@ -1399,6 +1411,7 @@ ipcMain.on('pty:write', (e, id, data) => {
   if (!w || typeof data !== 'string' || data.length > 1 << 20 || !w.term) return;
   if (L.isUserInput(data)) w.typedN = (w.typedN || 0) + 1; // 터미널이 스스로 보내는 응답은 입력으로 세지 않는다
   if (L.shouldDropPrev({ data, typedN: w.typedN || 0, hasPrev: !!w.prevSid })) { w.prevSid = null; saveWsLater(); } // 새 세션에서 첫 프롬프트를 보냈다
+  w.draft = L.draftStep(w.draft, data); // 입력줄에 보내지 않은 글이 있을 것 같은가(원격 토글이 쓰던 글을 건드리지 않게)
   w.term.write(data);
 });
 // 사용자가 이 작업 공간 터미널에서 Esc 를 눌렀다(렌더러가 신뢰된 keydown 만 보낸다). busy/waiting 일 때만 시각을 적는다. 상태 파일은 쓰지 않는다
@@ -1637,7 +1650,7 @@ function writePrompt(w, raw) {
   if (!text || !L.isSafeQuestStart(text)) return { ok: false, reason: 'unsafe-start' };
   if (!w.bracketed) return { ok: false, reason: 'not-ready' }; // 붙여넣기 모드가 꺼진 상태(선택 메뉴 등)에서는 쓰지 않는다. 셸 프롬프트도 켜져 있어 claude 입력줄인지까지는 가리지 못한다
   w.term.write('\x1b[200~' + text + '\x1b[201~'); // 붙여넣기로 감싸 Enter 없이 입력줄에만
-  w.typedN = (w.typedN || 0) + 1;
+  w.typedN = (w.typedN || 0) + 1; w.draft = true;
   return { ok: true };
 }
 // 파일 끌어다 놓기: 렌더러(preload 의 webUtils)가 준 경로 문자열만 받는다. 활성 작업 공간에만, 파일 내용은 읽지 않는다.
@@ -1657,8 +1670,39 @@ ipcMain.handle('files:drop', (e, id, paths) => {
   if (shellFront(w)) return { ok: false, reason: 'shell' };
   const text = L.buildDropPaste(paths);
   if (!text) return { ok: false, reason: 'invalid' };
-  w.term.write(text); // Enter 는 보내지 않는다
+  w.term.write(text); w.draft = true; // Enter 는 보내지 않는다
   return { ok: true };
+});
+
+// ---- 원격 제어(Remote Control) 토글 ----
+// 사용자가 누르면 활성 작업 공간 세션 입력줄에 고정 문장 `/remote-control` 을 붙여넣기로 감싸 넣고 Enter 를 보낸다(켜기·끄기 모두 같은 명령). 렌더러가 준 글은 어디에도 쓰지 않는다.
+// 처음 쓸 때 Claude Code 가 터미널에서 묻는 동의는 앱이 대신 답하지 않는다. 연결 여부는 확인된 증거(훅 기록의 rc, 터미널의 "/remote-control is active")로만 정한다.
+const RC_COMMAND = '\x1b[200~/remote-control\x1b[201~\r';
+function rcViewOf(w, rec, now) {
+  const base = { hookRc: rec ? rec.rc === true : undefined, hookAt: rec ? rec.atMs : NaN, seenAt: w.rcSeenAt || 0, asked: w.rcAsked || null, askedAt: w.rcAskedAt || 0, now };
+  return L.rcView(base);
+}
+function rcToggle(w) {
+  if (!w || w.id !== activeId) return { ok: false, reason: 'inactive' };
+  if (picking || closing || quitAsking || restarting) return { ok: false, reason: 'busy-ui' };
+  const now = Date.now(); const state = wsState(w);
+  const view = rcViewOf(w, readAgentState(w), now);
+  const quietMs = now - (w.lastOutputAt || 0); const bp = w.bracketed === true;
+  // 훅 기록 전(none)의 준비 판정은 하위 세션 브리핑 채우기(prefillChild)와 같은 fillStep 이다: Claude 가 떴고(claudeUpNow) 붙여넣기 모드이며 출력이 READY_QUIET_MS 이상 조용하고 포그라운드가 셸이 아니다
+  const ready = !!w.term && L.fillStep({ elapsedMs: 0, timeoutMs: 1, exists: true, active: true, hasTerm: true, state, claudeOnly: true, claudeUp: claudeUpNow(w), bracketed: bp, quietMs, procName: termProc(w), typed: false }).do === 'fill';
+  const can = L.rcCanSend({ hasTerm: !!w.term, shellFront: shellFront(w), bracketed: bp, state, dirty: w.draft === true, view, quietMs, ready,
+    cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }) });
+  if (!can.ok) return can;
+  w.term.write(RC_COMMAND);
+  // typedN 은 올리지 않는다: 이 문장은 사용자가 쓴 첫 프롬프트가 아니라서 shouldDropPrev(이전 세션 포인터 버리기)·sessionUuidOf(이어 열기 uuid 신뢰)가 달라지면 안 된다
+  w.rcAsked = view === 'on' ? 'off' : 'on'; w.rcAskedAt = now; w.draft = false;
+  wsChanged(false);
+  return { ok: true, asked: w.rcAsked };
+}
+ipcMain.handle('rc:toggle', (e, id) => {
+  const w = wsFrom(e, id);
+  if (!w) return { ok: false, reason: 'invalid' };
+  return rcToggle(w);
 });
 
 // ---- 하위 세션: 마루가 요청 파일로 다른 폴더의 세션을 연다 ----
@@ -1803,7 +1847,7 @@ async function prefillChild(w, prompt) {
     if (d.do === 'stash') { note('prefill'); return; }
     if (d.do === 'fill') {
       if (!w.term || shellFront(w) || !w.bracketed) { note('prefill'); return; }
-      w.term.write('\x1b[200~' + text + '\x1b[201~'); w.typedN = (w.typedN || 0) + 1; // 붙여넣기로 감싸 Enter 없이 입력줄에만(ESC 는 이미 걸러졌다)
+      w.term.write('\x1b[200~' + text + '\x1b[201~'); w.typedN = (w.typedN || 0) + 1; w.draft = true; // 붙여넣기로 감싸 Enter 없이 입력줄에만(ESC 는 이미 걸러졌다)
       return;
     }
     await delay(READY_POLL_MS);
@@ -2530,7 +2574,7 @@ ipcMain.handle('meet:start', async (e, id) => {
     const facts = await meetFacts(); // 비동기 일은 여기까지. 아래 판정과 쓰기 사이에는 await 가 없다
     const g = await meetGateWait(id, w, term0, facts); // 성공하면 바로 아래 쓰기까지 await 가 없다
     if (!g.ok) return { ok: false, reason: g.reason, why: g.why };
-    w.term.write(paste); // Enter 는 보내지 않는다
+    w.term.write(paste); w.draft = true; // Enter 는 보내지 않는다
     if (setupState && !setupState.metAt) saveSetup({ metAt: nowIso() });
     return { ok: true };
   } finally { meetBusy = false; }

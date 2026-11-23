@@ -3,6 +3,7 @@
 #   busy|idle|waiting : <id>.json  {"state","at"[,"transcript_path"][,"model"][,"cwd"][,"bg"]}   (cwd: 훅 JSON 의 현재 폴더, 형식 검증 통과 시만)
 #     bg: idle(Stop)일 때만, 훅 JSON 의 background_tasks 중 status 가 running 인 객체의 수(1~99). 있으면 메인 턴은 끝났지만 백그라운드 서브에이전트가 도는 중이라
 #         `.subs` 파일을 지우지 않는다. 목록이 없거나 형식이 틀리거나 0 이면 bg 없이 예전과 같다(파일을 비움). StopFailure 도 예전과 같다. background_tasks 의 다른 내용은 저장하지 않는다.
+#     rc: 환경변수 CLAUDE_CODE_BRIDGE_SESSION_ID(원격 제어가 연결된 동안 Claude Code 가 훅에 넣는다)가 `^[A-Za-z0-9_-]{1,128}$` 이면 true. 값 자체는 저장하지 않는다. 없으면 필드도 없다(연결 아님).
 #   sub-start|sub-stop: <id>.subs/<agent_id> 파일(내용: agent_type 한 줄)을 만들고 지운다(동시 실행 경쟁을 피하려고 파일 하나씩)
 # 표준입력(훅 JSON)에서는 위 필드(transcript_path, model, agent_id, agent_type)만 형식 검증 뒤에 뽑고 나머지는 저장하지 않는다.
 # MARU_APP_SESSION 이 없거나 형식이 틀리면 아무것도 하지 않는다(앱 밖 세션·cmux 영향 없음). 항상 exit 0.
@@ -74,13 +75,17 @@ if isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9_:.-]{1,64}", t):
 esac
 
 at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+rc=0
+if [[ ${CLAUDE_CODE_BRIDGE_SESSION_ID-} =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then rc=1; fi
 body=""
 if [ -n "$py" ] && [ -n "$input" ]; then
   # 상태 JSON 한 줄을 python 이 직접 만든다(경로의 따옴표·역슬래시 등을 안전하게 이스케이프). 실패하면 비움.
   body=$(printf '%s' "$input" | "$py" -I -c '
 import json, re, sys
-state, at = sys.argv[1], sys.argv[2]
+state, at, rc = sys.argv[1], sys.argv[2], sys.argv[3]
 rec = {"state": state, "at": at}
+if rc == "1":
+    rec["rc"] = True
 try:
     o = json.loads(sys.stdin.read())
 except Exception:
@@ -108,9 +113,11 @@ if len(out.encode("utf-8")) > 3800 and "cwd" in rec:   # 상태 파일이 커지
     del rec["cwd"]
     out = json.dumps(rec, ensure_ascii=False, separators=(",", ":"))
 print(out)
-' "$state" "$at" 2>/dev/null) || body=""
+' "$state" "$at" "$rc" 2>/dev/null) || body=""
 fi
-[ -n "$body" ] || body=$(printf '{"state":"%s","at":"%s"}' "$state" "$at")
+if [ -z "$body" ]; then
+  if [ "$rc" = 1 ]; then body=$(printf '{"state":"%s","at":"%s","rc":true}' "$state" "$at"); else body=$(printf '{"state":"%s","at":"%s"}' "$state" "$at"); fi
+fi
 tmp=$(mktemp "$dir/.$id.XXXXXX" 2>/dev/null) || exit 0
 if printf '%s\n' "$body" >"$tmp" 2>/dev/null; then
   mv -f "$tmp" "$dir/$id.json" 2>/dev/null

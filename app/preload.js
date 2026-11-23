@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('maru', {
   reorderWorkspace: (id, beforeId) => ipcRenderer.invoke('ws:reorder', String(id), beforeId === null || beforeId === undefined ? null : String(beforeId)),
   onCloseRequest: (cb) => { ipcRenderer.on('ui:close-request', () => cb()); },
   onWorkspacesChanged: (cb) => { ipcRenderer.on('ws:changed', () => cb()); },
+  rcToggle: (id) => ipcRenderer.invoke('rc:toggle', String(id)), // 원격 제어 켜기/끄기: 보낼 문장은 main 이 정한다(렌더러는 작업 공간 id 만)
+  onRcToggle: (cb) => { ipcRenderer.on('ui:rc-toggle', () => cb()); }, // 앱 메뉴 "원격 켜기/끄기": 단추와 같은 처리를 렌더러가 한다
   // 파일 끌어다 놓기: sandbox 렌더러에는 File.path 가 없어 webUtils 로 경로 문자열만 얻어 보낸다(내용은 읽지 않는다)
   dropFiles: (id, files) => {
     const list = Array.prototype.slice.call(files || [], 0, 11); // 11개 이상이면 main 이 too-many 로 거부
