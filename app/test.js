@@ -708,6 +708,23 @@ t('이름 변경 겹침: 다른 작업 공간과 겹치면 " 2", 자기 자신�
   assert.strictEqual(L.uniqueTitle('blog', ['blog', 'blog 2']), 'blog 3');
   assert.strictEqual([...L.uniqueTitle('가'.repeat(40), ['가'.repeat(40)])].length, 40); // 번호를 붙여도 40자 이내
 });
+t('reorderWs: 최상위·자식 묶음 안에서만 옮기고 나머지는 제자리, 안 되는 것은 null', () => {
+  const it = [{ id: 'a' }, { id: 'a1', parentId: 'a' }, { id: 'b' }, { id: 'a2', parentId: 'a' }, { id: 'c' }, { id: 'o', parentId: 'gone' }];
+  assert.deepStrictEqual(L.reorderWs(it, 'c', 'a'), ['c', 'a1', 'a', 'a2', 'b', 'o']); // 최상위 a·b·c·o 묶음의 자리만 바뀐다
+  assert.deepStrictEqual(L.reorderWs(it, 'a2', 'a1'), ['a', 'a2', 'b', 'a1', 'c', 'o']); // 자식 묶음
+  assert.deepStrictEqual(L.reorderWs(it, 'a1', null), ['a', 'a2', 'b', 'a1', 'c', 'o']);
+  assert.strictEqual(L.reorderWs(it, 'a1', 'b'), null); // 묶음이 다르다
+  assert.strictEqual(L.reorderWs(it, 'b', 'a1'), null);
+  assert.strictEqual(L.reorderWs(it, 'a', 'a'), null);
+  assert.strictEqual(L.reorderWs(it, 'x', 'a'), null); assert.strictEqual(L.reorderWs(it, 'a', 'x'), null);
+  assert.strictEqual(L.reorderWs(it, 'a2', null), null); // 이미 맨 끝(제자리)
+  assert.strictEqual(L.reorderWs(it, 'b', 'c'), null); // 이미 c 바로 앞
+  assert.strictEqual(L.reorderWs(it, 'a', undefined), null); assert.strictEqual(L.reorderWs(null, 'a', null), null);
+  const moved = L.reorderWs(it, 'a', null).map((id) => it.find((x) => x.id === id));
+  assert.deepStrictEqual(L.hierarchyOrder(moved).map((x) => x.id), ['b', 'c', 'o', 'a', 'a1', 'a2']); // 부모를 옮기면 자식이 따라간다
+  const m2 = L.reorderWs(it, 'o', 'a'); assert.ok(m2 && m2.indexOf('o') < m2.indexOf('a')); // 부모가 없는 자식은 최상위로 본다
+  assert.strictEqual(L.reorderWs(it, 'o', 'a1'), null);
+});
 t('ws:rename: main 이 wsFrom·cleanWsTitle·uniqueTitle(자기 제외)로 처리하고 preload 와 맞는다', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
   const h = main.slice(main.indexOf("ipcMain.handle('ws:rename'"), main.indexOf("ipcMain.handle('panels:get'"));
@@ -878,10 +895,10 @@ t('작업 공간·트레이 i18n 키가 ko·en 모두 있고 비어 있지 않�
 });
 t('main.js 가 쓰는 작업 공간 IPC 채널이 preload 와 맞는다', () => {
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
-  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'quest:fill', 'ws:get', 'ws:activate', 'ws:new', 'ws:close', 'ws:rename']) {
+  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'quest:fill', 'ws:get', 'ws:activate', 'ws:new', 'ws:close', 'ws:rename', 'ws:reorder']) {
     assert.ok(main.includes("'" + ch + "'") && pre.includes("'" + ch + "'"), ch);
   }
-  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'ws:activate', 'ws:close', 'ws:rename']) assert.ok(new RegExp("'" + ch + "', String\\(id\\)").test(pre), 'id 를 싣는지: ' + ch);
+  for (const ch of ['pty:start', 'pty:restart', 'pty:write', 'pty:resize', 'ws:activate', 'ws:close', 'ws:rename', 'ws:reorder']) assert.ok(new RegExp("'" + ch + "', String\\(id\\)").test(pre), 'id 를 싣는지: ' + ch);
   assert.ok(/'quest:fill', String\(id\)/.test(pre));
 });
 

@@ -3707,6 +3707,21 @@ function hierarchyOrder(items) {
   }
   return out;
 }
+// 작업 공간 순서 바꾸기. items [{ id, parentId? }] 저장 순서 -> id 를 beforeId(같은 형제 묶음의 id, null 이면 묶음의 맨 끝) 앞으로 옮긴 전체 id 배열. 안 되면 null(모르는 id·자기 앞·다른 묶음·제자리).
+// 형제 묶음은 hierarchyOrder 와 같은 규칙(최상위 전체가 한 묶음, 한 부모의 자식이 한 묶음). 그 묶음이 차지한 자리만 바뀌고 나머지는 제자리다.
+function reorderWs(items, id, beforeId) {
+  const list = Array.isArray(items) ? items.filter((x) => x && typeof x.id === 'string') : [];
+  if (typeof id !== 'string' || (beforeId !== null && typeof beforeId !== 'string') || id === beforeId) return null;
+  const parents = new Map(hierarchyOrder(list).map((x) => [x.id, x.depth === 1 ? list.find((y) => y.id === x.id).parentId : null]));
+  if (!parents.has(id) || (beforeId !== null && !parents.has(beforeId)) || (beforeId !== null && parents.get(beforeId) !== parents.get(id))) return null;
+  const grp = parents.get(id);
+  const slots = []; const members = [];
+  list.forEach((x, i) => { if (parents.get(x.id) === grp) { slots.push(i); members.push(x.id); } });
+  const next = moveInOrder(members, id, beforeId);
+  if (!next || next.every((x, i) => x === members[i])) return null;
+  const out = list.map((x) => x.id); slots.forEach((at, i) => { out[at] = next[i]; });
+  return out;
+}
 // 화면에 보이는 작업 공간 id(⌘숫자 대상). 접힌 부모(고정 id)의 자식은 숨긴다(활성인 자식은 보인다). ordered = hierarchyOrder 결과
 function visibleWsIds(ordered, collapsedIds, activeId) {
   const closed = new Set(Array.isArray(collapsedIds) ? collapsedIds : []);
@@ -3856,7 +3871,7 @@ function panelKeyDelta(side, key, shift) {
 const api = {
   CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, consentChoice, squadChoices, cleanSquadAsk, SQUAD_ASK_MAX, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
   macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, CHILD_HEADER_USER, parseSubOpen, subDraftAdd, subDraftCheck, subDraftUse, subLimitCheck, subNoticeLine, cleanNoticePart, SUB_TITLE_MAX, SUB_BRIEF_MAX, SUB_DRAFT_MS, SUB_DRAFT_MAX, promptHandoff, childBriefPlan, briefAtSpawn, isMaruRootDir, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
-  hierarchyOrder, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
+  hierarchyOrder, reorderWs, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
   MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, parseOnboarded, firstMeetingGate, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
   defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
   claudeUpAfter, PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, claudeCandidates, nvmVersionDirs, parseClaudeProbe, CLAUDE_PROBE_CMD, setupCommand, buildSetupScript, SETUP_KINDS, SETUP_INSTALL_CMD, firstMeetingBanner,

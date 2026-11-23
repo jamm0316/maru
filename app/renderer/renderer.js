@@ -466,10 +466,81 @@
   });
   // 시험 전용(MARU_APP_UI=wsmenu|wsrename): 둘째 행의 메뉴를 열거나 이름 편집을 연 채로 둔다(화면 확인용)
   function openWsDev(mode) {
+    if (mode === 'wsdrag') { const mark = () => { const rs = $('workspaces').children; if (rs[1]) rs[1].classList.add('grip-on'); const t = rs[3] || rs[rs.length - 1]; if (t && t !== rs[1]) t.classList.add('drop-before'); }; mark(); new MutationObserver(mark).observe($('workspaces'), { childList: true }); return; } // 시험 전용: 둘째 행에 끌기 손잡이, 넷째 행 위에 놓을 자리 선(목록을 다시 그려도 유지)
     const row = $('workspaces').children[1]; if (!row) return;
     if (mode === 'wsmenu') { const b = row.getBoundingClientRect(); openWsMenu(row.dataset.id, b.left + 40, b.top + 30); } else startWsEdit(row.dataset.id);
   }
+  // ---- 작업 공간 순서 바꾸기: 끌어 놓기 + ⌥↑/⌥↓. 같은 형제 묶음(최상위끼리·한 부모의 자식끼리)만. 검증은 main(L.reorderWs). 프로젝트 끌기·파일 놓기와는 자체 타입·상태로 분리 ----
+  const WS_DRAG_TYPE = 'application/x-maru-ws'; let wsDrag = null; let wsDragPend = false; // wsDrag: { id, group }. 끄는 동안은 renderWs 를 미룬다(DOM 을 바꾸면 dragend 가 오지 않을 수 있다)
+  const wsBox = $('workspaces');
+  const wsGroupOf = (id) => { const w = wsList.find((x) => x.id === id); const d = Lib.hierarchyOrder(wsList).find((x) => x.id === id); return w && d && d.depth === 1 ? w.parentId : ''; }; // hierarchyOrder 와 같은 규칙의 형제 묶음 키(최상위는 '')
+  const wsSibs = (g) => Lib.hierarchyOrder(wsList).filter((x) => (x.depth === 1 ? x.parentId : '') === g).map((x) => x.id);
+  const wsItems = () => wsList.map((x) => ({ id: x.id, parentId: x.parentId }));
+  const clearWsDrop = () => { for (const n of wsBox.querySelectorAll('.drop-before, .drop-after')) n.classList.remove('drop-before', 'drop-after'); };
+  function wsDropInfo(e) {
+    if (!wsDrag || !e.dataTransfer || Array.prototype.indexOf.call(e.dataTransfer.types || [], WS_DRAG_TYPE) < 0) return null;
+    const row = e.target && e.target.closest ? e.target.closest('.ws') : null;
+    if (!row || !wsBox.contains(row) || row.dataset.id === wsDrag.id || row.dataset.group !== wsDrag.group) return null; // 다른 묶음(다른 부모의 자식·최상위↔자식)은 받지 않는다
+    const r = row.getBoundingClientRect(); const after = e.clientY >= r.top + r.height / 2;
+    let beforeId = row.dataset.id; let mark = row;
+    if (after) {
+      const sibs = wsSibs(wsDrag.group).filter((x) => x !== wsDrag.id); const i = sibs.indexOf(row.dataset.id);
+      beforeId = i >= 0 && i + 1 < sibs.length ? sibs[i + 1] : null;
+      if (wsDrag.group === '') { let n = row.nextElementSibling; while (n && n.dataset.group === row.dataset.id) { mark = n; n = n.nextElementSibling; } } // 부모의 자식 줄 아래에 선을 긋는다
+    }
+    if (!Lib.reorderWs(wsItems(), wsDrag.id, beforeId)) return null; // 제자리이면 받지 않는다
+    return { el: mark, after, beforeId };
+  }
+  function endWsDrag() {
+    wsDrag = null; clearWsDrop();
+    for (const n of wsBox.querySelectorAll('.dragging')) n.classList.remove('dragging');
+    if (wsDragPend) { wsDragPend = false; renderWs(); }
+  }
+  async function doWsReorder(id, beforeId) {
+    let res = null; try { res = await window.maru.reorderWorkspace(id, beforeId); } catch (x) { res = null; }
+    await syncWs();
+    if (!res || !res.ok) { flashNote(T('ws.err.move')); return false; }
+    const sibs = wsSibs(wsGroupOf(id)); const w = wsList.find((x) => x.id === id);
+    flashNote(T('ws.moved', { title: w ? w.title : id, pos: sibs.indexOf(id) + 1, total: sibs.length }));
+    return true;
+  }
+  wsBox.addEventListener('dragstart', (e) => {
+    const row = e.target && e.target.closest ? e.target.closest('.ws') : null;
+    if (!row || !wsBox.contains(row) || !e.dataTransfer || wsEdit || row.getAttribute('draggable') !== 'true') { if (row && e.dataTransfer && e.target === row) e.preventDefault(); return; }
+    closeWsMenu(false);
+    wsDrag = { id: row.dataset.id, group: row.dataset.group };
+    e.dataTransfer.setData(WS_DRAG_TYPE, wsDrag.id); e.dataTransfer.effectAllowed = 'move';
+    row.classList.add('dragging');
+  });
+  wsBox.addEventListener('dragover', (e) => {
+    const d = wsDropInfo(e); clearWsDrop();
+    if (!d) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+    d.el.classList.add(d.after ? 'drop-after' : 'drop-before');
+  });
+  wsBox.addEventListener('dragleave', (e) => { if (!e.relatedTarget || !wsBox.contains(e.relatedTarget)) clearWsDrop(); });
+  wsBox.addEventListener('drop', (e) => {
+    const d = wsDropInfo(e); clearWsDrop();
+    if (!d) return;
+    e.preventDefault(); e.stopPropagation();
+    const id = wsDrag.id;
+    doWsReorder(id, d.beforeId).then(() => { if (wsDrag && wsDrag.id === id) endWsDrag(); }); // 그사이 새로 시작한 끌기는 건드리지 않는다
+  });
+  document.addEventListener('dragend', () => { wsPtrDown = false; if (wsDrag) endWsDrag(); }); // 끌기가 끝나면 mouseup 이 오지 않는다
+  // 키보드 대안: 행의 버튼에서 ⌥↑/⌥↓ 로 같은 묶음 안에서 한 칸 이동(전역 ⌘⇧↑/↓ 와 겹치지 않게 ⌘·Ctrl·Shift 가 없을 때만)
+  wsBox.addEventListener('keydown', (e) => {
+    if ((e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+    const row = e.target && e.target.closest ? e.target.closest('.ws') : null;
+    if (!row || !e.target.classList.contains('ws-main') || wsEdit) return;
+    e.preventDefault();
+    const id = row.dataset.id; const ids = wsSibs(row.dataset.group); const i = ids.indexOf(id); if (i < 0) return;
+    const up = e.key === 'ArrowUp';
+    if (up ? i === 0 : i === ids.length - 1) return;
+    const before = up ? ids[i - 1] : (ids[i + 2] === undefined ? null : ids[i + 2]);
+    doWsReorder(id, before).then(() => { const r = [...wsBox.children].find((n) => n.dataset.id === id); const b = r && r.querySelector('.ws-main'); if (b) b.focus(); });
+  });
   function renderWs() {
+    if (wsDrag) { wsDragPend = true; return; } // 끄는 동안은 다시 그리지 않는다(끝난 뒤 endWsDrag 가 그린다)
     if (wsEdit && !wsList.some((w) => w.id === wsEdit.id)) wsEdit = null; // 편집하던 작업 공간이 사라졌다
     const key = JSON.stringify([wsList, activeId, lang, wsCollapsedIds, wsEdit ? wsEdit.id : null]);
     if (key === wsKey) return;
@@ -486,12 +557,15 @@
     const nums = numberMap();
     const kidCount = new Map(); for (const w of wsList) if (w.parentId) kidCount.set(w.parentId, (kidCount.get(w.parentId) || 0) + 1);
     const titleOf = new Map(wsList.map((w) => [w.id, w.title]));
+    const grp = new Map(Lib.hierarchyOrder(wsList).map((x) => [x.id, x.depth === 1 ? x.parentId : '']));
     const lastOf = new Map(); for (const w of wsList) if (w.parentId) lastOf.set(w.parentId, w.id);
     for (const w of wsList) {
       const kid = !!w.parentId && titleOf.has(w.parentId);
       if (kid && wsCollapsedIds.includes(w.parentId) && w.id !== activeId) continue; // 접힌 부모의 하위 세션은 숨긴다(활성이면 보인다)
       const on = w.id === activeId; const ux = w.ux || w.state; const k = stateKey(ux);
       const row = el('div', 'ws' + (on ? ' active' : '') + (w.sub === true ? ' hassub' : '') + (kid ? ' kid' + (lastOf.get(w.parentId) === w.id ? ' last' : '') : '') + (w.flash ? ' flash' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
+      row.dataset.group = grp.get(w.id) || ''; // 형제 묶음(최상위 '' / 부모 id)
+      if (!wsEdit) { row.draggable = true; const gr = el('span', 'ws-grip', '⋮⋮'); gr.setAttribute('aria-hidden', 'true'); row.append(gr); } // 끌 수 있다는 표시(마우스를 올리면 보인다). 이름을 바꾸는 중에는 끌 수 없다
       const kids = kidCount.get(w.id) || 0; const closedKids = kids > 0 && wsCollapsedIds.includes(w.id);
       if (kids > 0) {
         const ch = el('button', 'ws-chev', closedKids ? '▸' : '▾'); ch.type = 'button'; ch.setAttribute('aria-expanded', String(!closedKids));
@@ -789,7 +863,7 @@
   $('ws-add').addEventListener('click', newWs);
   $('term-empty-new').addEventListener('click', newWs);
   $('workspaces').addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if ((e.key !== 'ArrowDown' && e.key !== 'ArrowUp') || e.altKey || e.defaultPrevented) return; // ⌥↑/⌥↓ 는 순서 변경이 처리한다
     const items = [...$('workspaces').querySelectorAll('.ws-main')]; const i = items.indexOf(document.activeElement);
     if (i < 0) return;
     e.preventDefault(); items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
@@ -2491,7 +2565,7 @@
     else if (init && init.uiOpen === 'update') openUpdate();
     else if (init && init.uiOpen === 'squadnew') openSquadNew(); // 시험 전용(MARU_APP_UI=squadnew): 화면 확인용
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'subnew') { const m = wsList.find((w) => w.sub === true); if (m) openSub(m.id, true); } if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } if (init && (init.uiOpen === 'wsmenu' || init.uiOpen === 'wsrename')) openWsDev(init.uiOpen); }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'subnew') { const m = wsList.find((w) => w.sub === true); if (m) openSub(m.id, true); } if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } if (init && (init.uiOpen === 'wsmenu' || init.uiOpen === 'wsrename' || init.uiOpen === 'wsdrag')) openWsDev(init.uiOpen); }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
     setInterval(() => { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); }, 5000); // 일지·회고·일정은 main 이 읽어 둔 캐시를 가볍게 다시 묻는다
     refreshMeet(); setInterval(refreshMeet, 30000);

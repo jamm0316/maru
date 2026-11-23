@@ -62,9 +62,9 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsdrag', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
-const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew' || TEST_UI === 'wsmenu' || TEST_UI === 'wsrename'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을, wsmenu 는 둘째 행의 우클릭 메뉴를, wsrename 은 둘째 행의 이름 편집을 연 채로 둔다)
+const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew' || TEST_UI === 'wsmenu' || TEST_UI === 'wsrename' || TEST_UI === 'wsdrag'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을, wsmenu 는 둘째 행의 우클릭 메뉴를, wsrename 은 둘째 행의 이름 편집을 연 채로 둔다, wsdrag 는 끌어 놓기 표시를 화면에 보인다)
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX && !FAKE_HIER && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
@@ -1438,6 +1438,16 @@ ipcMain.handle('ws:rename', (e, id, title) => {
   w.title = next;
   wsChanged(true); // 즉시 저장 + 화면·메뉴·트레이 갱신
   return { ok: true, title: next };
+});
+// 작업 공간 순서 바꾸기: beforeId 는 같은 형제 묶음(최상위끼리·한 부모의 자식끼리)의 id 이거나 null(묶음 맨 끝). 검증·계산은 L.reorderWs. 같은 Map 을 비우고 다시 넣어 순서만 바꾼다(객체는 그대로)
+ipcMain.handle('ws:reorder', (e, id, beforeId) => {
+  const w = wsFrom(e, id);
+  if (!w || (beforeId !== null && (typeof beforeId !== 'string' || !wss.has(beforeId)))) return { ok: false, reason: 'invalid' };
+  const next = L.reorderWs([...wss.values()].map((o) => ({ id: o.id, parentId: o.parentId })), id, beforeId);
+  if (!next) return { ok: false, reason: 'invalid' };
+  const all = new Map(wss); wss.clear(); for (const k of next) wss.set(k, all.get(k));
+  wsChanged(true); // 즉시 저장 + 화면·메뉴(⌘숫자 이름)·트레이 갱신
+  return { ok: true };
 });
 ipcMain.handle('panels:get', (e) => (fromMain(e) ? panels() : null));
 // 렌더러가 본 항목(shown = 제목+"\n"+프롬프트)이 main 의 index 번 항목과 같을 때만 처리. 쓰는 문장은 항상 main 의 프롬프트.
