@@ -107,6 +107,16 @@ t('keyToSeq 단축키', () => {
   assert.strictEqual(L.isNewlineKey({ type: 'keydown', key: 'Enter', shiftKey: true, isComposing: true }), false);
   assert.strictEqual(L.isShiftEnter({ type: 'keydown', key: 'Enter', shiftKey: true, isComposing: true, keyCode: 229 }), true); // 조합 중에도 참(렌더러가 줄바꿈을 미룬다)
   assert.strictEqual(L.isShiftEnter({ type: 'keydown', key: 'Enter' }), false);
+  // 숨은 입력칸 비우기: 조합과 무관한 keydown 에서만
+  assert.strictEqual(L.imeCanReset({ type: 'keydown', composing: false, isComposing: false, settling: false, pending: false }), true);
+  assert.strictEqual(L.imeCanReset({ type: 'keydown' }), true);
+  assert.strictEqual(L.imeCanReset({ type: 'keyup' }), false);
+  assert.strictEqual(L.imeCanReset({ type: 'keypress' }), false);
+  assert.strictEqual(L.imeCanReset({ type: 'keydown', composing: true }), false); // 조합 중: 비우면 조합이 끊긴다
+  assert.strictEqual(L.imeCanReset({ type: 'keydown', isComposing: true }), false);
+  assert.strictEqual(L.imeCanReset({ type: 'keydown', settling: true }), false); // xterm 이 입력칸을 아직 읽지 않았다: 비우면 글자가 사라진다
+  assert.strictEqual(L.imeCanReset({ type: 'keydown', pending: true }), false); // 미뤄 둔 줄바꿈이 있다
+  assert.strictEqual(L.imeCanReset(), false);
   assert.strictEqual(L.isShiftEnter({ type: 'keydown', key: 'Enter', shiftKey: true, metaKey: true }), false);
 });
 t('keyToSeq Cmd+←/→: 줄 맨 앞/끝', () => {
@@ -275,6 +285,50 @@ t('Cmd+↑/↓: 입력란 전체의 맨 앞/끝', () => {
   assert.strictEqual(L.bufNavSeq(true, 0, false), '\x01');
   assert.strictEqual(L.bufNavSeq(false, -3, false), '\x05');
   assert.strictEqual(L.bufNavSeq(true, 9999, false).length, 200 * 3 + 1);
+});
+t('입력 중 화살표 바꾸기: -> <- <->', () => {
+  const type = (s) => { let st = null; let out = ''; for (const ch of s) { const r = L.arrowInput(st, ch); st = r.st; out += r.out; } return out; };
+  const D = '\x7f';
+  assert.strictEqual(type('a->b'), 'a-' + D + '→b');
+  assert.strictEqual(type('a<-b'), 'a<' + D + '←b');
+  assert.strictEqual(type('a<->b'), 'a<' + D + '←' + D + '↔b');
+  assert.strictEqual(type('=>'), '=>');
+  assert.strictEqual(type('-->'), '-->'); // - 가 이어진 뒤의 > 는 그대로
+  assert.strictEqual(type('<!--'), '<!--');
+  assert.strictEqual(type('->' + D), '-' + D + '→' + D + '->'); // 바꾼 직후 Backspace: 원래 글자로 되돌린다
+  assert.strictEqual(type('->' + D + '>'), '-' + D + '→' + D + '->' + '>'); // 되돌린 뒤에는 다시 바꾸지 않는다
+  assert.strictEqual(type('<-' + D + '>'), '<' + D + '←' + D + '<-' + '>');
+  assert.strictEqual(type('->x' + D), '-' + D + '→x' + D); // 다른 글자를 친 뒤의 Backspace 는 평소대로
+  assert.strictEqual(type('-' + D + '>'), '-' + D + '>'); // - 를 지운 뒤의 >
+  assert.strictEqual(type('-\x1b>'), '-\x1b>'); // 사이에 제어 문자가 끼면 바꾸지 않는다
+  let r = L.arrowInput({ prev: '-', conv: null }, '\x1b[D'); assert.deepStrictEqual(r, { out: '\x1b[D', st: { prev: '', conv: null } }); // 방향키 등 여러 글자 입력
+  r = L.arrowInput({ prev: '-', conv: null }, 'a->b'); assert.strictEqual(r.out, 'a->b'); // 붙여넣기는 그대로
+  assert.strictEqual(L.arrowInput(null, '>').out, '>');
+  assert.strictEqual(L.arrowInput(undefined, undefined).out, undefined);
+});
+t('Cmd+Shift+←/→: 묶음 접기·펼치기', () => {
+  const d = (key, o) => ({ type: 'keydown', key, metaKey: true, shiftKey: true, ...o });
+  assert.strictEqual(L.isFoldKey(d('ArrowLeft')), true);
+  assert.strictEqual(L.isFoldKey(d('ArrowRight')), true);
+  for (const o of [{ shiftKey: false }, { metaKey: false }, { altKey: true }, { ctrlKey: true }, { isComposing: true }, { keyCode: 229 }]) assert.strictEqual(L.isFoldKey(d('ArrowLeft', o)), false);
+  assert.strictEqual(L.isFoldKey(d('ArrowUp')), false);
+  assert.strictEqual(L.isLineNavKey(d('ArrowLeft'), false, true), false); // 줄 맨 앞/끝 이동과 겹치지 않는다
+  const ws = [{ id: 'p' }, { id: 'c1', parentId: 'p' }, { id: 'c2', parentId: 'p' }, { id: 'solo' }];
+  const f = (o, open) => L.foldTarget({ ws, wsCollapsed: [], groups: [{ tag: 'a', items: [{ key: 'k1' }] }, { tag: 'b', items: [{ key: 'k2' }] }], catCollapsed: [], ...o }, open);
+  assert.deepStrictEqual(f({ activeId: 'p' }, false), { kind: 'workspace', id: 'p', closed: true }); // 부모에서 접기
+  assert.deepStrictEqual(f({ activeId: 'c2' }, false), { kind: 'workspace', id: 'p', closed: true }); // 하위 세션에서는 그 부모를 접는다
+  assert.strictEqual(f({ activeId: 'p' }, true), null); // 이미 펼쳐져 있다
+  assert.deepStrictEqual(f({ activeId: 'c1', wsCollapsed: ['p'] }, true), { kind: 'workspace', id: 'p', closed: false });
+  assert.strictEqual(f({ activeId: 'p', wsCollapsed: ['p'] }, false), null); // 이미 접혀 있다
+  assert.strictEqual(f({ activeId: 'solo' }, false), null); // 하위 세션이 없는 작업 공간
+  assert.strictEqual(f({ activeId: 'solo' }, true), null);
+  assert.strictEqual(f({ activeId: '없음' }, false), null);
+  assert.deepStrictEqual(f({ activeId: 'p', project: 'k2' }, false), { kind: 'category', tag: 'b', closed: true }); // 프로젝트를 보고 있으면 카테고리
+  assert.deepStrictEqual(f({ activeId: 'p', project: 'k2', catCollapsed: ['b'] }, true), { kind: 'category', tag: 'b', closed: false });
+  assert.strictEqual(f({ activeId: 'p', project: 'k2', catCollapsed: ['b'] }, false), null);
+  assert.strictEqual(f({ activeId: 'p', project: 'k1' }, true), null);
+  assert.strictEqual(f({ activeId: 'p', project: '목록에 없음' }, false), null); // 분류 안 된 프로젝트 등: 작업 공간으로 넘어가지 않는다
+  assert.strictEqual(L.foldTarget(undefined, false), null);
 });
 t('Cmd+Shift+↑/↓: 위·아래 대상으로 이동, 맨 처음·끝에서는 멈춘다', () => {
   const d = (key, o) => ({ type: 'keydown', key, metaKey: true, shiftKey: true, ...o });
@@ -3618,6 +3672,15 @@ t('화면 상태 파일: 접어 둔 부모의 고정 id(wsCollapsed) 왕복·검
   assert.deepStrictEqual(L.pruneProjectUi(ui, []), { catOrder: [], projOrder: {}, collapsed: [], wsCollapsed: [WSA, WSB] });
   assert.strictEqual(L.saveProjectUi(f, { ...ui, wsCollapsed: [WSA, WSA] }), false); assert.strictEqual(L.saveProjectUi(f, { ...ui, extra: 1 }), false); assert.strictEqual(L.saveProjectUi(f, { ...ui, wsCollapsed: ['마루'] }), false);
   assert.ok(L.saveProjectUi(f, { catOrder: [], projOrder: {}, collapsed: [] })); assert.ok(!('wsCollapsed' in L.readProjectUiFile(f).data));
+});
+t('안 읽은 답변: busy→idle/waiting/turnEnded·unknown→turnEnded 에서 보고 있지 않을 때만 켜고, 볼 때까지 유지하며, 보면 끈다', () => {
+  const un = L.unreadNext;
+  for (const nx of ['idle', 'waiting', 'turnEnded']) { assert.strictEqual(un({ prev: 'busy', next: nx, unread: false, looking: false }), true); assert.strictEqual(un({ prev: 'busy', next: nx, unread: false, looking: true }), false); }
+  assert.strictEqual(un({ prev: 'unknown', next: 'turnEnded', unread: false, looking: false }), true);
+  for (const [p, nx] of [[null, 'idle'], [undefined, 'turnEnded'], ['none', 'idle'], ['pending', 'idle'], ['busy', 'exited'], ['busy', 'busy'], ['idle', 'waiting'], ['idle', 'turnEnded'], ['unknown', 'idle'], ['unknown', 'unknown'], ['busy', 'unknown'], ['busy', 'none']]) assert.strictEqual(un({ prev: p, next: nx, unread: false, looking: false }), false, p + '→' + nx);
+  for (const p of ['idle', 'waiting', 'busy', 'turnEnded']) assert.strictEqual(un({ prev: p, next: 'busy', unread: true, looking: false }), false); // 다시 작업 중이면 거둔다(끝나면 다시 켜진다)
+  for (const [p, nx] of [['idle', 'idle'], ['busy', 'exited'], ['waiting', 'idle'], [null, 'none']]) assert.strictEqual(un({ prev: p, next: nx, unread: true, looking: false }), true, '유지 ' + p + '→' + nx); // 볼 때까지 남는다
+  for (const u of [true, false]) assert.strictEqual(un({ prev: 'busy', next: 'idle', unread: u, looking: true }), false); // 보고 있으면 끈다·켜지 않는다
 });
 t('상태 "알 수 없음": 훅이 없는 저장소 밖 폴더는 대기인 척하지 않는다 · 읽지 않은 보고가 있고 이후 출력이 없으면 턴 끝남', () => {
   const sd = L.stateDisplay;

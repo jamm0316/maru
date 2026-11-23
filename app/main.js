@@ -690,7 +690,7 @@ function initFakeHierarchy() {
   const maru = addWorkspace(base, tr('app.title')); maru.fakeState = 'idle'; maru.fakeView = { sub: true, reports: 2, flash: false, cnote: { kind: 'opened', title: 'blog-draft' } };
   const mk = (title, cwd, project, fakeState, view) => { const w = addWorkspace(cwd, title, null, false, { parentId: maru.id, project }); w.fakeState = fakeState; w.fakeView = view; return w; };
   mk('blog-draft', path.join(os.homedir(), 'work', 'blog'), 'blog/draft', 'pending', { state: 'idle', ux: 'turnEnded', reportAt: now - 3 * 60000, loc: null, subs: [], cc: true });
-  mk('api-server', path.join(os.homedir(), 'work', 'api-server'), 'dev/api', 'pending', { state: 'none', ux: 'unknown', loc: 'handlers', subs: [], cc: true, team: { slug: 'dev', name: fakeSquads()[0].name } });
+  mk('api-server', path.join(os.homedir(), 'work', 'api-server'), 'dev/api', 'pending', { state: 'none', ux: 'unknown', unread: true, loc: 'handlers', subs: [], cc: true, team: { slug: 'dev', name: fakeSquads()[0].name } });
   mk('ledger', path.join(os.homedir(), 'work', 'ledger'), null, 'busy', { ux: 'busy', loc: null, subs: ['Explore', 'worker'], cc: true });
   const notes = addWorkspace(path.join(os.homedir(), 'notes'), 'notes'); notes.fakeState = 'pending'; notes.fakeView = { ux: 'pending' };
   activeId = maru.id;
@@ -756,12 +756,24 @@ const wsView = () => {
       parentId: o.depth === 1 ? w.parentId : null, depth: o.depth, project: w.project || null, team: L.teamChip(w.squad, FAKE_SQ_UI ? fakeSquads() : squads), loc: L.currentLocation({ recCwd: rec && rec.cwd, cwd: w.cwd, cwdReal: w.cwdReal }),
       reports: own ? own.count : 0, reportAt, flash: !!w.flashUntil && w.flashUntil > now, auto: !!w.autoStart && !w.term && !w.exited && !w.unavailable,
       cnote: w.childNote && now - w.childNote.at < CNOTE_MS ? { kind: w.childNote.kind, reason: w.childNote.reason || null, title: w.childNote.title || null } : null,
-      subs: w.parentId ? L.childSubNames(readSubs(w)) : [] };
+      subs: w.parentId ? L.childSubNames(readSubs(w)) : [], unread: !!w.unread };
     return FAKE_HIER && w.fakeView ? { ...v, ...w.fakeView, state: w.fakeView.state || state } : v;
   });
 };
 const attention = () => wsOrder().filter((w) => { const s = derivedState(w, wsState(w)); return s === 'busy' || s === 'waiting' || s === 'unknown'; }); // 상태를 알 수 없는 실행 중 세션도 종료 확인에 센다
-function activate(id) { if (!wsOf(id) || id === activeId) return; activeId = id; wsChanged('active'); }
+// 안 읽은 답변: 표시 상태가 바뀐 순간을 1초 주기(아래 setInterval)로 모든 작업 공간에서 본다. 보고 있음 = 활성 작업 공간 + 창 포커스
+const looking = (w) => w.id === activeId && !!win && !win.isDestroyed() && win.isFocused();
+function trackUnread() {
+  if (FAKE_HIER) return;
+  let changed = false;
+  for (const w of wsOrder()) {
+    const ux = derivedState(w, wsState(w)); const u = L.unreadNext({ prev: w.prevUx, next: ux, unread: !!w.unread, looking: looking(w) });
+    w.prevUx = ux; if (u !== !!w.unread) { w.unread = u; changed = true; }
+  }
+  if (changed) wsChanged(false); // 저장하지 않는다(메모리 상태)
+}
+function clearUnread() { const w = wsOf(activeId); if (w && w.unread && looking(w)) { w.unread = false; wsChanged(false); } }
+function activate(id) { if (!wsOf(id) || id === activeId) return; activeId = id; clearUnread(); wsChanged('active'); }
 function activateOffset(d) {
   const order = wsOrder(); if (order.length < 2) return;
   const i = order.findIndex((w) => w.id === activeId);
@@ -2640,6 +2652,7 @@ function createWindow() {
   });
   // 닫기(빨간 버튼·⌘W)는 숨기기만 한다. pty 는 계속 돈다. 실제 종료는 ⌘Q·트레이 "종료"(before-quit)에서.
   win.on('close', (e) => { if (!quitting) { e.preventDefault(); win.hide(); } });
+  win.on('focus', clearUnread); // 창이 다시 포커스를 받으면 활성 작업 공간의 안 읽음을 끈다
   win.on('closed', () => { win = null; });
 }
 
@@ -2663,6 +2676,7 @@ app.whenReady().then(() => {
   setInterval(() => {
     if (TEST_FX) for (const w of wsOrder()) if (w.term) writeFxState(w);
     for (const w of wsOrder()) if (w.unavailable && dirOk(w.cwd)) { w.unavailable = false; wsChanged(false); } // 디스크가 다시 연결됨
+    trackUnread();
     refreshTray();
   }, 1000).unref();
   if (!SMOKE && !FAKE_PROJ) { readCalendar(); setInterval(readCalendar, 15 * 60 * 1000).unref(); } // 스모크에서는 캘린더를 읽지 않는다

@@ -67,7 +67,9 @@
   let detailMode = 'project'; // 'project' | 'inbox' | 'memory' | 'day': 가운데 상세가 무엇인지(모두 detailOpen 으로 터미널을 가린다)
   let detailOpen = false; let detailKey = null; let detail = null; let detailSig = ''; let detailSeq = 0; // 프로젝트 상세(아래 '프로젝트' 절). 열려 있으면 터미널은 숨기기만 한다
   const terms = new Map(); // id -> { id, term, fit, host, gl, opened, started, starting }
-  let activeId = null; let stepReady = true;
+  let activeId = null; let stepReady = true; let foldBusy = false;
+  let arrowEpoch = 0; // 클릭·끌어 놓기가 있으면 올린다: 추천 넣기·파일 놓기처럼 키 입력을 거치지 않고 입력란이 바뀔 수 있어, 그 뒤에는 화살표로 바꾸지 않는다
+  for (const ev of ['mousedown', 'drop']) document.addEventListener(ev, () => { arrowEpoch++; }, true);
   let wsList = [];
   function createTerm(id) {
     const host = el('div', 'term-host'); host.hidden = true; $('terminal').append(host);
@@ -88,12 +90,20 @@
     let composing = false; let pendNl = null; let pendTimer = null; let nlAt = 0; let endedAt = 0;
     const justEnded = () => endedAt !== 0 && Date.now() - endedAt < 200;
     const flushNl = () => { if (pendNl === null) return; const s = pendNl; pendNl = null; clearTimeout(pendTimer); nlAt = Date.now(); if (!modalOpen()) window.maru.ptyWrite(id, s); };
+    // imeBusy: xterm 이 숨은 입력칸 값을 읽으려고 걸어 둔 타이머(setTimeout 0)가 아직 돌지 않았다. 그 타이머보다 먼저 건 타이머 안에서 다시 타이머를 걸면 xterm 것이 돈 뒤에 풀린다(시간에 기대지 않는다)
+    let imeBusy = false; let imeSeq = 0;
+    const imeSettle = () => { const n = ++imeSeq; imeBusy = true; setTimeout(() => setTimeout(() => { if (imeSeq === n) imeBusy = false; }, 0), 0); };
     host.addEventListener('compositionstart', () => { composing = true; endedAt = 0; }, true);
-    host.addEventListener('compositionend', () => { composing = false; endedAt = Date.now(); if (pendNl !== null) { clearTimeout(pendTimer); pendTimer = setTimeout(flushNl, 60); } }, true);
+    host.addEventListener('compositionend', () => { composing = false; endedAt = Date.now(); imeSettle(); if (pendNl !== null) { clearTimeout(pendTimer); pendTimer = setTimeout(flushNl, 60); } }, true);
     let navAt = 0; let navDrawn = true; // Cmd+↑/↓ 로 ↑/↓ 를 보낸 시각, 그 뒤 화면이 다시 그려졌는지
     term.onWriteParsed(() => { navDrawn = true; });
+    let arrowSt = null; let arrowAt = 0; // 화살표 바꾸기 상태(직전에 친 글자, 방금 바꾼 것), 그 상태를 만든 때의 arrowEpoch
     term.attachCustomKeyEventHandler((e) => {
       if (modalOpen()) return false;
+      // 숨은 입력칸에 쌓인 입력기 글자를 비운다(쌓여 있으면 xterm 이 이미 보낸 글을 통째로 다시 보낼 수 있다). xterm 이 입력칸 값을 읽기 전인 이 자리에서 해야 한다
+      if (term.textarea && term.textarea.value !== '' && Lib.imeCanReset({ type: e.type, composing, isComposing: e.isComposing, settling: imeBusy, pending: pendNl !== null })) term.textarea.value = '';
+      if (e.type === 'keydown' && e.keyCode === 229 && !composing && !e.isComposing) imeSettle(); // 조합 없이 바로 들어오는 글자: xterm 이 이 키 뒤에 입력칸을 읽는다
+      if (e.type === 'keydown' && (e.metaKey || e.ctrlKey || e.altKey || (e.key.length !== 1 && e.key !== 'Backspace' && e.key !== 'Shift'))) arrowSt = null; // 커서를 옮기거나 지우는 키 뒤에는 화살표로 바꾸지 않는다(직전 글자가 더는 커서 앞에 없을 수 있다)
       if (Lib.isShiftEnter(e)) {
         if (composing || e.isComposing || e.keyCode === 229 || pendNl !== null || justEnded()) {
           if (e.type === 'keydown' && pendNl === null && !e.repeat) { pendNl = '\x1b\r'; pendTimer = setTimeout(flushNl, composing ? 300 : 60); }
@@ -106,7 +116,7 @@
       const alt = term.buffer.active.type === 'alternate'; // vim 등 alternate screen 에서는 Cmd+←/→ 를 그대로 둔다. 단 Claude Code(fullscreen 렌더러도 alternate screen)는 예외
       if (e.type === 'keydown' && e.key === 'Escape' && e.isTrusted && !e.isComposing && e.keyCode !== 229 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.repeat) window.maru.ptyEsc(id); // 중단 감지용 알림만(키는 그대로 pty 로 간다)
       const cc = !!(wsList.find((x) => x.id === id) || {}).cc;
-      if (Lib.isStepKey(e)) return false; // Cmd+Shift+↑/↓ 는 전역 핸들러가 처리한다(터미널로 보내지 않는다)
+      if (Lib.isStepKey(e) || Lib.isFoldKey(e)) return false; // Cmd+Shift+↑/↓ 는 전역 핸들러가 처리한다(터미널로 보내지 않는다)
       if (Lib.isBufNavKey(e, alt, cc)) { // Cmd+↑/↓: 입력란 전체의 맨 앞/끝. keypress·keyup 도 같이 삼킨다
         if (e.type === 'keydown') {
           e.preventDefault();
@@ -137,6 +147,9 @@
         return;
       }
       if (!composing) endedAt = 0;
+      // Claude Code 입력란에서 직접 친 -> <- <-> 를 화살표로 바꾼다(붙여넣기·조합 글자는 한 글자가 아니라 그대로 간다)
+      if ((wsList.find((x) => x.id === id) || {}).cc && !composing) { if (arrowAt !== arrowEpoch) { arrowSt = null; arrowAt = arrowEpoch; } const a = Lib.arrowInput(arrowSt, d); arrowSt = a.st; send(a.out); return; }
+      arrowSt = null;
       send(d);
     });
     const e = { id, term, fit, host, gl: null, opened: false, started: false, starting: false, failed: false, noted: false };
@@ -563,7 +576,7 @@
       const kid = !!w.parentId && titleOf.has(w.parentId);
       if (kid && wsCollapsedIds.includes(w.parentId) && w.id !== activeId) continue; // 접힌 부모의 하위 세션은 숨긴다(활성이면 보인다)
       const on = w.id === activeId; const ux = w.ux || w.state; const k = stateKey(ux);
-      const row = el('div', 'ws' + (on ? ' active' : '') + (w.sub === true ? ' hassub' : '') + (kid ? ' kid' + (lastOf.get(w.parentId) === w.id ? ' last' : '') : '') + (w.flash ? ' flash' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
+      const row = el('div', 'ws' + (on ? ' active' : '') + (w.sub === true ? ' hassub' : '') + (kid ? ' kid' + (lastOf.get(w.parentId) === w.id ? ' last' : '') : '') + (w.flash ? ' flash' : '') + (w.unread ? ' unread' : '')); row.dataset.id = w.id; row.setAttribute('role', 'listitem');
       row.dataset.group = grp.get(w.id) || ''; // 형제 묶음(최상위 '' / 부모 id)
       if (!wsEdit) { row.draggable = true; const gr = el('span', 'ws-grip', '⋮⋮'); gr.setAttribute('aria-hidden', 'true'); row.append(gr); } // 끌 수 있다는 표시(마우스를 올리면 보인다). 이름을 바꾸는 중에는 끌 수 없다
       const kids = kidCount.get(w.id) || 0; const closedKids = kids > 0 && wsCollapsedIds.includes(w.id);
@@ -576,11 +589,11 @@
       const editing = !!wsEdit && wsEdit.id === w.id;
       const main = el(editing ? 'div' : 'button', 'ws-main' + (editing ? ' editing' : '')); if (!editing) main.type = 'button'; // 편집 중에는 단추가 아니다(입력칸 안의 클릭·스페이스가 작업 공간 전환으로 새지 않는다)
       if (on && !editing) main.setAttribute('aria-current', 'true');
-      if (!editing) main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }) + (w.team && w.team.name ? ' · ' + T('ws.team.aria', { name: w.team.name }) : ''));
+      if (!editing) main.setAttribute('aria-label', T('ws.row.aria', { title: w.title, path: w.path, state: T('agent.' + k) }) + (w.unread ? ' · ' + T('ws.unread.aria') : '') + (w.team && w.team.name ? ' · ' + T('ws.team.aria', { name: w.team.name }) : ''));
       const c = el('span', 'col'); const num = nums.get('workspace:' + w.id);
       const l1 = el('span', 'l1'); const nm = el('span', 'nm');
       if (editing) { const inp = makeWsInput(w, edit); nm.append(inp); wsEdit.input = inp; } else nm.append(el('span', 'n', w.title));
-      l1.append(nm, el('span', 'st ' + k, T('agent.' + k)));
+      l1.append(nm); if (w.unread) { const ud = el('span', 'ws-unread'); ud.setAttribute('aria-hidden', 'true'); l1.append(ud); } l1.append(el('span', 'st ' + k, T('agent.' + k)));
       const l2 = el('span', 'l2'); l2.append(el('span', 's', w.path)); if (num) l2.append(kbdHint(num));
       c.append(l1, l2);
       const extra = [];
@@ -2114,6 +2127,19 @@
     if (to.kind === 'project') { openDetail(to.id); focusTerm(); return; }
     stepReady = false;
     (async () => { try { closeDetail(true); if (to.id !== activeId) { await window.maru.activateWorkspace(to.id); await syncWs(); } focusTerm(); } catch (x) { /* 무시 */ } finally { stepReady = true; } })();
+  }, true);
+
+  // ---- ⌘⇧←/→: 지금 보고 있는 대상의 묶음을 접기 / 펼치기(프로젝트 상세를 보고 있으면 그 카테고리, 아니면 활성 작업 공간의 하위 세션 묶음) ----
+  document.addEventListener('keydown', (e) => {
+    if (!Lib.isFoldKey(e) || modalOpen()) return;
+    const t = e.target;
+    if (t && t.closest && !t.closest('.xterm') && ((t.tagName === 'INPUT' && /^(text|search|url|email|password|number|tel|)$/.test(t.type || '')) || t.tagName === 'TEXTAREA' || t.isContentEditable)) return; // 글자 입력칸에서는 원래 뜻(줄 처음·끝까지 선택)을 둔다
+    e.preventDefault(); e.stopPropagation();
+    if (e.repeat || foldBusy) return;
+    const f = Lib.foldTarget({ ws: wsList, wsCollapsed: wsCollapsedIds, activeId, project: detailOpen && detailMode === 'project' ? detailKey : null, groups: projView.open, catCollapsed: projView.collapsed }, e.key === 'ArrowRight');
+    if (!f) return;
+    foldBusy = true;
+    (async () => { try { if (f.kind === 'category') await toggleCat(f.tag, f.closed); else { await window.maru.setWsCollapsed(f.id, f.closed); await syncWs(); } } catch (x) { /* 무시 */ } finally { foldBusy = false; } })();
   }, true);
 
   // ---- 전역 키·바깥 클릭 ----

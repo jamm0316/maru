@@ -493,6 +493,12 @@ function isSafeQuestStart(s) { return typeof s === 'string' && s.length > 0 && !
 // 터미널 단축키: keydown 이벤트 -> pty 에 보낼 시퀀스(없으면 null). IME 조합 중에는 가로채지 않는다.
 // Shift+Enter(다른 보조키 없음)인지. keydown 뿐 아니라 keypress·keyup 도 같은 판정으로 삼킨다
 // Shift+Enter(다른 보조키 없음). 조합 여부는 보지 않는다: 조합 중이면 렌더러가 줄바꿈을 조합 확정 뒤로 미룬다.
+// 한글 등 입력기 글자는 xterm 의 숨은 입력칸에 계속 쌓인다(지워도 남는다). 쌓인 채로 그 안의 커서가 중간에 놓이면
+// xterm 이 다음 글자를 받을 때 입력칸 전체를 다시 보낸다(이미 보낸 글이 한 번 더 입력된다). 그래서 키를 누를 때마다 비운다.
+// 조합 중이거나, xterm 이 입력칸 값을 읽으려고 걸어 둔 타이머가 아직 돌지 않았거나(settling), 미뤄 둔 줄바꿈이 있으면 비우지 않는다(글자가 사라진다).
+function imeCanReset({ type, composing, isComposing, settling, pending } = {}) {
+  return type === 'keydown' && composing !== true && isComposing !== true && settling !== true && pending !== true;
+}
 function isShiftEnter(e) {
   return !!e && e.key === 'Enter' && !!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey;
 }
@@ -533,12 +539,55 @@ function bufNavSeq(up, rows, appCursor) {
 function isStepKey(e) {
   return !!e && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !!e.metaKey && !!e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
 }
+// Cmd+Shift+←/→(다른 보조키 없음): 지금 보고 있는 대상이 속한 묶음을 접기(←) / 펼치기(→)
+function isFoldKey(e) {
+  return !!e && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !!e.metaKey && !!e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229;
+}
+// 접거나 펼칠 대상을 정한다. open=false 접기, true 펼치기. 이미 그 상태면 null(아무것도 하지 않는다).
+// project(보고 있는 프로젝트 키)가 있으면 그 프로젝트의 카테고리, 없으면 활성 작업 공간의 묶음(자신이 부모면 자신, 하위 세션이면 그 부모).
+// -> { kind: 'category', tag, closed } | { kind: 'workspace', id, closed } | null
+function foldTarget({ ws, wsCollapsed, activeId, project, groups, catCollapsed } = {}, open) {
+  const closed = !open;
+  if (typeof project === 'string' && project) {
+    const g = (Array.isArray(groups) ? groups : []).find((x) => x && typeof x.tag === 'string' && Array.isArray(x.items) && x.items.some((it) => it && it.key === project));
+    if (!g) return null;
+    const now = Array.isArray(catCollapsed) && catCollapsed.includes(g.tag);
+    return now === closed ? null : { kind: 'category', tag: g.tag, closed };
+  }
+  const ordered = hierarchyOrder(ws);
+  const i = ordered.findIndex((x) => x.id === activeId);
+  if (i < 0) return null;
+  let pid = null;
+  if (ordered[i].depth === 1) pid = ordered[i].parentId;
+  else if (ordered[i + 1] && ordered[i + 1].depth === 1) pid = ordered[i].id; // 하위 세션이 있는 부모
+  if (typeof pid !== 'string') return null;
+  const now = Array.isArray(wsCollapsed) && wsCollapsed.includes(pid);
+  return now === closed ? null : { kind: 'workspace', id: pid, closed };
+}
 // targets: numberTargets() 결과(개수 제한 없이), cur: 지금 보고 있는 { kind, id }, d: -1(위) | 1(아래). 맨 처음·맨 끝에서는 null(돌아가지 않는다)
 function stepTarget(targets, cur, d) {
   if (!Array.isArray(targets) || !cur || (d !== 1 && d !== -1)) return null;
   const i = targets.findIndex((t) => t && t.kind === cur.kind && t.id === cur.id);
   if (i < 0) return null;
   return targets[i + d] || null;
+}
+
+// 입력 중 화살표 바꾸기: 직접 친 "->" 는 →, "<-" 는 ←, "<->" 는 ↔ 로 바꾼다(앞 글자를 지우는 DEL 뒤에 기호를 보낸다).
+// 바꾼 직후의 Backspace 는 기호를 지우고 원래 글자로 되돌린다(코드를 쓸 때의 탈출구). "-->" 처럼 - 가 이어진 뒤의 > 는 바꾸지 않는다.
+// st: { prev: 직전에 친 글자들(최대 2), conv: 방금 바꾼 것 { orig, sym } | null }. d: 터미널이 보내려는 입력(한 글자가 아니면 그대로 두고 상태를 지운다)
+// -> { out: pty 로 보낼 문자열, st: 다음 상태 }
+const ARROW_DEL = '\x7f';
+function arrowInput(st, d) {
+  const prev = st && typeof st.prev === 'string' ? st.prev : '';
+  const conv = st && st.conv && typeof st.conv.orig === 'string' ? st.conv : null;
+  const none = { prev: '', conv: null };
+  if (typeof d !== 'string' || d.length !== 1) return { out: d, st: none };
+  if (d === ARROW_DEL) return conv ? { out: ARROW_DEL + conv.orig, st: none } : { out: d, st: none };
+  if (d < ' ' ) return { out: d, st: none };
+  if (d === '>' && conv && conv.sym === '←') return { out: ARROW_DEL + '↔', st: { prev: '', conv: { orig: '<->', sym: '↔' } } };
+  if (d === '>' && prev.endsWith('-') && prev !== '--') return { out: ARROW_DEL + '→', st: { prev: '', conv: { orig: '->', sym: '→' } } };
+  if (d === '-' && prev.endsWith('<')) return { out: ARROW_DEL + '←', st: { prev: '', conv: { orig: '<-', sym: '←' } } };
+  return { out: d, st: { prev: (prev + d).slice(-2), conv: null } };
 }
 
 // 작업 공간이 Claude Code 화면인지: 마루가 claude 를 띄웠고(launched) 훅 상태가 busy/idle/waiting 으로 알려졌거나, 아직 상태가 없어도 claude 가 설치돼 있어 exec 됐을 때
@@ -3742,6 +3791,14 @@ function stateDisplay({ state, hasTerm, outsideRoot, reportedAt, lastOutputAt })
   if (Number.isFinite(reportedAt) && reportedAt > 0 && !(Number.isFinite(lastOutputAt) && lastOutputAt > reportedAt + REPORT_PROOF_SLACK_MS)) return 'turnEnded';
   return 'unknown';
 }
+// 안 읽은 답변 표시: 표시 상태가 busy→idle/waiting/turnEnded(또는 unknown→turnEnded)로 바뀌었을 때, 사용자가 보고 있지 않으면 켠다. 보고 있으면(활성 작업 공간 + 창 포커스) 끈다. 시작·복원(prev 없음)·none/pending→idle·exited 는 켜지 않는다
+function unreadNext({ prev, next, unread, looking }) {
+  if (looking === true) return false;
+  if (next === 'busy') return false; // 다시 작업 중이면 아직 끝난 답변이 아니다(조용한 구간을 대기로 잘못 본 표시를 거둔다). 진짜로 끝나면 다시 표시된다
+  if (unread === true) return true;
+  if (prev === 'busy') return next === 'idle' || next === 'waiting' || next === 'turnEnded';
+  return prev === 'unknown' && next === 'turnEnded';
+}
 // 훅 기록의 cwd 가 작업 공간을 연 폴더와 다르면 그 폴더 이름(마지막 조각), 아니면 null. 다른 출처로 짐작하지 않는다
 function currentLocation({ recCwd, cwd, cwdReal }) {
   if (!validRecCwd(recCwd)) return null;
@@ -3871,15 +3928,15 @@ function panelKeyDelta(side, key, shift) {
 const api = {
   CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, consentChoice, squadChoices, cleanSquadAsk, SQUAD_ASK_MAX, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
   macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, CHILD_HEADER_USER, parseSubOpen, subDraftAdd, subDraftCheck, subDraftUse, subLimitCheck, subNoticeLine, cleanNoticePart, SUB_TITLE_MAX, SUB_BRIEF_MAX, SUB_DRAFT_MS, SUB_DRAFT_MAX, promptHandoff, childBriefPlan, briefAtSpawn, isMaruRootDir, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
-  hierarchyOrder, reorderWs, visibleWsIds, stateDisplay, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
+  hierarchyOrder, reorderWs, visibleWsIds, stateDisplay, unreadNext, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
   MANAGED_MARKER, SYNC_MARKER, FIRST_MEETING_TEXT, cmpVersion, readPayloadVersion, readSyncing, homeStatus, cleanStaleTmp, appendSyncLog, firstMeetingPaste, parseOnboarded, firstMeetingGate, probeMemoryDir, deriveSetupState, mergeProfile, safeManifestPath, parseMarker, readMarker, scanPayload, syncPayload, syncClaudeMd, managedAction,
   defaultSetupState, validateSetupState, parseSetupState, loadSetupState, saveSetupState, setupStage, setupUnfinished,
   claudeUpAfter, PREREQ_IDS, childPath, findInPath, modelPrereqs, prereqsReady, claudeCandidates, nvmVersionDirs, parseClaudeProbe, CLAUDE_PROBE_CMD, setupCommand, buildSetupScript, SETUP_KINDS, SETUP_INSTALL_CMD, firstMeetingBanner,
   INBOX_NOTIF_MAX, PROPOSAL_FILE_MAX, PROPOSAL_TOTAL_MAX, PROPOSAL_FILES_MAX, logAtMs, plausibleLogAt, fmtLogAt, seenToStore, PROPOSAL_LIST_MAX, INBOX_SEEN_MAX_BYTES, validProposalSlug, cleanDisplay, cleanProposalText, proposalMeta, scanProposalDir, listProposals, proposalDetail, trashProposalDir, skillRequestText, parseSquadCheck, summarizeSquadCheck, validateInboxSeen, parseInboxSeen, readInboxSeenFile, saveInboxSeen, markUnseen, newestAt, relativeAgo,
   MEMORIES_PER_LEVEL, QUEST_MAX_CHARS, SUGGESTIONS_MAX_BYTES, LOG_TAIL_BYTES, BRIEFING_MAX,
-  DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey, isBufNavKey, isPromptBorder, promptEdgeRows, bufNavSeq, isStepKey, stepTarget,
+  DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey, isBufNavKey, isPromptBorder, promptEdgeRows, bufNavSeq, isStepKey, stepTarget, isFoldKey, foldTarget, arrowInput,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
-  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isShiftEnter, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
+  hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isShiftEnter, imeCanReset, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
   parseBattery, parseDiskFree, parseLogEvents, mergeBriefing,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
