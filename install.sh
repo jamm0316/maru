@@ -11,7 +11,7 @@
 VERSION="0.1.0"
 DMG_NAME="Maru-0.1.0-arm64.dmg"
 DMG_URL="https://github.com/jamm0316/maru/releases/download/v0.1.0/Maru-0.1.0-arm64.dmg"
-DMG_SHA256="053f120a8386e68d718d3d74859f5401ffdfda6ef165b07c160414cf2a2341ad"
+DMG_SHA256="f9db4ed8d80516e2d72ee96c74365f468d44131fb9807d97713d17261c486c49"
 
 # Test-only environment overrides (not for normal use):
 #   MARU_INSTALL_DIR, MARU_DMG_URL, MARU_DMG_SHA256, MARU_NO_OPEN=1, MARU_YES=1,
