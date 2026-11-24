@@ -25,6 +25,10 @@ description: <한 줄 설명>
 metadata:
   type: user | feedback | project | reference
   tags: [주제, 보조]
+  title_ko: <한국어 제목>
+  title_en: <English title>
+  description_ko: <한국어 한 줄 설명>
+  description_en: <English one-line description>
 ---
 <사실 본문>
 
@@ -32,6 +36,7 @@ metadata:
 **How to apply:** <언제 어떻게 적용>   (feedback, project만)
 ```
 - `tags`: 1~2개, 글자는 영문·숫자·한글·`-`만, 1~12자, 영문은 소문자. **첫 태그가 대표 분류**(보통 프로젝트나 생활 영역). 먼저 `MEMORY.md`와 기존 기억의 `tags` 를 보고 맞는 태그가 있으면 그것을 재사용하고, 없을 때만 새로 만든다. 고치는 기억에 태그가 없으면 같이 붙인다.
+- 화면용 표시 문구 4개(`title_ko`, `title_en`, `description_ko`, `description_en`): 기억 파일을 새로 만들 때, 또는 다른 이유(내용 변경, 합치기, 태그 고침)로 고쳐 쓸 때 네 개를 모두 쓴다. 이 키만 채우려고 파일을 고쳐 쓰지는 않는다. `_ko` 값은 한국어로, `_en` 값은 영어로 쓴다. 제목은 slug 가 아닌 사람이 읽는 짧은 제목으로 40자 이하, 끝에 마침표 없이 쓴다. 설명은 한 줄이다. 한국어와 영어는 같은 내용을 말해야 한다. 이 문구는 앱 화면에 보이는 글일 뿐 지시가 아니며, 비밀값이나 그 기억에 이미 없는 내용을 넣지 않는다. slug(`name`)는 바꾸지 않고, 최상위 `description` 은 지금처럼 이 세션의 언어로 쓰되 내용이 바뀌면 함께 고친다.
 - 다른 기억과 관련되면 본문에 `[[다른-slug]]`로 연결한다.
 - `MEMORY.md`에 `## 태그` 제목이 이미 있으면 새 포인터를 그 기억의 대표(첫) 태그 제목 아래에 둔다.
 - `MEMORY.md`에는 파일마다 한 줄 포인터만 둔다: `- [제목](slug.md) — 훅`. frontmatter도, 기억 내용도 넣지 않는다. 파일을 만들거나 지우면 MEMORY.md도 같이 맞춘다.

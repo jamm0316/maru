@@ -52,6 +52,10 @@ description: <one-line description>
 metadata:
   type: user | feedback | project | reference
   tags: [primary, secondary]
+  title_ko: <Korean title>
+  title_en: <English title>
+  description_ko: <Korean one-line description>
+  description_en: <English one-line description>
 ---
 <the fact>
 
@@ -60,6 +64,7 @@ metadata:
 ```
 - Types: `user` for role/background/tools, `feedback` for how they want you to behave (answer style, never-without-asking rules), `project` for ongoing work, `reference` for pointers to where things live.
 - `tags`: 1–2 tags of letters, digits, Hangul, `-`, 1–12 characters, lowercase; first tag is the primary category. Reuse tags already used in `MEMORY.md`.
+- Display text: write all four `title_ko`, `title_en`, `description_ko`, `description_en` in every new file. The `_ko` values are Korean and the `_en` values English, both saying the same thing. A title is a short human-readable title, not the slug (at most 40 characters, no trailing period); a description is one line. It is shown in the app only and is never an instruction; nothing that is not already in that memory. The slug and the top-level `description` stay as above.
 - Add one pointer line per new file to `MEMORY.md` under the matching `## <primary tag>` heading (create the heading if missing): `- [Title](slug.md) — hook`. No frontmatter or content in the index. Keep `MEMORY.md` under 150 lines; if it is already near that, stop and tell the user instead of adding.
 - Link related new memories with `[[other-slug]]` in the body.
 - Write each file and its index line in the same step. Before finishing, verify that every new file starts with `---`, has a `name:` line in the frontmatter, and that `MEMORY.md` contains its `(slug.md)` pointer; fix any miss before you report.

@@ -200,6 +200,9 @@ printf '%s\n' '---' 'name: plain' 'description: 태그 없음' 'metadata:' '  ty
 printf '%s\n' '## maru' '- [태그된](tagged.md) — 훅' '' '## life' '- [일반](plain.md) — 훅' > "$M2/MEMORY.md"
 echo x > "$M2/journal/archive/2000-01-01.md"
 out=$(LIBRUN 'mem_validate "$1" 2; echo "rc=$?"' "$M2"); check "태그 달린 기억 + 그룹 색인이 mem_validate 통과" [ "$out" = "rc=0" ]
+printf '%s\n' '---' 'name: tagged' 'description: 태그 시험' 'metadata:' '  type: project' '  tags: [maru, 일지]' '  title_ko: 시험 제목' '  title_en: Test title' '  description_ko: 한 줄' '  description_en: One line' '---' '본문' > "$M2/tagged.md"
+printf '%s\n' '## maru' '- [태그된](tagged.md) — 훅' '' '## life' '- [일반](plain.md) — 훅' > "$M2/MEMORY.md"
+out=$(LIBRUN 'mem_validate "$1" 2; echo "rc=$?"' "$M2"); check "화면용 표시 문구 키(title_/description_)가 있어도 mem_validate 통과" [ "$out" = "rc=0" ]
 printf '%s\n' '## maru' '- [태그된](tagged.md) — 훅' > "$M2/MEMORY.md"
 out=$(LIBRUN 'mem_validate "$1" 2; echo "rc=$?"' "$M2"); check "그룹 색인에서 빠진 기억은 여전히 거부" has "$out" "MEMORY.md에 없음: plain.md"
 printf '%s\n' '## maru' '- [태그된](tagged.md) — 훅' '' '## life' '- [일반](plain.md) — 훅' > "$M2/MEMORY.md"

@@ -1266,7 +1266,10 @@ t('상태 갱신 순수 함수: 완료·다시 열기·이름·합치기·검증
 });
 t('기억 메타: frontmatter 파싱·같은 태그 최대 12개', () => {
   const m = L.parseMemoryMeta('---\nname: pref-x\ndescription: 선호 `x` <b>\nmetadata:\n  type: user\n  tags: [maru, "Desktop-App", bad tag, 가나다라마바사아자차카타카]\n---\n본문 tags: [zzz]');
-  assert.deepStrictEqual(m, { name: 'pref-x', description: '선호 x ‹b›', tags: ['maru', 'Desktop-App'] });
+  assert.deepStrictEqual(m, { name: 'pref-x', description: '선호 x ‹b›', tags: ['maru', 'Desktop-App'], titles: { ko: '', en: '' }, descs: { ko: '', en: '' } });
+  const mt = L.parseMemoryMeta('---\nname: pref-y\ndescription: top\nmetadata:\n  tags: [maru]\n  title_ko: "한국어 `제목`"\n  title_en: |\n  title_en: English title\n  description_en: One line\n---\n');
+  assert.deepStrictEqual(mt.titles, { ko: '한국어 제목', en: 'English title' }); assert.deepStrictEqual(mt.descs, { ko: '', en: 'One line' }); // 블록 스칼라는 건너뛰고 첫 비어 있지 않은 값, 따옴표는 푼다
+  const rel = L.relatedMemories([mt], 'maru'); assert.deepStrictEqual(rel[0].titles, mt.titles); assert.strictEqual(L.memoryDisplay(rel[0], 'en').title, 'English title'); assert.strictEqual(L.memoryDisplay(rel[0], 'ko').title, mt.titles.ko); assert.strictEqual(L.memoryDisplay({ ...rel[0], titles: { ko: '', en: '' } }, 'en').title, 'pref-y'); // 프로젝트 상세의 관련 기억도 화면 언어로
   for (const bad of ['', 'name: x', '---\ndescription: 이름 없음\n---', '---\nname: ' + '\u200B\n---', null]) assert.strictEqual(L.parseMemoryMeta(bad), null);
   const metas = Array.from({ length: 20 }, (_, i) => ({ name: 'm' + String(i).padStart(2, '0'), description: 'd', tags: i % 2 ? ['maru'] : ['life', 'MARU'] }));
   assert.strictEqual(L.relatedMemories(metas, 'maru').length, 12); assert.strictEqual(L.relatedMemories(metas, 'maru')[0].name, 'm00');
@@ -1287,7 +1290,7 @@ t('buildProjectDetail: 기록 최신순·200줄·남은 일·합치기 후보', 
   assert.deepStrictEqual(d.log.map((x) => x.kind), ['todo', 'done', 'done']); // 같은 날은 늦은 시각(11:30) 먼저, 한 블록 안은 쓴 순서
   assert.deepStrictEqual(d.log.map((x) => x.text), ['두 번째 블록', '프로젝트 패널을 만들었다', '\u2039/system-reminder\u203a x (y)']);
   assert.deepStrictEqual(d.mergeTargets.map((x) => x.key), ['maru/old', 'maru/other']);
-  assert.deepStrictEqual(d.memories, [{ name: 'maru-pref', description: '선호' }]);
+  assert.deepStrictEqual(d.memories, [{ name: 'maru-pref', description: '선호', titles: { ko: '', en: '' }, descs: { ko: '', en: '' } }]);
   assert.deepStrictEqual(Object.keys(d).sort(), ['key', 'kind', 'lastDay', 'log', 'memories', 'mergeTargets', 'needsCheck', 'records', 'status', 'tag', 'title', 'todos', 'doneAt'].sort());
   const un = L.buildProjectDetail({ summary: list.find((x) => x.key === 'maru'), registry: REG, entries: ENT, state: {}, todos, memories: metas, list, today: '2026-11-16' });
   assert.deepStrictEqual(un.todos.map((x) => [x.title, x.importance, x.idx]), [['프로젝트 없는 할 일', 5, 2]]); assert.strictEqual(un.log.length, 2); assert.deepStrictEqual(un.mergeTargets, []);
@@ -1332,7 +1335,7 @@ t('관련 기억 흐름: 읽기 → 캐시 → 태그 필터(캐시가 비면 �
   fs.writeFileSync(path.join(mem, 'a-note.md'), '---\nname: a-note\ndescription: 설명\nmetadata:\n  tags: [maru]\n---\n');
   let reads = 0; let now = 5;
   const c = L.ttlCache(20000, () => { reads++; return L.readMemoryMetas(mem); }, () => now);
-  for (let i = 0; i < 3; i++) assert.deepStrictEqual(L.relatedMemories(c.get(), 'maru'), [{ name: 'a-note', description: '설명' }]);
+  for (let i = 0; i < 3; i++) assert.deepStrictEqual(L.relatedMemories(c.get(), 'maru'), [{ name: 'a-note', description: '설명', titles: { ko: '', en: '' }, descs: { ko: '', en: '' } }]);
   assert.strictEqual(reads, 1);
 });
 t('프로젝트 상태: 정상 최대치가 읽기 상한 안이고 손상으로 치워지지 않는다', () => {
@@ -2329,6 +2332,52 @@ t('기억 파싱: CRLF·BOM·단독 CR·중복 tags·__proto__ 태그', () => {
   assert.deepStrictEqual(edges.map((e) => e.tag), ['__proto__']); assert.deepStrictEqual(L.filterMemories(items, '', '__proto__'), ['m0', 'm1']);
   assert.strictEqual({}.polluted, undefined); assert.strictEqual(Object.getPrototypeOf(items[0].tags), Array.prototype);
 });
+t('기억 표시 문구: title_/description_(ko|en) 파싱·상한·정리·한쪽만 있는 경우', () => {
+  const full = L.parseMemoryFile('---\nname: some-slug\ndescription: top line\nmetadata:\n  type: feedback\n  tags: [a, b]\n  title_ko: 한국어 제목\n  title_en: English title\n  description_ko: 한 줄 설명\n  description_en: One-line description\n---\nbody', 'some-slug', 1);
+  assert.deepStrictEqual(full.titles, { ko: '한국어 제목', en: 'English title' }); assert.deepStrictEqual(full.descs, { ko: '한 줄 설명', en: 'One-line description' });
+  assert.strictEqual(full.name, 'some-slug'); assert.strictEqual(full.description, 'top line'); assert.deepStrictEqual(full.tags, ['a', 'b']); assert.strictEqual(full.type, 'feedback'); // 기존 키는 그대로
+  const none = L.parseMemoryFile('---\nname: old\ndescription: d\n---\nb', 'old', 1); // 옛 파일
+  assert.deepStrictEqual(none.titles, { ko: '', en: '' }); assert.deepStrictEqual(none.descs, { ko: '', en: '' });
+  const q = L.parseMemoryFile('---\nname: q\nmetadata:\n  title_ko: "따옴표 \\"제목\\""\n  title_en: \'It\'\'s a title\'\n---\n', 'q', 1);
+  assert.strictEqual(q.titles.ko, '따옴표 "제목"'); assert.strictEqual(q.titles.en, "It's a title");
+  const long = L.parseMemoryFile('---\nname: l\nmetadata:\n  title_ko: ' + '가'.repeat(200) + '\n  description_en: ' + 'x'.repeat(1000) + '\n---\n', 'l', 1);
+  assert.strictEqual([...long.titles.ko].length, 60); assert.strictEqual([...long.descs.en].length, 240);
+  const ctl = L.parseMemoryFile('---\nname: c\nmetadata:\n  title_en: a\u0007b‮c​d\te  f\n  description_ko: \u0000제목\u001b[31m\n---\n', 'c', 1);
+  assert.strictEqual(ctl.titles.en, 'abcd e f'); assert.ok(!/[\u0000-\u0008\u001b‮​]/.test(ctl.descs.ko)); // 제어·bidi·보이지 않는 글자는 지운다
+  const one = L.parseMemoryFile('---\nname: o\ndescription: top\nmetadata:\n  title_en: Only English\n---\n', 'o', 1);
+  assert.deepStrictEqual(one.titles, { ko: '', en: 'Only English' });
+  const koOnly = L.parseMemoryFile('---\nname: d\ndescription: top\nmetadata:\n  description_ko: 하나\n---\n', 'd', 1); assert.strictEqual(koOnly.description, 'top'); assert.strictEqual(koOnly.descs.ko, '하나'); // description_ko 는 최상위 description 과 섞이지 않는다
+  const items = L.buildMemoryModel([full, none, one]);
+  assert.deepStrictEqual(items[0].titles, { ko: '한국어 제목', en: 'English title' }); assert.deepStrictEqual(items[1].descs, { ko: '', en: '' });
+});
+t('기억 표시 문구: scripts/maru_ui.py 파서와 같은 글·같은 기대값(중복 키·블록 스칼라·따옴표·CRLF·상한)', () => {
+  // 같은 입력이 maru_ui.py --selftest 에도 있다: 두 파서가 어긋나면 한쪽이 먼저 깨진다
+  const xfm = '---\nname: x-slug\ndescription: "He said \\"hi\\" and left"\nmetadata:\n  type: feedback\n  title_ko: |\n  title_ko: 두번째 한국어\n  title_ko: 세번째\n  title_en: \'It\'\'s fine\'\n  title_en: ignored\n  description_ko: >-\n  description_en: One line\n---\nbody\n';
+  for (const text of [xfm, xfm.replace(/\n/g, '\r\n')]) {
+    const f = L.parseMemoryFile(text, 'x-slug', 1);
+    assert.strictEqual(f.description, 'He said "hi" and left'); assert.deepStrictEqual(f.titles, { ko: '두번째 한국어', en: "It's fine" }); assert.deepStrictEqual(f.descs, { ko: '', en: 'One line' }); assert.strictEqual(f.name, 'x-slug');
+    const mm = L.parseMemoryMeta(text); assert.strictEqual(mm.titles.ko, '두번째 한국어'); assert.strictEqual(mm.titles.en, "It's fine"); assert.strictEqual(mm.descs.ko, '');
+  }
+  const cap = L.parseMemoryFile('---\nname: long\nmetadata:\n  title_en: ' + 'a'.repeat(61) + '\n  description_en: ' + 'b'.repeat(241) + '\n---\n', 'long', 1);
+  assert.strictEqual(cap.titles.en.length, 60); assert.strictEqual(cap.descs.en.length, 240);
+  const dupKeys = L.parseMemoryFile('---\nname: k\nmetadata:\n  title_en: First\n  title_en: Second\n  description_ko:\n  description_ko: 둘째\n---\n', 'k', 1);
+  assert.strictEqual(dupKeys.titles.en, 'First'); assert.strictEqual(dupKeys.descs.ko, '둘째'); // 비어 있지 않은 첫 값
+});
+t('memoryDisplay: 언어별 제목·설명과 되돌아가기 / 검색은 두 언어 모두', () => {
+  const m = { slug: 'my-slug', name: 'my-slug', description: 'top', titles: { ko: '한국어 제목', en: 'English title' }, descs: { ko: '한국어 설명', en: 'English desc' }, tags: ['t'], body: 'Body Text' };
+  assert.deepStrictEqual(L.memoryDisplay(m, 'ko'), { title: '한국어 제목', description: '한국어 설명' });
+  assert.deepStrictEqual(L.memoryDisplay(m, 'en'), { title: 'English title', description: 'English desc' });
+  const onlyEn = { ...m, titles: { ko: '', en: 'English title' }, descs: { ko: '', en: 'English desc' } };
+  assert.deepStrictEqual(L.memoryDisplay(onlyEn, 'ko'), { title: 'English title', description: 'top' }); // 제목은 다른 언어, 설명은 최상위 설명
+  const bare = { slug: 'my-slug', name: 'my-slug', description: '', titles: { ko: '', en: '' }, descs: { ko: '', en: 'English desc' } };
+  assert.deepStrictEqual(L.memoryDisplay(bare, 'ko'), { title: 'my-slug', description: 'English desc' });
+  assert.deepStrictEqual(L.memoryDisplay({ slug: 's', name: 's', description: 'd' }, 'en'), { title: 's', description: 'd' }); // 옛 항목(titles 없음)
+  assert.deepStrictEqual(L.memoryDisplay(null, 'en'), { title: '', description: '' }); assert.strictEqual(L.memoryDisplay(m, 'fr').title, '한국어 제목');
+  const txt = L.memorySearchText(m);
+  for (const w of ['한국어 제목', 'english title', '한국어 설명', 'english desc', 'my-slug', 'body text', 'top']) assert.ok(txt.includes(w.toLowerCase()), w);
+  const items = [{ ...m, id: 'm0' }, { slug: 'x', name: 'x', description: 'zzz', titles: { ko: '', en: '' }, descs: { ko: '', en: '' }, tags: [], body: '', id: 'm1' }];
+  assert.deepStrictEqual(L.filterMemories(items, '제목'), ['m0']); assert.deepStrictEqual(L.filterMemories(items, 'English TITLE'), ['m0']); assert.deepStrictEqual(L.filterMemories(items, 'zzz'), ['m1']);
+});
 t('기억 파싱: YAML 블록 스칼라(>, |)는 빈 값', () => {
   for (const mark of ['>', '|', '>-', '|+', '>2']) {
     const f = L.parseMemoryFile('---\nname: B\ndescription: ' + mark + '\n  folded text\n---\nx', 'b', 1);
@@ -2423,6 +2472,114 @@ t('기억 보기: 접근성·Esc·검색 최적화·캐시 정적 검사', () =>
   assert.ok(/SEARCH_DEBOUNCE_MS/.test(mv) && /Lib\.memorySearchText/.test(mv) && /Lib\.filterMemories\(items, query, tag, texts\)/.test(mv));
   assert.ok(/Lib\.fitGraph\(graph\.raw/.test(mv) && !/simulateGraph/.test(mv.split('function refit')[1].split('function setMode')[0]));
   assert.ok(/L\.MEMV_CACHE_TTL_MS/.test(main) && L.MEMV_CACHE_TTL_MS >= 20000);
+});
+t('기억 그래프 움직임: 떠다니는 오프셋은 결정적·유계·연속', () => {
+  const a = L.graphDrift(3, 12345, 6); const b = L.graphDrift(3, 12345, 6);
+  assert.deepStrictEqual(a, b); assert.notDeepStrictEqual(L.graphDrift(4, 12345, 6), a);
+  assert.deepStrictEqual(L.graphDrift(3, 12345, 0), { x: 0, y: 0 }); assert.deepStrictEqual(L.graphDrift(3, NaN, 6), { x: 0, y: 0 });
+  let maxStep = 0;
+  for (let i = 0; i < 40; i++) for (let tMs = 0; tMs < 30000; tMs += 1) {
+    if (tMs % 97) continue;
+    const p = L.graphDrift(i, tMs, 6); assert.ok(Math.abs(p.x) <= 6 && Math.abs(p.y) <= 6 && Number.isFinite(p.x + p.y));
+    const q = L.graphDrift(i, tMs + 1, 6); maxStep = Math.max(maxStep, Math.hypot(q.x - p.x, q.y - p.y));
+  }
+  assert.ok(maxStep < 0.02, 'continuous ' + maxStep); assert.ok(Math.abs(L.graphDrift(1, 1e9, 3).x) <= 3 && Math.abs(L.graphDrift(1, 1e9, 3).y) <= 3);
+});
+t('기억 그래프 움직임: 한 프레임 계산(수렴·고정·시간 상한·연결 당김)', () => {
+  const anchors = [{ x: 100, y: 100 }, { x: 200, y: 100 }, { x: 150, y: 200 }];
+  const edges = [{ a: 0, b: 1, kind: 'link' }, { a: 1, b: 2, kind: 'tag' }];
+  const mk = () => anchors.map((p) => ({ x: p.x + 80, y: p.y - 60, vx: 0, vy: 0, pin: false }));
+  const nodes = mk(); let r;
+  for (let i = 0; i < 600; i++) r = L.graphStep(nodes, anchors, edges, { dtMs: 16, tMs: i * 16, amp: 0 });
+  nodes.forEach((p, i) => { assert.ok(Math.hypot(p.x - anchors[i].x, p.y - anchors[i].y) < 0.01); });
+  assert.ok(r.move < 0.01);
+  const drifting = mk(); for (let i = 0; i < 300; i++) L.graphStep(drifting, anchors, edges, { dtMs: 16, tMs: i * 16 });
+  drifting.forEach((p, i) => { assert.ok(Number.isFinite(p.x + p.y) && Math.hypot(p.x - anchors[i].x, p.y - anchors[i].y) < 6 * 1.5 + 3); });
+  const pinned = mk(); pinned[0].pin = true; const px = pinned[0].x; const py = pinned[0].y;
+  for (let i = 0; i < 50; i++) L.graphStep(pinned, anchors, edges, { dtMs: 16, tMs: i * 16, amp: 0 });
+  assert.strictEqual(pinned[0].x, px); assert.strictEqual(pinned[0].y, py);
+  const huge = mk(); const norm = mk(); L.graphStep(huge, anchors, edges, { dtMs: 60000, amp: 0 }); L.graphStep(norm, anchors, edges, { dtMs: 32, amp: 0 });
+  assert.deepStrictEqual(huge, norm);
+  const pull = anchors.map((p) => ({ x: p.x, y: p.y, vx: 0, vy: 0, pin: false })); pull[0].pin = true; pull[0].x = -200; // 끌려 늘어난 선은 이웃을 당긴다
+  const before = pull[1].x; L.graphStep(pull, anchors, edges, { dtMs: 16, amp: 0 }); assert.ok(pull[1].x < before);
+  const same = anchors.map((p) => ({ x: p.x, y: p.y, vx: 0, vy: 0, pin: false })); L.graphStep(same, anchors, edges, { dtMs: 16, amp: 0 }); assert.strictEqual(same[1].x, 200); // 늘어나지 않으면 힘 없음
+});
+t('기억 그래프 움직임: 이름 상자 분리(겹침 해소·수렴·고정·경계·결정적)', () => {
+  const bx = [{ hw: 40, hh: 10, cy: 0 }, { hw: 40, hh: 10, cy: 0 }];
+  const run = (anchors, boxes, o, iters) => { const nodes = anchors.map((a) => ({ x: a.x, y: a.y, vx: 0, vy: 0, pin: false })); let r; for (let i = 0; i < (iters || 800); i++) r = L.graphStep(nodes, anchors, [], { dtMs: 16, tMs: 0, amp: 0, boxes, spring: 3.5, damp: 7, ...(o || {}) }); return { nodes, r }; };
+  const same = run([{ x: 200, y: 200 }, { x: 200, y: 200 }], bx);
+  const ov = (n, b) => Math.max(0, b[0].hw + b[1].hw - Math.abs(n[1].x - n[0].x)) > 0 && Math.max(0, b[0].hh + b[1].hh - Math.abs(n[1].y - n[0].y)) > 0 ? Math.min(b[0].hw + b[1].hw - Math.abs(n[1].x - n[0].x), b[0].hh + b[1].hh - Math.abs(n[1].y - n[0].y)) : 0;
+  assert.ok(ov(same.nodes, bx) < 2, '남은 겹침 ' + ov(same.nodes, bx)); assert.ok(same.r.move < 0.01); // 가라앉는다
+  assert.ok(Math.abs(same.nodes[1].y - same.nodes[0].y) > 15);
+  assert.deepStrictEqual(run([{ x: 200, y: 200 }, { x: 200, y: 200 }], bx).nodes, same.nodes); // 결정적
+  const apart = run([{ x: 100, y: 100 }, { x: 300, y: 100 }], bx, null, 5); assert.deepStrictEqual(apart.nodes.map((p) => [p.x, p.y]), [[100, 100], [300, 100]]); // 겹치지 않으면 힘 없음
+  const none = [{ x: 200, y: 200, vx: 0, vy: 0, pin: false }, { x: 200, y: 200, vx: 0, vy: 0, pin: false }]; L.graphStep(none, [{ x: 200, y: 200 }, { x: 200, y: 200 }], [], { dtMs: 16, amp: 0 }); assert.deepStrictEqual(none.map((p) => p.x), [200, 200]); // boxes 없으면 쌍 계산 없음
+  const pn = [{ x: 200, y: 200, vx: 0, vy: 0, pin: true }, { x: 205, y: 200, vx: 0, vy: 0, pin: false }]; for (let i = 0; i < 300; i++) L.graphStep(pn, [{ x: 200, y: 200 }, { x: 205, y: 200 }], [], { dtMs: 16, amp: 0, boxes: bx, spring: 3.5, damp: 7 });
+  assert.strictEqual(pn[0].x, 200); assert.strictEqual(pn[0].y, 200); assert.ok(Math.abs(pn[1].x - 200) > 20 || Math.abs(pn[1].y - 200) > 8); // 고정은 그대로, 상대가 밀려난다
+  const bd = { x0: 0, x1: 300, y0: 50, y1: 250 };
+  const wide = run([{ x: 5, y: 10 }, { x: 295, y: 400 }], [{ hw: 60, hh: 10, cy: 0 }, { hw: 20, hh: 10, cy: 0 }], { bounds: bd }, 600);
+  assert.ok(wide.nodes[0].x >= 60 - 0.01 && wide.nodes[0].y >= 50 - 0.01 && wide.nodes[1].x <= 280 + 0.01 && wide.nodes[1].y <= 250 + 0.01); // 상자 가로가 칸 안, 세로는 중심 범위 안
+  const fr = [{ x: -500, y: -500, vx: 0, vy: 0, pin: false, free: true }]; for (let i = 0; i < 100; i++) L.graphStep(fr, [{ x: -500, y: -500 }], [], { dtMs: 16, amp: 0, bounds: bd, boxes: [{ hw: 10, hh: 5 }] }); assert.strictEqual(fr[0].x, -500); // 끌어 놓은 노드는 경계 밖도 된다
+  const many = Array.from({ length: 30 }, (_, i) => ({ x: 150 + (i % 5), y: 150 + (i % 3) })); const mb = many.map(() => ({ hw: 25, hh: 8, cy: 3 }));
+  const cr = run(many, mb, { bounds: { x0: 0, x1: 300, y0: 20, y1: 280 }, repel: 0 }, 600); cr.nodes.forEach((p) => assert.ok(Number.isFinite(p.x + p.y) && p.x >= 25 - 0.01 && p.x <= 275 + 0.01 && p.y >= 20 - 0.01 && p.y <= 280 + 0.01));
+});
+t('기억 그래프 움직임: graphSettle 은 겹침을 풀고 칸 안에 퍼뜨린다(결정적)', () => {
+  const anchors = Array.from({ length: 20 }, (_, i) => ({ x: 200 + (i % 5) * 6, y: 200 + Math.floor(i / 5) * 6 }));
+  const boxes = anchors.map(() => ({ hw: 30, hh: 9, cy: 4 })); const bounds = { x0: 4, x1: 396, y0: 40, y1: 360 };
+  const a = L.graphSettle(anchors, [{ a: 0, b: 1, kind: 'link' }], boxes, bounds); const b = L.graphSettle(anchors, [{ a: 0, b: 1, kind: 'link' }], boxes, bounds);
+  assert.deepStrictEqual(a, b);
+  let worst = 0; for (let i = 0; i < a.length; i++) for (let j = i + 1; j < a.length; j++) { const ox = boxes[i].hw + boxes[j].hw - Math.abs(a[i].x - a[j].x); const oy = boxes[i].hh + boxes[j].hh - Math.abs(a[i].y - a[j].y); if (ox > 0 && oy > 0) worst = Math.max(worst, Math.min(ox, oy)); }
+  assert.ok(worst < 4, '남은 겹침 ' + worst);
+  a.forEach((p) => assert.ok(Number.isFinite(p.x + p.y) && p.x >= 30 - 0.01 && p.x <= 370 + 0.01 && p.y >= 40 - 0.01 && p.y <= 360 + 0.01));
+  const spanX = Math.max(...a.map((p) => p.x)) - Math.min(...a.map((p) => p.x)); assert.ok(spanX > 60);
+  const pinned = L.graphSettle(anchors, [], boxes, bounds, { pinned: new Set([0]) }); assert.deepStrictEqual(pinned[0], anchors[0]);
+});
+t('기억 그래프 움직임: 가속 상한·같은 자리 200개·큰 그래프 속도·이름 개수 규칙', () => {
+  const nodes = Array.from({ length: 200 }, () => ({ x: 500, y: 350, vx: 0, vy: 0, pin: false })); const an = nodes.map(() => ({ x: 500, y: 350 })); const bx = nodes.map(() => ({ hw: 25, hh: 9, cy: 3 }));
+  let mv = 1; for (let i = 0; i < 1500; i++) mv = L.graphStep(nodes, an, [], { dtMs: 16, amp: 0, boxes: bx, spring: 3.5, damp: 7, bounds: { x0: 0, x1: 1000, y0: 20, y1: 680 } }).move;
+  assert.ok(mv < 0.01, '가라앉음 ' + mv); assert.ok(nodes.every((p) => Number.isFinite(p.x + p.y) && p.x >= 24.99 && p.x <= 975.01 && p.y >= 19.99 && p.y <= 680.01));
+  let s = 7; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  const n = 500; const edges = []; for (let i = 1; i < n; i++) edges.push({ a: Math.floor(rnd() * i), b: i, kind: 'link' });
+  const fit = L.fitGraph(L.simulateGraph(n, edges, { width: 1000, height: 1400 }), { width: 1000, height: 1400, pad: 46, padTop: 120, padBottom: 160 });
+  const boxes = fit.map(() => ({ hw: 40 + rnd() * 40, hh: 14, cy: 10 })); const bounds = { x0: 4, x1: 996, y0: 120, y1: 1240 };
+  const t0 = Date.now(); const out = L.graphSettle(fit, edges, boxes, bounds); const ms = Date.now() - t0;
+  assert.ok(ms < 800, '500 nodes settle ' + ms + 'ms'); console.log('     graphSettle 500 노드: ' + ms + 'ms');
+  assert.ok(out.every((p) => Number.isFinite(p.x + p.y))); assert.deepStrictEqual(L.graphSettle(fit, edges, boxes, bounds), out);
+  assert.strictEqual(L.graphLabelCount(25, 0.6), 25); assert.strictEqual(L.graphLabelCount(40, 0.1), 40); assert.strictEqual(L.graphLabelCount(0, 1), 0);
+  assert.strictEqual(L.graphLabelCount(500, 1), 40); assert.strictEqual(L.graphLabelCount(500, 2), 160); assert.strictEqual(L.graphLabelCount(500, 4), 500); assert.ok(L.graphLabelCount(500, 0.01) >= 1);
+  let prevK = 0; for (let k = 0.5; k <= 8; k += 0.25) { const c = L.graphLabelCount(120, k); assert.ok(c >= prevK && c <= 120); prevK = c; }
+  assert.deepStrictEqual(L.graphLabelOrder([1, 3, 3, 0, 5]), [4, 1, 2, 0, 3]); // 연결 많은 순, 같으면 번호 순
+});
+t('기억 그래프 움직임: 이름 투명도·보기 평활', () => {
+  assert.strictEqual(L.graphLabelOpacity(0), 0); assert.strictEqual(L.graphLabelOpacity(6.5), 0); assert.strictEqual(L.graphLabelOpacity(8.5), 1); assert.strictEqual(L.graphLabelOpacity(40), 1); assert.strictEqual(L.graphLabelOpacity(NaN), 0);
+  let prev = 0; for (let px = 6.5; px <= 8.5; px += 0.1) { const o = L.graphLabelOpacity(px); assert.ok(o >= prev && o >= 0 && o <= 1); prev = o; }
+  assert.ok(Math.abs(L.graphLabelOpacity(7.5) - 0.5) < 1e-9);
+  let v = { k: 1, tx: 0, ty: 0 }; const tg = { k: 4, tx: -300, ty: 50 }; let done = false;
+  for (let i = 0; i < 40 && !done; i++) { const e = L.graphEaseView(v, tg, 16, 60); v = { k: e.k, tx: e.tx, ty: e.ty }; done = e.done; }
+  assert.ok(done); assert.deepStrictEqual(v, tg);
+  const half = L.graphEaseView({ k: 1, tx: 0, ty: 0 }, { k: 2, tx: 100, ty: 0 }, 16, 60); assert.ok(half.k > 1 && half.k < 2 && !half.done);
+});
+t('기억 보기: 그래프 루프·끌기 정리·크기 변경 비용·이름 크기(정적 검사)', () => {
+  const mv = fs.readFileSync(path.join(__dirname, 'renderer', 'memview.js'), 'utf8');
+  assert.ok(/Lib\.graphStep\(/.test(mv) && /Lib\.graphLabelOpacity\(/.test(mv) && /Lib\.graphEaseView\(/.test(mv) && /Lib\.graphLabelCount\(/.test(mv));
+  assert.ok(/visibilitychange/.test(mv) && /cancelAnimationFrame/.test(mv) && !/innerHTML/.test(mv) && !/drawLabels/.test(mv));
+  assert.ok(/stopLoop\(\)/.test(mv.split('hide() {')[1].split('clearSearch')[0]));
+  const frame = mv.split('function frame(')[1].split('function goView')[0];
+  assert.ok(!/font-size/.test(frame) && !/getBoundingClientRect/.test(frame) && !/graphSettle|spread\(/.test(frame)); // 프레임마다 글자 크기·배치 재측정·퍼뜨리기를 하지 않는다
+  assert.ok(/'font-size', String\(lfs\)/.test(mv) && /LABEL_PX \/ scale\(\)/.test(mv)); // 이름 글자 크기는 칸 배율에서 정한다
+  assert.ok(/function wake\(\) \{ if \(!raf && needLoop\(\)\)/.test(mv)); // 루프는 하나만 돈다
+  const refit = mv.split('function refit()')[1].split('function respread')[0];
+  assert.ok(/setTimeout\(respread, SPREAD_DEBOUNCE_MS\)/.test(refit) && !/spread\(graph\.pos\)/.test(refit)); // 크기 변경 때는 퍼뜨리기를 미룬다
+  assert.ok(/clearTimeout\(spreadT\)/.test(mv.split('hide() {')[1].split('clearSearch')[0]));
+  assert.ok(/function resetDrag\(\)/.test(mv) && /resetDrag\(\)/.test(mv.split('hide() {')[1].split('clearSearch')[0]) && /resetDrag\(\);/.test(mv.split('function buildSvg()')[1].split('const g = ensureGraph')[0]));
+  assert.ok(/'lostpointercapture'/.test(mv) && /e\.buttons === 0/.test(mv));
+  const rdr = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(/Lib\.memoryDisplay\(m, lang\)/.test(rdr.split("$('pd-mem')")[1].split('detailActions(d)')[0])); // 프로젝트 상세의 관련 기억도 화면 언어의 제목
+  assert.ok(/uiLang: !app\.isPackaged && \(TEST_UI === 'memory' \|\| TEST_UI === 'memgraph'\) && I18N\.isLang\(process\.env\.MARU_APP_LANG\)/.test(mainSrc) && !/process\.env\.MARU_LANG/.test(mainSrc.split('uiLang:')[1].split('uiLangSwitch')[0])); // 개발 전용 언어는 기억 보기 시험 모드에서만
+  assert.ok(/Lib\.memoryDisplay\(m, lang \? lang\(\) : 'ko'\)/.test(mv) && !/\bm\.name\b/.test(mv) && !/\bm\.description\b/.test(mv)); // 이름·설명은 화면 언어에 맞는 표시 문구로만 보인다
+  assert.ok(/relabel\(\) \{[\s\S]*?textContent = cutName\(disp\(items\[i\]\)\.title, 30\)[\s\S]*?makeBoxes\(\)/.test(mv) && !/simulateGraph/.test(mv.split('relabel() {')[1].split('title: ()')[0])); // 언어를 바꾸면 이름·상자를 다시 만들되 배치는 다시 돌리지 않는다
+  assert.ok(/addEventListener\('blur'/.test(mv) && /addEventListener\('focus'/.test(mv));
+  assert.ok(/if \(!graph \|\| !svgBuilt\) return;\n      const next/.test(mv)); // sizeLabels 는 그래프가 없으면 아무것도 안 한다
 });
 t('기억 보기 문구: ko/en 키·형식 일치, 중복 키 없음, 쓰는 키는 모두 있음', () => {
   const keys = (lg) => Object.keys(I.STR[lg]).filter((k) => k.startsWith('mem.')).sort();
@@ -4400,6 +4557,59 @@ t('원격 토글 연결: main 은 고정 문장만 쓰고, 렌더러·메뉴·i1
   for (const st of ['off', 'on', 'turning-on', 'turning-off', 'unknown']) assert.ok(I.STR.ko['rc.label.' + st] && I.STR.en['rc.label.' + st]);
   assert.strictEqual(I.STR.ko['rc.err.draft'], '입력줄에 쓰던 글이 있을 수 있습니다. 보내거나 Ctrl+U 로 비운 뒤 다시 누르세요.');
   for (const r of ['unknown', 'busy', 'pending', 'waiting', 'draft', 'shell', 'not-ready', 'no-session']) assert.ok(I.STR.ko['rc.err.' + r] && I.STR.en['rc.err.' + r], r);
+});
+
+// ---- 플랜 사용량 띠 ----
+t('parseUsage: 정상·방어', () => {
+  const ok = JSON.stringify({ v: 1, at: 1790000000, five_hour: { pct: 39.4, resets_at: 1790003000 }, seven_day: { pct: 24, resets_at: 1790300000 } });
+  const u = L.parseUsage(ok);
+  assert.strictEqual(u.five_hour.pct, 39.4); assert.strictEqual(u.seven_day.resets_at, 1790300000);
+  const one = L.parseUsage(JSON.stringify({ v: 1, at: 5, seven_day: { pct: 1, resets_at: 9 } }));
+  assert.ok(one && !one.five_hour && one.seven_day);
+  assert.strictEqual(L.parseUsage(JSON.stringify({ v: 1, at: 5, five_hour: { pct: 250, resets_at: 9 } })).five_hour.pct, 100);
+  assert.strictEqual(L.parseUsage(JSON.stringify({ v: 1, at: 5, five_hour: { pct: -5, resets_at: 9 } })).five_hour.pct, 0);
+  for (const bad of [null, 5, '', 'x', '[]', '{}', '{"v":2,"at":5,"five_hour":{"pct":1,"resets_at":9}}', '{"v":1,"at":"5","five_hour":{"pct":1,"resets_at":9}}',
+    '{"v":1,"at":5,"five_hour":{"pct":"1","resets_at":9}}', '{"v":1,"at":5,"five_hour":{"pct":1}}', '{"v":1,"at":5}', '{"v":1,"at":5,"five_hour":{"pct":null,"resets_at":9}}', 'x'.repeat(5000)]) assert.strictEqual(L.parseUsage(bad), null, String(bad).slice(0, 30));
+});
+t('usageView: 단계·만료·경과', () => {
+  const now = 1790000000000;
+  const u = L.parseUsage(JSON.stringify({ v: 1, at: 1789999940, five_hour: { pct: 38.6, resets_at: 1790002700 }, seven_day: { pct: 83, resets_at: 1790000000 - 10 } }));
+  const v = L.usageView(u, now);
+  assert.strictEqual(v.ageMs, 60000);
+  const [f, w] = v.windows;
+  assert.deepStrictEqual([f.key, f.pct, f.resetMs, f.expired, f.level], ['five_hour', 39, 2700000, false, 'ok']);
+  assert.deepStrictEqual([w.key, w.pct, w.expired, w.level, w.resetMs], ['seven_day', 0, true, 'ok', 0]);
+  assert.deepStrictEqual([79, 80, 94, 95, 100].map((p) => L.usageLevel(p)), ['ok', 'warn', 'warn', 'crit', 'crit']);
+  assert.strictEqual(L.usageView(null, now), null);
+  assert.strictEqual(L.usageView({ v: 1, at: 1 }, now), null);
+  assert.strictEqual(L.usageView(u, 1000).ageMs, 0, '미래의 at 은 0');
+});
+t('fmtUsageReset·fmtUsageAge', () => {
+  const r = (ms) => L.fmtUsageReset({ expired: false, resetMs: ms });
+  assert.deepStrictEqual(r(45 * 60000), { key: 'usage.reset.min', params: { n: 45 } });
+  assert.deepStrictEqual(r(1000), { key: 'usage.reset.min', params: { n: 1 } });
+  assert.deepStrictEqual(r(3600000), { key: 'usage.reset.hour', params: { n: 1 } });
+  assert.deepStrictEqual(r(3.5 * 3600000), { key: 'usage.reset.hour', params: { n: 3 } });
+  assert.deepStrictEqual(r(86400000 * 4 + 5), { key: 'usage.reset.day', params: { n: 4 } });
+  assert.strictEqual(L.fmtUsageReset({ expired: true, resetMs: 0 }).key, 'usage.reset.done');
+  assert.strictEqual(L.fmtUsageAge(30000).key, 'usage.age.now');
+  assert.deepStrictEqual(L.fmtUsageAge(5 * 60000), { key: 'usage.age.min', params: { n: 5 } });
+  assert.deepStrictEqual(L.fmtUsageAge(3 * 3600000), { key: 'usage.age.hour', params: { n: 3 } });
+  assert.strictEqual(L.fmtUsageAge(2 * 86400000).key, 'usage.age.day');
+  assert.strictEqual(I.t('ko', 'usage.reset.min', { n: 45 }), '45분 후 초기화');
+  assert.strictEqual(I.t('en', 'usage.reset.hour', { n: 3 }), 'resets in 3h');
+  assert.strictEqual(I.t('ko', 'usage.age.min', { n: 1 }), '1분 전 업데이트');
+});
+t('usage i18n ko/en 키 일치 + 하단 띠 마크업', () => {
+  const ks = (l) => Object.keys(I.STR[l]).filter((k) => k.startsWith('usage.')).sort();
+  assert.deepStrictEqual(ks('ko'), ks('en')); assert.ok(ks('ko').length >= 13);
+  const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+  assert.ok(/<footer class="usage" id="usage" role="group"[^>]*aria-label="[^"]+"[^>]*hidden>/.test(html), '띠는 처음엔 hidden');
+  assert.ok(html.indexOf('id="cols"') < html.indexOf('id="usage"') && html.indexOf('id="usage"') < html.indexOf('id="setup"'), '.cols 다음, 대화상자 앞');
+  const rdj = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  assert.ok(/const \{ usage: \w+, \.\.\.rest \} = p;[^]*?const key = JSON\.stringify\(rest\);/.test(rdj) && !/JSON\.stringify\(p\)/.test(rdj.slice(rdj.indexOf('async function poll()'), rdj.indexOf('async function poll()') + 600)), 'usage 는 패널 키에서 제외');
+  assert.strictEqual((html.match(/role="meter"/g) || []).length, 2);
+  assert.ok(!/aria-live/.test(html.slice(html.indexOf('id="usage"'), html.indexOf('</footer>'))));
 });
 
 (async () => {

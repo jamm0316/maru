@@ -66,6 +66,7 @@ const TEST_UI = !app.isPackaged && ['menu', 'settings', 'update', 'project', 'pa
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
 const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew' || TEST_UI === 'wsmenu' || TEST_UI === 'wsrename' || TEST_UI === 'wsdrag'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을, wsmenu 는 둘째 행의 우클릭 메뉴를, wsrename 은 둘째 행의 이름 편집을 연 채로 둔다, wsdrag 는 끌어 놓기 표시를 화면에 보인다)
 const FAKE_RC = ['on', 'off', 'turning-on', 'turning-off', 'unknown'].includes(process.env.MARU_APP_RC || '') ? process.env.MARU_APP_RC : null; // 시험 전용: MARU_APP_UI=hierarchy 에서 모든 작업 공간의 원격 표시를 이 값으로 고정(화면 캡처용)
+const FAKE_USAGE = !app.isPackaged && ['1', 'high'].includes(process.env.MARU_APP_USAGE || '') ? process.env.MARU_APP_USAGE : null; // 시험 전용: 하단 플랜 사용량 띠의 지어낸 값(1: 39%·45분 / 24%·4일, high: 96% / 83%). 패키징 빌드에서는 무시
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX && !FAKE_HIER && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
@@ -449,6 +450,33 @@ function claudeWrapper() {
   } catch { return null; }
 }
 
+// 플랜 사용량: data/usage.json(scripts/usage-status.sh 가 쓴다). 파일 수정 시각이 바뀔 때만 다시 읽는다. 지어낸 값·시험·스모크에서는 실제 data 를 읽지 않는다.
+let fakeUsage = null;
+const usageCache = { mtime: -1, size: -1, val: null };
+function readUsage() {
+  if (FAKE_USAGE) {
+    if (!fakeUsage) {
+      const now = Math.floor(Date.now() / 1000);
+      fakeUsage = FAKE_USAGE === 'high'
+        ? { v: 1, at: now - 60, five_hour: { pct: 96, resets_at: now + 45 * 60 - 10 }, seven_day: { pct: 83, resets_at: now + 4 * 86400 + 3600 } }
+        : { v: 1, at: now - 60, five_hour: { pct: 39, resets_at: now + 45 * 60 - 10 }, seven_day: { pct: 24, resets_at: now + 4 * 86400 + 3600 } };
+    }
+    return fakeUsage;
+  }
+  if (!ROOT || SMOKE || TEST_UI || TEST_FX || FAKE_PROJ) return null;
+  try {
+    const f = path.join(ROOT, 'data', 'usage.json');
+    const st = fs.lstatSync(f);
+    if (!st.isFile()) return null;
+    if (st.mtimeMs !== usageCache.mtime || st.size !== usageCache.size) {
+      const r = readHead(f, L.USAGE_MAX_BYTES);
+      usageCache.mtime = st.mtimeMs; usageCache.size = st.size;
+      usageCache.val = r ? L.parseUsage(r.text) : null;
+    }
+    return usageCache.val;
+  } catch { usageCache.mtime = -1; return null; }
+}
+
 function partyView() {
   const lead = leadModel(wsOf(activeId));
   return [{ name: null, roleKey: 'lead', model: lead, lead: true }, ...partyCache.get().map((m) => (m.model === 'inherit' ? { ...m, model: lead } : m))];
@@ -470,6 +498,7 @@ function panels() {
     inbox: inboxView(),
     battery: cache.battery,
     disk: cache.disk,
+    usage: readUsage(), // 플랜 사용량(없으면 null: 띠를 숨긴다). 남은 시간·경과는 렌더러가 지금 시각으로 계산한다
     party, // 기본 팀. name null = 앱 이름(i18n app.title)
     squads: L.squadView(FAKE_SQ_UI ? fakeSquads() : squads, party[0].model), // 스쿼드별 묶음(총괄 + 팀원)
     subs: TEST_UI === 'party' ? [{ type: 'worker', count: 2 }, { type: 'Explore', count: 1 }, { type: 'sq-dev-lead', count: 1 }, { type: 'sq-dev-builder', count: 2 }, { type: 'sq-ghost-lead', count: 1 }] : (wsOf(activeId) ? readSubs(wsOf(activeId)) : []),
@@ -2224,7 +2253,35 @@ ipcMain.handle('squads:request-create', (e, text) => {
 // 시험 전용(MARU_APP_UI=memory|memgraph): 지어낸 중립 기억 25개. 실제 기억 폴더는 읽지 않는다.
 function fakeMemories() {
   const day = 86400000; const base = Date.UTC(2026, 5, 20);
-  const M = (slug, type, name, description, tags, links, body, ago) => ({ slug, type, name, description, tags, links, body, modified: base - ago * day });
+  // 화면용 한국어 제목·설명(영어는 아래 name·description 을 그대로 쓴다): 언어를 바꾸면 같은 기억이 다른 글로 보이는지 확인하는 용도
+  const KO = {
+    'likes-short-answers': ['짧은 답을 선호함', '결론을 먼저 말하고 자세한 내용은 물을 때만'],
+    'works-night-hours': ['저녁 시간에 작업함', '세션이 주로 저녁 식사 뒤라서 아침 일정은 피함'],
+    'knows-typescript': ['타입스크립트에 익숙함', '타입과 도구의 기본 설명은 건너뜀'],
+    'uses-two-monitors': ['모니터 두 대를 씀', '왼쪽 화면에 터미널, 오른쪽 화면에 브라우저'],
+    'weekly-review-habit': ['금요일마다 한 주를 돌아봄', '금요일 오후에 짧은 글로 주간 회고'],
+    'reply-format': ['답변 형식', '대화 답변은 일반 문단으로, 무거운 제목은 쓰지 않음'],
+    'ask-before-delete': ['지우기 전에 먼저 물음', '확인 없이는 파일을 지우지 않음'],
+    'dry-run-first': ['먼저 시험 실행', '일괄 변경은 실행 전에 무엇이 바뀌는지 보여 줌'],
+    'no-emoji': ['커밋에 이모지 쓰지 않음', '커밋 메시지는 글자만 씀'],
+    'test-before-claim': ['끝났다고 하기 전에 시험', '테스트를 돌리고 정확한 결과를 보고함'],
+    'small-commits': ['작은 커밋', '커밋 하나에 논리적 변경 하나'],
+    'commit-style': ['커밋 메시지 형식', '명령형 제목 60자 이내, 본문에는 이유를 씀'],
+    'note-template': ['노트 양식', '주간·프로젝트 노트에 쓰는 제목들'],
+    'flaky-test-notes': ['불안정한 테스트 메모', '간헐적으로 실패하는 테스트와 다시 돌리는 법'],
+    'ci-pipeline-overview': ['CI 파이프라인 개요', '단계: 린트, 단위 테스트, 패키징, 배포'],
+    'backup-before-migrate': ['옮기기 전에 백업', '형식을 바꾸기 전에 데이터 폴더를 따로 복사함'],
+    'release-checklist': ['릴리스 점검표', '릴리스 후보를 만드는 순서'],
+    'changelog-rules': ['변경 기록 규칙', '사용자 입장의 문장, 추가·변경·수정으로 묶음'],
+    'garden-app-redesign': ['정원 앱 다시 설계', '식물 관리 앱을 달력 중심 화면으로 바꾸는 중'],
+    'garden-watering-model': ['물 주기 일정 모델', '식물별 간격에 계절 보정을 더함'],
+    'design-tokens': ['디자인 토큰', '앱들이 함께 쓰는 색과 간격'],
+    'recipe-site-launch': ['레시피 사이트 공개', '정적 레시피 사이트, 다음 달 공개 목표'],
+    'recipe-import-script': ['레시피 가져오기 스크립트', '글자 파일 레시피를 사이트 형식으로 바꿈'],
+    'budget-tracker': ['가계부', '분류별 차트가 있는 월별 예산 표'],
+    'travel-plan-autumn': ['가을 여행 계획', '대략의 일정과 짐 목록'],
+  };
+  const M = (slug, type, name, description, tags, links, body, ago) => ({ slug, type, name, description, tags, links, body, modified: base - ago * day, titles: { ko: KO[slug][0], en: name }, descs: { ko: KO[slug][1], en: description } });
   return L.buildMemoryModel([
     M('likes-short-answers', 'user', 'Prefers short answers', 'Wants the conclusion first and details only when asked', ['style'], ['reply-format'], 'Lead with the result.\nKeep explanations to a few lines unless asked for more.\nSee [[reply-format]] for the layout.', 2),
     M('works-night-hours', 'user', 'Works in the evening', 'Most sessions happen after dinner, so avoid morning-only schedules', ['routine'], ['weekly-review-habit'], 'Sessions are usually between 20:00 and 24:00.\nRelated: [[weekly-review-habit]].', 9),
@@ -2581,7 +2638,7 @@ ipcMain.handle('meet:start', async (e, id) => {
 });
 ipcMain.handle('profile:get', (e) => (fromMain(e) ? {
   cols: DEV_COLS, colsStore: !SMOKE && !TEST_UI && !TEST_FX && !DEV_COLS, uiUnsorted: !app.isPackaged && process.env.MARU_APP_UNSORTED === 'open', uiDoneOpen: !app.isPackaged && process.env.MARU_APP_DONE === 'open', uiDay: FAKE_DAY ? fakeDayStr(FAKE_DAY_OFF) : null, uiDayOpen: FAKE_DAY && !app.isPackaged && process.env.MARU_APP_DAY_OPEN === '1',
-  homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI,
+  homeNotice, managed: MANAGED, profile: SETUP_FAKE ? null : profile, defaultLang: SETUP_FAKE && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : L.defaultLang(app.getLocale()), version: VERSION, uiOpen: TEST_UI, uiLang: !app.isPackaged && (TEST_UI === 'memory' || TEST_UI === 'memgraph') && I18N.isLang(process.env.MARU_APP_LANG) ? process.env.MARU_APP_LANG : null, uiLangSwitch: !app.isPackaged && TEST_UI === 'memgraph' && I18N.isLang(process.env.MARU_APP_LANGSWITCH) ? process.env.MARU_APP_LANGSWITCH : null, uiMemZoom: !app.isPackaged && TEST_UI === 'memgraph' && Number(process.env.MARU_APP_MEMZOOM) >= 0.5 && Number(process.env.MARU_APP_MEMZOOM) <= 6 ? Number(process.env.MARU_APP_MEMZOOM) : 0, uiMemSel: !app.isPackaged && TEST_UI === 'memgraph' && process.env.MARU_APP_MEMSEL === '1', uiMemHover: !app.isPackaged && TEST_UI === 'memgraph' && process.env.MARU_APP_MEMHOVER === '1',
 } : null));
 // patch: { name?: string, lang?: 'ko'|'en' } 만 허용. 이름은 main 이 다시 정리·검증한다. 첫 저장에는 name 이 필요하다.
 ipcMain.handle('profile:set', (e, patch) => {

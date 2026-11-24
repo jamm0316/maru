@@ -68,44 +68,69 @@ if [ -n "$csq" ]; then
   if [ -n "$sess" ]; then agent=(--agent "$sess")
   else echo "마루: 요청된 팀을 쓸 수 없어 팀 없이 시작합니다. / Maru: the requested team is not available; starting without a team." >&2; fi
 fi
-# 상태 훅(마루 폴더 밖 세션): 앱이 띄운 세션(MARU_APP_SESSION)이 마루 저장소 밖 폴더에서 돌면 저장소의 프로젝트 설정(.claude/settings.json)이 실리지 않아
-# 앱이 상태를 알 수 없다. 그 세션에만 `--settings <JSON>` 으로 agent-state.sh 훅을 붙인다(전역 설정은 건드리지 않는다. 그 폴더의 자체 설정·훅과는 합쳐진다).
-# 저장소 루트 폴더에서는 프로젝트 설정의 훅이 이미 돌므로 붙이지 않는다. 그 밖의 모든 폴더(저장소의 하위 폴더 포함: Claude Code 는 시작한 폴더의 .claude/settings.json 만 읽는다)에 붙인다.
-# python3 가 없거나 JSON 을 못 만들면 붙이지 않고 그대로 실행한다. 붙였으면 data/state/app/<id>.hooked 표지를 남겨 앱이 훅이 붙은 세션임을 알게 한다(표지가 없으면 앱은 예전처럼 상태 알 수 없음으로 본다).
+# 앱 세션용 `--settings <JSON>`(전역 설정은 건드리지 않는다. 그 폴더의 자체 설정·훅과는 합쳐진다). 두 부분이 있고 둘 다 python3 가 없거나 JSON 을 못 만들면 붙이지 않고 그대로 실행한다.
+#  1) 상태 훅(마루 폴더 밖 세션): 앱이 띄운 세션(MARU_APP_SESSION)이 마루 저장소 밖 폴더에서 돌면 저장소의 프로젝트 설정(.claude/settings.json)이 실리지 않아
+#     앱이 상태를 알 수 없다. 그 세션에 agent-state.sh 훅을 붙인다. 저장소 루트 폴더에서는 프로젝트 설정의 훅이 이미 돌므로 붙이지 않는다. 그 밖의 모든 폴더(저장소의 하위 폴더 포함:
+#     Claude Code 는 시작한 폴더의 .claude/settings.json 만 읽는다)에 붙인다. 붙였으면 data/state/app/<id>.hooked 표지를 남겨 앱이 훅이 붙은 세션임을 알게 한다(표지가 없으면 앱은 예전처럼 상태 알 수 없음으로 본다).
+#  2) 플랜 사용량(어느 폴더든): statusLine 으로 usage-status.sh 를 붙인다(앱 하단 띠용 data/usage.json; 사용자의 기존 statusLine 은 그 스크립트가 통과시킨다). MARU_NO_USAGE_STATUS=1 이면 붙이지 않는다.
 sset=()
-if [ -n "${MARU_APP_SESSION:-}" ] && [ -n "$SCRIPTS" ] && [ -f "$SCRIPTS/agent-state.sh" ] && [ ! -L "$SCRIPTS/agent-state.sh" ] && [ -x "$SCRIPTS/agent-state.sh" ] && [ -z "${MARU_NO_STATE_HOOKS:-}" ]; then
+if [ -n "${MARU_APP_SESSION:-}" ] && [ -n "$SCRIPTS" ]; then
   sroot=${SCRIPTS%/*}; shere=$(pwd -P 2>/dev/null) || shere=""
-  case "$shere" in
-    ""|"$sroot") ;;
-    *)
-      spy=$(find_py)
-      sj=""
-      [ -n "$spy" ] && sj=$("$spy" -I -c '
+  sh_arg=""; su_arg=""
+  if [ -f "$SCRIPTS/agent-state.sh" ] && [ ! -L "$SCRIPTS/agent-state.sh" ] && [ -x "$SCRIPTS/agent-state.sh" ] && [ -z "${MARU_NO_STATE_HOOKS:-}" ]; then
+    case "$shere" in ""|"$sroot") ;; *) sh_arg="$SCRIPTS/agent-state.sh" ;; esac
+  fi
+  if [ -f "$SCRIPTS/usage-status.sh" ] && [ ! -L "$SCRIPTS/usage-status.sh" ] && [ -x "$SCRIPTS/usage-status.sh" ] && [ -z "${MARU_NO_USAGE_STATUS:-}" ]; then su_arg="$SCRIPTS/usage-status.sh"; fi
+  if [ -n "$sh_arg$su_arg" ]; then
+    spy=$(find_py)
+    [ -n "$spy" ] && ! "$spy" -I -c pass >/dev/null 2>&1 </dev/null && spy=""   # 실제로 돌아가는 python3 만 쓴다(안 돌면 붙이지 않는다: 사용자의 statusLine 을 가리지 않게)
+    sj=""
+    [ -n "$spy" ] && sj=$("$spy" -I -c '
 import json, shlex, sys
-p = shlex.quote(sys.argv[1])
-def h(a, m=None):
-    e = {"hooks": [{"type": "command", "command": p + " " + a}]}
-    if m:
-        e["matcher"] = m
-    return [e]
-print(json.dumps({"hooks": {
-    "UserPromptSubmit": h("busy"), "PostToolUse": h("busy"), "Stop": h("idle"), "StopFailure": h("idle"),
-    "Notification": h("waiting", "permission_prompt|elicitation_dialog"),
-    "SubagentStart": h("sub-start"), "SubagentStop": h("sub-stop")}}, separators=(",", ":")))
-' "$SCRIPTS/agent-state.sh" 2>/dev/null) || sj=""
-      case "$sj" in
-        '{"hooks":{'*)
-          sset=(--settings "$sj")
-          # 표지: id 형식(agent-state.sh 와 같은 규칙)이 맞고 폴더가 링크가 아닐 때만. 실패해도 세션은 그대로 뜬다
-          sid=$MARU_APP_SESSION; sdir=$sroot/data/state/app
-          case "$sid" in *[!A-Za-z0-9-]*) sid="" ;; esac
-          if [ -n "$sid" ] && [ "${#sid}" -ge 8 ] && [ "${#sid}" -le 64 ] && [ ! -L "$sdir" ] && mkdir -p "$sdir" 2>/dev/null && [ ! -L "$sdir" ] && [ ! -L "$sdir/$sid.hooked" ]; then
-            : > "$sdir/$sid.hooked" 2>/dev/null || :
-          fi
-          ;;
-      esac
-      ;;
-  esac
+d = {}
+if sys.argv[1]:
+    p = shlex.quote(sys.argv[1])
+    def h(a, m=None):
+        e = {"hooks": [{"type": "command", "command": p + " " + a}]}
+        if m:
+            e["matcher"] = m
+        return [e]
+    d["hooks"] = {
+        "UserPromptSubmit": h("busy"), "PostToolUse": h("busy"), "Stop": h("idle"), "StopFailure": h("idle"),
+        "Notification": h("waiting", "permission_prompt|elicitation_dialog"),
+        "SubagentStart": h("sub-start"), "SubagentStop": h("sub-stop")}
+if sys.argv[2]:
+    d["statusLine"] = {"type": "command", "command": shlex.quote(sys.argv[2])}
+    # padding: usage-status.sh 가 통과시킬 사용자 statusLine 과 같은 파일(현재 폴더의 .claude/settings.local.json, settings.json, 사용자 설정 순)에서, 숫자(0~20 정수)일 때만 가져온다
+    import os
+    cd = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    cd = cd if cd.startswith("/") else os.path.join(os.path.expanduser("~"), ".claude")
+    here = os.getcwd()
+    for f in (os.path.join(here, ".claude", "settings.local.json"), os.path.join(here, ".claude", "settings.json"), os.path.join(cd, "settings.json")):
+        try:
+            with open(f, "rb") as fh:
+                u = json.loads(fh.read(1048576)).get("statusLine")
+        except Exception:
+            continue
+        if isinstance(u, dict) and u.get("type") == "command" and isinstance(u.get("command"), str):
+            pd = u.get("padding")
+            if isinstance(pd, int) and not isinstance(pd, bool) and 0 <= pd <= 20:
+                d["statusLine"]["padding"] = pd
+            break
+print(json.dumps(d, separators=(",", ":")))
+' "$sh_arg" "$su_arg" 2>/dev/null) || sj=""
+    case "$sj" in
+      '{"hooks":{'*|'{"statusLine":{'*)
+        sset=(--settings "$sj")
+        # 표지(훅을 붙였을 때만): id 형식(agent-state.sh 와 같은 규칙)이 맞고 폴더가 링크가 아닐 때만. 실패해도 세션은 그대로 뜬다
+        sid=$MARU_APP_SESSION; sdir=$sroot/data/state/app
+        case "$sid" in *[!A-Za-z0-9-]*) sid="" ;; esac
+        if [ -n "$sh_arg" ] && [ -n "$sid" ] && [ "${#sid}" -ge 8 ] && [ "${#sid}" -le 64 ] && [ ! -L "$sdir" ] && mkdir -p "$sdir" 2>/dev/null && [ ! -L "$sdir" ] && [ ! -L "$sdir/$sid.hooked" ]; then
+          : > "$sdir/$sid.hooked" 2>/dev/null || :
+        fi
+        ;;
+    esac
+  fi
 fi
 case "$json" in
   "{\"sq-"*) exec claude --agents "$json" ${agent[@]+"${agent[@]}"} ${sset[@]+"${sset[@]}"} "$@" ${post[@]+"${post[@]}"} ;;

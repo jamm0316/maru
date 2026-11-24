@@ -167,8 +167,30 @@ def read_int(path):
 
 
 # ---------------------------------------------------------------- 기억 로더
+BLOCK_SCALAR_RE = re.compile(r"^[>|][-+0-9]{0,2}$")  # app/lib.js 의 isBlockScalar 와 같은 규칙
+MEM_TITLE_MAX = 60   # app/lib.js MEMV_TITLE_MAX 와 같다
+MEM_DESC_MAX = 240   # app/lib.js MEMV_DESC_MAX 와 같다
+
+
+def unquote_value(val):
+    """app/lib.js memvUnquote 와 같은 규칙: 겹따옴표는 \\" 와 \\\\ 를, 홑따옴표는 '' 를 푼다."""
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+        inner = val[1:-1]
+        if val[0] == '"':
+            return re.sub(r'\\(["\\])', r"\1", inner)
+        return inner.replace("''", "'")
+    return val
+
+
+def one_line(s, cap):
+    """제어 문자는 ?, 공백은 한 칸으로 접고 cap 코드포인트까지."""
+    return " ".join(sanitize(s).replace("\n", " ").split())[:cap]
+
+
 def parse_frontmatter(text):
-    """느슨한 frontmatter 파서. 깨졌으면 빈 dict. name/description/type 만 본다."""
+    """느슨한 frontmatter 파서. 깨졌으면 빈 dict. name/description/type 과 화면용 title_/description_(ko|en) 만 본다.
+    app/lib.js parseMemoryFile 과 같은 규칙: 같은 키는 비어 있지 않은 첫 값, 블록 스칼라(|, >)만 있는 값은 건너뛴다,
+    name·description 은 들여쓰지 않은 줄에서만."""
     meta = {}
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
@@ -180,9 +202,13 @@ def parse_frontmatter(text):
         if not m:
             continue
         key, val = m.group(2), m.group(3).strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-            val = val[1:-1]
-        if key in ("name", "description", "type") and key not in meta and val:
+        if BLOCK_SCALAR_RE.match(val):
+            continue
+        val = unquote_value(val)
+        top = ("name", "description")
+        if key in top and m.group(1):
+            continue
+        if key in top + ("type", "title_ko", "title_en", "description_ko", "description_en") and key not in meta and val:
             meta[key] = val
     return meta
 
@@ -206,16 +232,30 @@ def load_memories(mem_dir):
             "file": fn,
             "path": path,
             "name": sanitize(meta.get("name") or fn[:-3]).replace("\n", " "),
-            "desc": sanitize(meta.get("description", "")).replace("\n", " "),
+            "desc": one_line(meta.get("description", ""), MEM_DESC_MAX),
             "type": sanitize(meta.get("type") or "기타").replace("\n", " "),
+            "titles": {l: one_line(meta.get("title_" + l, ""), MEM_TITLE_MAX) for l in ("ko", "en")},  # 화면용 제목(없으면 빈 문자열)
+            "descs": {l: one_line(meta.get("description_" + l, ""), MEM_DESC_MAX) for l in ("ko", "en")},
         })
     return items
+
+
+def mem_lang():
+    """MARU_LANG 이 en 이면 en, 아니면 ko (bin/maru 가 lib.sh 로 정해 내보낸다)."""
+    return "en" if os.environ.get("MARU_LANG") == "en" else "ko"
+
+
+def mem_shown(it, lang=None):
+    """사람에게 보일 (제목, 설명): 제목은 title_<언어> > 다른 언어 > 이름(slug), 설명은 description_<언어> > 최상위 설명 > 다른 언어."""
+    l = lang or mem_lang(); o = "en" if l == "ko" else "ko"
+    t = it.get("titles", {}); d = it.get("descs", {})
+    return (t.get(l) or t.get(o) or it["name"], d.get(l) or it["desc"] or d.get(o) or "")
 
 
 def group_memories(items, flt=""):
     """type 별 묶음 행 목록: ('h', type) / ('i', item). 필터는 부분 문자열(대소문자 무시)."""
     f = flt.lower()
-    sel = [i for i in items if not f or f in (i["name"] + " " + i["desc"] + " " + i["file"]).lower()]
+    sel = [i for i in items if not f or f in (i["name"] + " " + i["desc"] + " " + i["file"] + " " + " ".join(i.get("titles", {}).values()) + " " + " ".join(i.get("descs", {}).values())).lower()]
     rows = []
     for t in sorted({i["type"] for i in sel}):
         rows.append(("h", t))
@@ -825,7 +865,8 @@ def _ui(scr, p, curses):
                 put(y0 + n, 0, "[%s]" % r[1], curses.A_BOLD)
             else:
                 it = r[1]
-                txt = "  " + it["name"] + (" - " + it["desc"] if it["desc"] else "")
+                ti, de = mem_shown(it)
+                txt = "  " + ti + (" - " + de if de else "")
                 put(y0 + n, 0, txt, curses.A_REVERSE if idx == cur_row else 0)
         flt = "  필터:" + S["mem_flt"] if S["mem_flt"] else ""
         return "j/k 이동 Enter 보기 / 필터" + flt
@@ -1104,14 +1145,28 @@ def selftest():
         w(os.path.join(mem, "d.md"), "---\nname beta-broken\n:::\n")
         w(os.path.join(mem, "e.md"), "")
         w(os.path.join(mem, "f.md"), "---\nname: esc\ndescription: \x1b[31mred\n---\n")
+        w(os.path.join(mem, "g.md"), '---\nname: gamma\ndescription: plain d\nmetadata:\n  type: user\n  title_ko: "감마 제목"\n  title_en: Gamma title\n  description_ko: 한 줄 설명\n---\nx\n')
         items = load_memories(mem)
         by = {i["file"]: i for i in items}
-        check(len(items) == 6, "memory count 6, got %d" % len(items))
+        check(len(items) == 7, "memory count 7, got %d" % len(items))
         check(by["a.md"]["type"] == "feedback" and by["a.md"]["desc"] == "한글 설명입니다", "a.md parse")
         check(by["b.md"]["type"] == "project", "b.md top-level type")
         check(by["c.md"]["name"] == "c" and by["c.md"]["type"] == "기타", "c.md fallback")
         check(by["d.md"]["name"] == "d", "broken frontmatter fallback")
         check("\x1b" not in by["f.md"]["desc"], "control chars sanitized")
+        check(mem_shown(by["g.md"], "ko") == ("감마 제목", "한 줄 설명") and mem_shown(by["g.md"], "en") == ("Gamma title", "plain d"), "mem_shown languages")
+        check(mem_shown(by["a.md"], "en") == ("alpha", "한글 설명입니다"), "mem_shown falls back to slug and description")
+        check(len([r for r in group_memories(items, "gamma title") if r[0] == "i"]) == 1 and len([r for r in group_memories(items, "감마") if r[0] == "i"]) == 1, "filter by title")
+        # app/test.js 와 같은 글·같은 기대값(두 파서가 어긋나지 않게): 중복 키, 블록 스칼라, 따옴표 풀기, CRLF, 상한
+        xfm = '---\nname: x-slug\ndescription: "He said \\"hi\\" and left"\nmetadata:\n  type: feedback\n  title_ko: |\n  title_ko: 두번째 한국어\n  title_ko: 세번째\n  title_en: \'It\'\'s fine\'\n  title_en: ignored\n  description_ko: >-\n  description_en: One line\n---\nbody\n'
+        for variant in (xfm, xfm.replace("\n", "\r\n")):
+            fm = parse_frontmatter(variant)
+            check(fm.get("description") == 'He said "hi" and left' and fm.get("title_ko") == "두번째 한국어" and fm.get("title_en") == "It's fine"
+                  and "description_ko" not in fm and fm.get("description_en") == "One line" and fm.get("name") == "x-slug", "parser agreement: %r" % fm)
+        w(os.path.join(mem, "long.md"), "---\nname: long\nmetadata:\n  title_en: " + "a" * 61 + "\n  description_en: " + "b" * 241 + "\n---\n")
+        lg = [i for i in load_memories(mem) if i["file"] == "long.md"][0]
+        check(len(lg["titles"]["en"]) == 60 and len(lg["descs"]["en"]) == 240, "parser agreement: caps 60/240")
+        os.remove(os.path.join(mem, "long.md"))
         rows = group_memories(items)
         check([r[1] for r in rows if r[0] == "h"] == sorted({i["type"] for i in items}), "groups sorted")
         check(len([r for r in group_memories(items, "한글") if r[0] == "i"]) == 1, "filter")
@@ -1165,7 +1220,7 @@ def selftest():
         check(".rejected" not in [i["name"] for i in lp], "hidden excluded")
         check(count_proposals(pr) == 7, "proposal count %r" % count_proposals(pr))
         st = load_status(p, check_launchd=False)
-        check(st["memory_files"] == 6 and st["proposals"] == 7 and st["fail_reflect"] == 3
+        check(st["memory_files"] == 7 and st["proposals"] == 7 and st["fail_reflect"] == 3
               and st["fail_dream"] is None, "status values %r" % st)
         txt = "\n".join(status_lines(st))
         check("연속 실패: 회고 3회" in txt and "대기 중 스킬 제안: 7개" in txt, "status text")

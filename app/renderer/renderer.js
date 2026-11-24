@@ -1616,7 +1616,7 @@
     }
     const mm = $('pd-mem'); mm.replaceChildren();
     if (!d.memories.length) mm.append(el('span', 'empty', T('proj.none')));
-    for (const m of d.memories) { const c = el('span', 'chip', m.name); if (m.description) c.title = m.description; mm.append(c); }
+    for (const m of d.memories) { const dm = Lib.memoryDisplay(m, lang); const c = el('span', 'chip', dm.title); if (dm.description) c.title = dm.description; mm.append(c); } // 화면 언어의 제목(없으면 slug)
     detailActions(d);
     if (had) { const n = $('pd-actions').querySelector('[data-k="' + had + '"]'); if (n) n.focus(); }
     else if (focusTitle) $('pd-title').focus();
@@ -1740,12 +1740,43 @@
     $('core').setAttribute('aria-label', T('core.aria', { s: T(sx.key, sx.params) }));
   }
 
+  // 하단 플랜 사용량 띠: 렌더되는 값(문구·퍼센트·단계)이 바뀔 때만 DOM 을 건드린다
+  let usageData = null, usageKey = null;
+  function renderUsage() {
+    const v = usageData ? Lib.usageView(usageData, Date.now()) : null;
+    const age = v ? Lib.fmtUsageAge(v.ageMs) : null;
+    const rows = v ? v.windows.map((w) => ({ w, r: Lib.fmtUsageReset(w) })) : [];
+    const key = v ? lang + '|' + JSON.stringify(rows.map(({ w, r }) => [w.key, w.pct, w.level, r.key, r.params.n])) + '|' + age.key + (age.params.n || '') : '';
+    if (key === usageKey) return;
+    usageKey = key;
+    $('usage').hidden = !v;
+    if (!v) return;
+    for (const [k, id, nk] of [['five_hour', 'five', 'usage.five'], ['seven_day', 'week', 'usage.week']]) {
+      const row = rows.find((x) => x.w.key === k);
+      $('u-' + id).hidden = !row;
+      if (!row) continue;
+      const { w, r } = row;
+      const bar = $('u-' + id + '-bar');
+      bar.setAttribute('aria-valuenow', String(w.pct));
+      bar.setAttribute('aria-label', T('usage.meter.aria', { name: T(nk) }));
+      bar.setAttribute('aria-valuetext', w.pct + '%');
+      $('u-' + id + '-fill').style.width = w.pct + '%';
+      $('u-' + id + '-fill').className = 'u-fill' + (w.level === 'ok' ? '' : ' lv-' + w.level);
+      $('u-' + id + '-pct').textContent = w.pct + '%';
+      $('u-' + id + '-pct').className = 'u-pct' + (w.level === 'ok' ? '' : ' lv-' + w.level);
+      $('u-' + id + '-reset').textContent = T(r.key, r.params);
+    }
+    $('u-age').textContent = T(age.key, age.params);
+  }
+
   let lastKey = null;
   async function poll() {
     try {
       const p = await window.maru.getPanels();
       if (p) {
-        const key = JSON.stringify(p);
+        const { usage: pu, ...rest } = p; // usage 는 at 이 자주 바뀌므로 정적 렌더 키에서 뺀다(renderUsage 가 자기 키로 거른다)
+        const key = JSON.stringify(rest);
+        usageData = p.usage || null; renderUsage();
         if (key !== lastKey) { lastKey = key; renderStatic(p); window.maru.notifyRendered(); }
       }
     } catch (e) { /* 다음 주기에 재시도 */ }
@@ -1765,6 +1796,7 @@
     if (homeNotice) $('home-warn').textContent = T('home.warn.' + homeNotice);
     if (!$('pop-update').hidden) renderUpdate();
     renderLangSeg();
+    usageKey = null; renderUsage();
     if (!$('dlg-name').hidden) fillNameDialog();
   }
   async function setLang(l) {
@@ -2405,7 +2437,7 @@
   $('dv-next').addEventListener('click', () => { const n = Lib.shiftDay(dayKey, 1); if (n) showDay(n, 'keep'); });
 
   // ---- 기억 보기: 터미널 자리를 차지하는 읽기 전용 화면(목록·그래프) ----
-  memView = window.MaruMemView.create({ T, $, el, Lib, onClose: () => closeDetail(true) });
+  memView = window.MaruMemView.create({ T, $, el, Lib, onClose: () => closeDetail(true), lang: () => lang });
   function openMemory(initialMode) {
     if (detailOpen && detailMode === 'memory') return;
     detailMode = 'memory'; inboxDet = null; inboxDetSeq++; dayKey = null; daySeq++; detailKey = null; detail = null; detailSig = ''; detailSeq++; detailOpen = true;
@@ -2602,6 +2634,7 @@
       homeManaged = init.managed === true;
       homeNotice = init.homeNotice === 'failed' || init.homeNotice === 'newer' ? init.homeNotice : null;
       lang = I18N.isLang(profile && profile.lang) ? profile.lang : (I18N.isLang(init.defaultLang) ? init.defaultLang : 'ko');
+      if (I18N.isLang(init.uiLang)) lang = init.uiLang; // 시험 전용(MARU_APP_LANG, 개발 실행 + MARU_APP_UI=memory|memgraph): 프로필·설정은 바꾸지 않고 화면 언어만
       if (init.uiUnsorted === true) unsortedOpen = true; // 시험 전용(MARU_APP_UNSORTED=open)
       if (init.uiDoneOpen === true) doneOpen = true; // 시험 전용(MARU_APP_DONE=open)
     }
@@ -2619,7 +2652,8 @@
     else if (init && init.uiOpen === 'update') openUpdate();
     else if (init && init.uiOpen === 'squadnew') openSquadNew(); // 시험 전용(MARU_APP_UI=squadnew): 화면 확인용
     window.maru.updateNotice().then((n) => { if (n) { updNotice = n; $('upd-dot').hidden = false; } }).catch(() => {});
-    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'subnew') { const m = wsList.find((w) => w.sub === true); if (m) openSub(m.id, true); } if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } if (init && (init.uiOpen === 'wsmenu' || init.uiOpen === 'wsrename' || init.uiOpen === 'wsdrag')) openWsDev(init.uiOpen); }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
+    syncWs().then(poll).then(() => { if (init && init.uiOpen === 'subnew') { const m = wsList.find((w) => w.sub === true); if (m) openSub(m.id, true); } if (init && init.uiOpen === 'project') openFirstProject(); if (init && init.uiOpen === 'day' && typeof init.uiDay === 'string') { devDayOpen = init.uiDayOpen === true; showDay(init.uiDay, 'title'); } if (init && (init.uiOpen === 'memory' || init.uiOpen === 'memgraph')) openMemory(init.uiOpen === 'memgraph' ? 'graph' : 'list'); if (init && init.uiOpen === 'memgraph' && I18N.isLang(init.uiLangSwitch)) setTimeout(() => { lang = init.uiLangSwitch; relabel(); }, 1500); // 시험 전용(MARU_APP_LANGSWITCH): 저장 없이 언어를 바꿔 relabel 경로를 확인
+    if (init && init.uiOpen === 'memgraph' && (init.uiMemZoom || init.uiMemSel || init.uiMemHover)) setTimeout(() => memView.devPose({ zoom: Number(init.uiMemZoom) || 0, sel: init.uiMemSel === true, hover: init.uiMemHover === true }), 600); if (init && init.uiOpen === 'inbox') { setNotifsOpen(true); $('inbox').scrollIntoView({ block: 'end' }); } if (init && (init.uiOpen === 'wsmenu' || init.uiOpen === 'wsrename' || init.uiOpen === 'wsdrag')) openWsDev(init.uiOpen); }); // 시험 전용(MARU_APP_UI=project): 화면 확인용으로 상세를 연 채 둔다
     setInterval(poll, 1000);
     setInterval(() => { refreshCal(); if (detailOpen && detailMode === 'day') fetchDay(false); }, 5000); // 일지·회고·일정은 main 이 읽어 둔 캐시를 가볍게 다시 묻는다
     refreshMeet(); setInterval(refreshMeet, 30000);

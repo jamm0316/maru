@@ -1019,6 +1019,60 @@ function parseBattery(out) {
   };
 }
 
+// 플랜 사용량(data/usage.json, scripts/usage-status.sh 가 statusLine 입력에서 뽑아 쓴다). 숫자만 받는다.
+// 입력 {"v":1,"at":<epoch 초>,"five_hour":{"pct":0~100,"resets_at":<epoch 초>},"seven_day":{...}} -> 같은 모양으로 정리해 돌려준다(창은 있는 것만). 쓸 수 없으면 null.
+const USAGE_MAX_BYTES = 4096;
+const USAGE_KEYS = ['five_hour', 'seven_day'];
+function parseUsage(text) {
+  if (typeof text !== 'string' || text.length > USAGE_MAX_BYTES) return null;
+  let o;
+  try { o = JSON.parse(text); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o) || o.v !== 1) return null;
+  const num = (v) => typeof v === 'number' && Number.isFinite(v);
+  if (!num(o.at) || o.at <= 0 || o.at > 4102444800) return null;
+  const out = { v: 1, at: Math.floor(o.at) };
+  for (const k of USAGE_KEYS) {
+    const w = o[k];
+    if (!w || typeof w !== 'object' || Array.isArray(w)) continue;
+    if (!num(w.pct) || !num(w.resets_at) || w.resets_at <= 0 || w.resets_at > 4102444800) continue;
+    out[k] = { pct: Math.min(100, Math.max(0, w.pct)), resets_at: Math.floor(w.resets_at) };
+  }
+  return out[USAGE_KEYS[0]] || out[USAGE_KEYS[1]] ? out : null;
+}
+// parseUsage 결과 -> { windows: [{ key, pct(정수), resetMs(남은 ms), expired, level }], ageMs } (창이 하나도 없으면 null)
+// 초기화 시각이 지난 창은 0% 로 보인다(이미 초기화된 것을 아니까). level: 'ok' < 80, 'warn' 80~94, 'crit' >= 95
+function usageLevel(pct) { return pct >= 95 ? 'crit' : pct >= 80 ? 'warn' : 'ok'; }
+function usageView(usage, nowMs = Date.now()) {
+  if (!usage || typeof usage !== 'object') return null;
+  const windows = [];
+  for (const key of USAGE_KEYS) {
+    const w = usage[key];
+    if (!w || typeof w.pct !== 'number' || typeof w.resets_at !== 'number') continue;
+    const left = w.resets_at * 1000 - nowMs;
+    const expired = left <= 0;
+    const pct = expired ? 0 : Math.round(Math.min(100, Math.max(0, w.pct)));
+    windows.push({ key, pct, resetMs: expired ? 0 : left, expired, level: usageLevel(pct) });
+  }
+  if (!windows.length || typeof usage.at !== 'number') return null;
+  return { windows, ageMs: Math.max(0, nowMs - usage.at * 1000) };
+}
+// 초기화까지 남은 시간 -> { key, params }: 1시간 미만 분, 하루 미만 시간, 그 이상 일. 이미 지났으면 'usage.reset.done'
+function fmtUsageReset(w) {
+  if (!w || w.expired) return { key: 'usage.reset.done', params: {} };
+  const ms = Math.max(0, w.resetMs);
+  if (ms < 3600000) return { key: 'usage.reset.min', params: { n: Math.min(59, Math.max(1, Math.ceil(ms / 60000))) } };
+  if (ms < 86400000) return { key: 'usage.reset.hour', params: { n: Math.floor(ms / 3600000) } };
+  return { key: 'usage.reset.day', params: { n: Math.min(99, Math.floor(ms / 86400000)) } };
+}
+// 마지막 갱신 후 지난 시간 -> { key, params }
+function fmtUsageAge(ageMs) {
+  const s = Math.floor(Math.max(0, ageMs) / 1000);
+  if (s < 60) return { key: 'usage.age.now', params: {} };
+  if (s < 3600) return { key: 'usage.age.min', params: { n: Math.floor(s / 60) } };
+  if (s < 86400) return { key: 'usage.age.hour', params: { n: Math.floor(s / 3600) } };
+  return { key: 'usage.age.day', params: { n: Math.min(99, Math.floor(s / 86400)) } };
+}
+
 // df -k /
 function parseDiskFree(out) {
   if (typeof out !== 'string') return null;
@@ -1863,12 +1917,17 @@ function parseMemoryMeta(text) {
   const lines = text.replace(/^\uFEFF/, '').split(/\r\n?|\n/);
   if (lines[0] !== '---') return null;
   let name = ''; let desc = ''; let tags = [];
+  const titles = { ko: '', en: '' }; const descs = { ko: '', en: '' }; // 화면용 표시 문구(첫 비어 있지 않은 값)
   for (let i = 1; i < lines.length; i++) {
     const l = memCapLine(lines[i]);
     if (l.trimEnd() === '---') break;
     let v;
     if ((v = memKeyValue(l, 'name', false)) !== null) { if (v) name = v; }
     else if ((v = memKeyValue(l, 'description', false)) !== null) { if (v) desc = v; }
+    else if ((v = memKeyValue(l, 'title_ko', true)) !== null) { if (!titles.ko) titles.ko = v; }
+    else if ((v = memKeyValue(l, 'title_en', true)) !== null) { if (!titles.en) titles.en = v; }
+    else if ((v = memKeyValue(l, 'description_ko', true)) !== null) { if (!descs.ko) descs.ko = v; }
+    else if ((v = memKeyValue(l, 'description_en', true)) !== null) { if (!descs.en) descs.en = v; }
     else if (/^[ \t]/.test(l) && (v = memKeyValue(l, 'tags', true)) !== null) {
       const inner = memInlineList(v);
       if (inner !== null) tags = inner.split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter((x) => TODO_TAG_RE.test(x)).slice(0, 4);
@@ -1877,7 +1936,8 @@ function parseMemoryMeta(text) {
   const clean = (s, max) => [...neutralizeBody(s)].slice(0, max).join('');
   name = clean(name, MEM_NAME_MAX);
   if (!name) return null;
-  return { name, description: clean(desc, MEM_DESC_MAX), tags };
+  const cl = (x, max) => clean(memvUnquote(x), max);
+  return { name, description: clean(desc, MEM_DESC_MAX), tags, titles: { ko: cl(titles.ko, MEMV_TITLE_MAX), en: cl(titles.en, MEMV_TITLE_MAX) }, descs: { ko: cl(descs.ko, MEM_DESC_MAX), en: cl(descs.en, MEM_DESC_MAX) } };
 }
 // 같은 태그(대표·보조 모두)를 가진 기억 최대 12개(이름순). 읽기 전용 표시용.
 function relatedMemories(metas, tag, max = PROJ_MEM_MAX) {
@@ -1885,7 +1945,7 @@ function relatedMemories(metas, tag, max = PROJ_MEM_MAX) {
   const t = tag.toLowerCase();
   return (Array.isArray(metas) ? metas : []).filter((m) => m && m.tags.some((x) => x.toLowerCase() === t))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).slice(0, max)
-    .map((m) => ({ name: m.name, description: m.description }));
+    .map((m) => ({ name: m.name, description: m.description, titles: m.titles || { ko: '', en: '' }, descs: m.descs || { ko: '', en: '' } })); // 화면이 언어에 맞춰 고른다(memoryDisplay)
 }
 // 기억 폴더를 읽어도 되는가(동기): 폴더도, 그 바로 위 프로젝트 폴더도 심볼릭 링크가 아니어야 한다.
 function memDirSafeSync(memDir) {
@@ -1921,6 +1981,7 @@ const MEMV_FILE_MAX_BYTES = 64 * 1024; // 파일 하나 상한(넘으면 건너�
 const MEMV_TOTAL_MAX_BYTES = 2 * 1024 * 1024; // 읽은 바이트 합 상한
 const MEMV_NAME_MAX = 80;
 const MEMV_DESC_MAX = 240;
+const MEMV_TITLE_MAX = 60; // 화면용 제목(권장 40자, 넘게 와도 이만큼까지만 쓴다)
 const MEMV_BODY_MAX = 6000; // 화면·검색에 쓰는 본문 글자 수(코드포인트)
 const MEMV_BODY_LINES_MAX = 300;
 const MEMV_LINKS_MAX = 40; // 파일 하나가 가리킬 수 있는 [[링크]] 수
@@ -1963,6 +2024,7 @@ function parseMemoryFile(text, slug, modifiedMs) {
   for (let i = 1; i < lines.length; i++) if (lines[i].trimEnd() === '---') { end = i; break; }
   if (end < 0) return null;
   let name = ''; let desc = ''; let type = ''; let tags = []; let inTags = false;
+  const titles = { ko: '', en: '' }; const descs = { ko: '', en: '' }; // metadata 아래의 화면용 표시 문구(없어도 된다)
   for (let i = 1; i < end; i++) {
     const l = lines[i]; let v;
     if (inTags) {
@@ -1972,6 +2034,10 @@ function parseMemoryFile(text, slug, modifiedMs) {
     }
     if ((v = memKeyValue(l, 'name', false)) !== null) { if (v) name = memvUnquote(v); }
     else if ((v = memKeyValue(l, 'description', false)) !== null) desc = memvUnquote(v);
+    else if ((v = memKeyValue(l, 'title_ko', true)) !== null) { if (!titles.ko) titles.ko = memvLine(memvUnquote(v), MEMV_TITLE_MAX); } // 같은 키가 또 나오면 비어 있지 않은 첫 값(scripts/maru_ui.py 와 같다)
+    else if ((v = memKeyValue(l, 'title_en', true)) !== null) { if (!titles.en) titles.en = memvLine(memvUnquote(v), MEMV_TITLE_MAX); }
+    else if ((v = memKeyValue(l, 'description_ko', true)) !== null) { if (!descs.ko) descs.ko = memvLine(memvUnquote(v), MEMV_DESC_MAX); }
+    else if ((v = memKeyValue(l, 'description_en', true)) !== null) { if (!descs.en) descs.en = memvLine(memvUnquote(v), MEMV_DESC_MAX); }
     else if ((v = memKeyValue(l, 'type', true)) !== null) { const w = memvUnquote(v).toLowerCase(); if (MEMV_TYPES.includes(w)) type = w; }
     else if ((v = memKeyValue(l, 'tags', true)) !== null) {
       const inner = memInlineList(v);
@@ -1993,7 +2059,7 @@ function parseMemoryFile(text, slug, modifiedMs) {
     if (links.length >= MEMV_LINKS_MAX) break;
   }
   const mod = Number.isFinite(modifiedMs) && modifiedMs > 0 ? Math.floor(modifiedMs) : 0;
-  return { slug, name: memvLine(name, MEMV_NAME_MAX) || slug, description: memvLine(desc, MEMV_DESC_MAX), type: type || 'reference', tags: cleanTags, body: memvBody(raw), links, modified: mod };
+  return { slug, name: memvLine(name, MEMV_NAME_MAX) || slug, description: memvLine(desc, MEMV_DESC_MAX), titles, descs, type: type || 'reference', tags: cleanTags, body: memvBody(raw), links, modified: mod };
 }
 // 파싱된 파일들 -> 화면용 목록. 링크는 main 이 가진 목록(slug, 없으면 이름)으로만 해석한다: 없는 대상·자기 자신·중복은 버린다.
 // id 는 main 이 매긴 것('m0', 'm1', ...)이고 화면은 이것으로만 기억을 가리킨다.
@@ -2012,7 +2078,7 @@ function buildMemoryModel(files) {
   const ins = list.map(() => []);
   outs.forEach((o, i) => o.forEach((j) => ins[j].push(i)));
   return list.map((f, i) => ({
-    id: 'm' + i, slug: f.slug, name: f.name, description: f.description, type: f.type, tags: f.tags.slice(), body: f.body, modified: f.modified,
+    id: 'm' + i, slug: f.slug, name: f.name, description: f.description, titles: { ko: (f.titles && f.titles.ko) || '', en: (f.titles && f.titles.en) || '' }, descs: { ko: (f.descs && f.descs.ko) || '', en: (f.descs && f.descs.en) || '' }, type: f.type, tags: f.tags.slice(), body: f.body, modified: f.modified,
     out: outs[i].map((j) => 'm' + j), in: ins[i].map((j) => 'm' + j),
   }));
 }
@@ -2159,9 +2225,128 @@ function fitGraph(raw, opts) {
 }
 // n: 노드 수, edges: buildMemoryGraph 결과 -> [{x, y}] (모두 유한수, pad 안쪽 width x height 안)
 function layoutGraph(n, edges, opts) { return fitGraph(simulateGraph(n, edges, opts), opts); }
+// ---- 그래프 움직임(순수 계산: DOM 없음). memview.js 가 매 프레임 부른다 ----
+const GRAPH_DRIFT_AMP = 6; // 떠다니는 폭(viewBox 단위)
+const GRAPH_DT_MAX_MS = 32; // 한 프레임 계산에 쓰는 시간 상한: 탭이 멈췄다 돌아와도 터지지 않게
+const GRAPH_LABEL_PX_LO = 6.5; const GRAPH_LABEL_PX_HI = 8.5; // 화면에서 글자 크기가 이 범위일 때 이름이 서서히 나타난다
+// 노드별 떠다니는 오프셋: (번호, 시각)만으로 정해진다. 주기 7~13초의 사인 둘씩 섞어 부드럽고, 크기는 항상 amp 이하.
+function graphDrift(i, tMs, amp) {
+  const a = amp === undefined ? GRAPH_DRIFT_AMP : amp;
+  const t = Number(tMs);
+  if (!(a > 0) || !Number.isFinite(t)) return { x: 0, y: 0 };
+  const rnd = (n) => { let h = (Math.imul((i | 0) + 1, 0x9E3779B1) ^ Math.imul(n + 1, 0x85EBCA6B)) >>> 0; h = Math.imul(h ^ (h >>> 15), 0x2C1B3C6D) >>> 0; h = Math.imul(h ^ (h >>> 12), 0x297A2D39) >>> 0; return ((h ^ (h >>> 15)) >>> 0) / 4294967296; };
+  const w = (n) => Math.sin(2 * Math.PI * (t / (7000 + 6000 * rnd(n)) + rnd(n + 10)));
+  return { x: a * (0.6 * w(0) + 0.4 * w(1)), y: a * (0.6 * w(2) + 0.4 * w(3)) };
+}
+// 한 프레임 계산. nodes: [{x,y,vx,vy,pin}] 를 그 자리에서 고친다(pin 이면 그 자리 그대로). anchors: [{x,y}] 자리 목표, edges: buildMemoryGraph 결과.
+// 힘: 자리 목표(+떠다니는 오프셋)로 당기는 용수철, 속도 감쇠, 길게 늘어난 연결 선(자리 사이 거리 + 여유 초과분)만 당기는 용수철(태그 선은 약하게).
+// 선택 옵션: boxes [{hw, hh, cy?}](노드별 이름 상자의 반너비·반높이, cy 는 상자 중심이 노드 중심보다 아래로 얼마나 있는지)가 있으면 상자가 겹치는 쌍을
+// 겹침이 적은 축으로 겹친 만큼(sep 배) 서로 밀어낸다(고정된 노드는 안 움직이고 상대가 두 배로 받는다). 없으면 쌍 계산을 아예 건너뛴다.
+// bounds {x0, x1, y0, y1}: 노드 상자의 가로가 [x0, x1] 안에, 중심의 세로가 [y0, y1] 안에 머물게 한다(p.free 인 노드·고정 노드는 제외, 끌어 놓은 자리는 어디든 된다).
+// 반환 { move }: 이번 프레임에 가장 많이 움직인 거리(0 에 가까우면 가라앉은 것)
+function graphStep(nodes, anchors, edges, opts) {
+  const o = { dtMs: 16, tMs: 0, amp: GRAPH_DRIFT_AMP, spring: 6, damp: 5, link: 4, tagLink: 1.5, sep: 60, repel: 0, repelRange: 400, maxAccel: 1500, maxSpeed: 2000, ...(opts || {}) };
+  const dt = Math.min(Math.max(Number(o.dtMs) || 0, 0), GRAPH_DT_MAX_MS) / 1000;
+  const n = Math.min(nodes.length, anchors.length);
+  const fx = new Float64Array(n); const fy = new Float64Array(n);
+  const slack = 2 * Math.max(0, o.amp || 0);
+  for (const e of Array.isArray(edges) ? edges : []) {
+    if (!e || !(e.a >= 0 && e.b >= 0 && e.a < n && e.b < n) || e.a === e.b) continue;
+    const pa = nodes[e.a]; const pb = nodes[e.b]; const d0 = Math.hypot(anchors[e.a].x - anchors[e.b].x, anchors[e.a].y - anchors[e.b].y);
+    const ex = pb.x - pa.x; const ey = pb.y - pa.y; const d = Math.hypot(ex, ey);
+    if (!(d > d0 + slack) || d < 1e-6) continue;
+    const s = (d - d0 - slack) * (e.kind === 'tag' ? o.tagLink : o.link) / d;
+    fx[e.a] += ex * s; fy[e.a] += ey * s; fx[e.b] -= ex * s; fy[e.b] -= ey * s;
+  }
+  const bx = Array.isArray(o.boxes) && o.boxes.length >= n ? o.boxes : null; const bd = o.bounds || null;
+  if (bx) {
+    let mhw = 0; let mhh = 0; let mcy = 0; for (let i = 0; i < n; i++) { mhw = Math.max(mhw, bx[i].hw); mhh = Math.max(mhh, bx[i].hh); mcy = Math.max(mcy, Math.abs(bx[i].cy || 0)); }
+    const rangeX = Math.max(o.repel > 0 ? o.repelRange : 0, 2 * mhw); const rangeY = Math.max(o.repel > 0 ? o.repelRange : 0, 2 * (mhh + mcy)); // 이보다 멀리 떨어진 쌍은 겹칠 수도 밀 수도 없으니 바로 건너뛴다
+    for (let i = 0; i < n; i++) {
+      const pi = nodes[i]; const bi = bx[i];
+      for (let j = i + 1; j < n; j++) {
+        const pj = nodes[j]; const bj = bx[j];
+        if (pi.pin && pj.pin) continue;
+        const dx = pj.x - pi.x; if (dx > rangeX || dx < -rangeX) continue;
+        const dy = (pj.y + (bj.cy || 0)) - (pi.y + (bi.cy || 0)); if (dy > rangeY || dy < -rangeY) continue;
+        const wi = pi.pin ? 0 : pj.pin ? 2 : 1; const wj = pj.pin ? 0 : pi.pin ? 2 : 1;
+        if (o.repel > 0) { // 멀리서도 약하게 밀어 고르게 퍼뜨린다(처음 퍼뜨릴 때만 쓴다)
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < o.repelRange) { const q = o.repel / Math.max(d, 15); const ux = d > 1e-6 ? dx / d : 1; const uy = d > 1e-6 ? dy / d : 0; fx[i] -= ux * q * wi; fy[i] -= uy * q * wi; fx[j] += ux * q * wj; fy[j] += uy * q * wj; }
+        }
+        const ox = bi.hw + bj.hw - Math.abs(dx); if (!(ox > 0)) continue;
+        const oy = bi.hh + bj.hh - Math.abs(dy); if (!(oy > 0)) continue;
+        const horiz = ox < oy; const sg = (horiz ? dx : dy) >= 0 ? 1 : -1; // 겹친 두 중심은 번호 순서로 정해진 쪽으로 민다
+        const f = o.sep * (horiz ? ox : oy) * sg;
+        if (horiz) { fx[i] -= f * wi; fx[j] += f * wj; } else { fy[i] -= f * wi; fy[j] += f * wj; }
+      }
+    }
+  }
+  const lim = (i, p) => { // 노드 i 의 가로·세로 허용 범위(칸이 상자보다 좁으면 가운데)
+    if (!bd || p.free) return null;
+    const hw = bx ? bx[i].hw : 0; let lx = bd.x0 + hw; let hx = bd.x1 - hw; if (lx > hx) lx = hx = (bd.x0 + bd.x1) / 2;
+    let ly = bd.y0; let hy = bd.y1; if (ly > hy) ly = hy = (ly + hy) / 2;
+    return { lx, hx, ly, hy };
+  };
+  let move = 0;
+  for (let i = 0; i < n; i++) {
+    const p = nodes[i];
+    if (p.pin) { p.vx = 0; p.vy = 0; continue; }
+    const dr = graphDrift(i, o.tMs, o.amp); const an = anchors[i]; const lm = lim(i, p);
+    let tx = an.x + dr.x; let ty = an.y + dr.y;
+    if (lm) { tx = Math.min(lm.hx, Math.max(lm.lx, tx)); ty = Math.min(lm.hy, Math.max(lm.ly, ty)); } // 목표도 안쪽으로: 벽과 용수철이 맞서지 않게
+    let ax = o.spring * (tx - p.x) - o.damp * p.vx + fx[i]; let ay = o.spring * (ty - p.y) - o.damp * p.vy + fy[i];
+    const am = Math.sqrt(ax * ax + ay * ay); if (am > o.maxAccel) { ax *= o.maxAccel / am; ay *= o.maxAccel / am; } // 가속도 상한: 같은 자리에 겹친 노드가 많아도 날뛰지 않는다
+    p.vx += ax * dt; p.vy += ay * dt;
+    const sp = Math.hypot(p.vx, p.vy); if (sp > o.maxSpeed) { p.vx *= o.maxSpeed / sp; p.vy *= o.maxSpeed / sp; }
+    let nx = p.x + p.vx * dt; let ny = p.y + p.vy * dt;
+    if (!(Number.isFinite(nx) && Number.isFinite(ny))) { p.x = an.x; p.y = an.y; p.vx = 0; p.vy = 0; continue; }
+    if (lm) { const cx2 = Math.min(lm.hx, Math.max(lm.lx, nx)); const cy2 = Math.min(lm.hy, Math.max(lm.ly, ny)); if (cx2 !== nx) p.vx = 0; if (cy2 !== ny) p.vy = 0; nx = cx2; ny = cy2; }
+    move = Math.max(move, Math.hypot(nx - p.x, ny - p.y)); p.x = nx; p.y = ny;
+  }
+  return { move };
+}
+// 처음 자리 퍼뜨리기: 이름 상자가 겹치지 않고 칸 안을 고르게 쓰도록, 자리 목표를 약하게 두고 미리 돌려 가라앉은 자리를 돌려준다(새 자리 목표로 쓴다).
+// anchors 는 맞춘 자리, 연결 선은 맞춘 거리를 기준으로 약하게 붙들고, pinned(Set)는 제자리에 둔다. 같은 입력이면 같은 결과.
+function graphSettle(anchors, edges, boxes, bounds, opts) {
+  const n0 = anchors.length; // 노드가 많으면 반복을 줄이고(240 -> 60) 밀어내는 범위도 좁힌다: 크기를 바꾸는 중에도 멈추지 않게
+  const o = { iterations: Math.round(240 - Math.min(1, Math.max(0, (n0 - 60) / 440)) * 180), repelRange: n0 <= 100 ? 400 : 260, spring: 0.8, damp: 6, link: 1, tagLink: 0.4, sep: 60, repel: 3000, pinned: null, ...(opts || {}) };
+  const nodes = anchors.map((a, i) => ({ x: a.x, y: a.y, vx: 0, vy: 0, pin: !!(o.pinned && o.pinned.has(i)) }));
+  for (let it = 0; it < o.iterations; it++) graphStep(nodes, anchors, edges, { dtMs: GRAPH_DT_MAX_MS, tMs: 0, amp: 0, boxes, bounds, spring: o.spring, damp: o.damp, link: o.link, tagLink: o.tagLink, sep: o.sep, repel: o.repel, repelRange: o.repelRange });
+  return nodes.map((p) => ({ x: p.x, y: p.y }));
+}
+// 이름을 보이는 노드 수: 40개 이하는 모두, 그보다 많으면 확대 배율 k 에 따라 40*k^2 개(전부가 될 때까지). 순서는 graphLabelOrder.
+const GRAPH_LABEL_ALL_MAX = 40;
+function graphLabelCount(n, k) {
+  if (!(n > 0)) return 0; if (n <= GRAPH_LABEL_ALL_MAX) return n;
+  const v = Number(k); return Math.min(n, Math.max(1, Math.ceil(GRAPH_LABEL_ALL_MAX * (v > 0 ? v * v : 0))));
+}
+// 연결이 많은 순(같으면 번호 순)으로 노드 번호를 늘어놓는다
+function graphLabelOrder(deg) { return deg.map((d, i) => i).sort((a, b) => (deg[b] - deg[a]) || (a - b)); }
+// 이름 글자의 투명도(0~1): 화면에서 글자 크기(px)가 lo 이하면 0, hi 이상이면 1, 사이는 부드럽게
+function graphLabelOpacity(px, lo, hi) {
+  const a = lo === undefined ? GRAPH_LABEL_PX_LO : lo; const b = hi === undefined ? GRAPH_LABEL_PX_HI : hi;
+  const v = Number(px); if (!(v > a)) return 0; if (v >= b) return 1;
+  const t = (v - a) / (b - a); return t * t * (3 - 2 * t);
+}
+// 보는 위치(확대·이동)를 목표로 지수 평활로 다가간다. 선형이라 확대 중에도 커서 아래 점이 그대로 있다. -> { k, tx, ty, done }
+function graphEaseView(cur, tgt, dtMs, tauMs) {
+  const tau = tauMs > 0 ? tauMs : 70; const dt = Math.min(Math.max(Number(dtMs) || 0, 0), GRAPH_DT_MAX_MS * 4);
+  const a = 1 - Math.exp(-dt / tau);
+  const k = cur.k + (tgt.k - cur.k) * a; const tx = cur.tx + (tgt.tx - cur.tx) * a; const ty = cur.ty + (tgt.ty - cur.ty) * a;
+  if (Math.abs(tgt.k - k) < 0.0005 && Math.abs(tgt.tx - tx) < 0.05 && Math.abs(tgt.ty - ty) < 0.05) return { k: tgt.k, tx: tgt.tx, ty: tgt.ty, done: true };
+  return { k, tx, ty, done: false };
+}
 // 검색: 이름·설명·태그·본문에서 대소문자 무시 부분 일치. 빈 검색어는 전부. -> 일치한 항목의 id 배열(원래 순서)
 // texts: memorySearchText 를 미리 계산해 둔 배열(items 와 같은 순서). 주면 글자를 다시 이어 붙이지 않는다.
-const memorySearchText = (m) => (m.name + '\n' + m.description + '\n' + (m.tags || []).join(' ') + '\n' + m.body).toLowerCase();
+// 화면에 보일 제목·설명(언어 lang = 'ko'|'en'): 제목은 title_<언어> > 다른 언어 > 이름(slug), 설명은 description_<언어> > 최상위 설명 > 다른 언어
+function memoryDisplay(item, lang) {
+  const m = item || {}; const l = lang === 'en' ? 'en' : 'ko'; const o = l === 'en' ? 'ko' : 'en';
+  const t = m.titles || {}; const d = m.descs || {};
+  return { title: t[l] || t[o] || m.name || m.slug || '', description: d[l] || m.description || d[o] || '' };
+}
+// 검색 글자: 이름·slug·제목(두 언어)·설명(두 언어)·태그·본문
+const memorySearchText = (m) => (m.name + '\n' + (m.slug || '') + '\n' + (m.titles ? m.titles.ko + ' ' + m.titles.en : '') + '\n' + m.description + '\n' + (m.descs ? m.descs.ko + ' ' + m.descs.en : '') + '\n' + (m.tags || []).join(' ') + '\n' + m.body).toLowerCase();
 function filterMemories(items, query, tag, texts) {
   const q = typeof query === 'string' ? memvCut(query.trim().toLowerCase(), MEMV_QUERY_MAX) : '';
   const tg = typeof tag === 'string' && tag ? tag.toLowerCase() : '';
@@ -4017,7 +4202,7 @@ const api = {
   DROP_MAX, DROP_PATH_MAX, validDropPath, shellQuote, buildDropPaste, dropNoticeKey, isLineNavKey, isBufNavKey, isPromptBorder, promptEdgeRows, bufNavSeq, isStepKey, stepTarget, isFoldKey, foldTarget, arrowInput,
   validModelId, shortModelName, validTranscriptPath, pathInside, parseTranscriptModel, parseAgentFile, buildAgentParty, summarizeSubs, validSubFileName, parseSubType, PARTY_MAX,
   hasBadChars, isSafeQuestStart, parseAgentState, parseAgentRecord, effectiveAgent, escInterrupted, refineAgentAt, ESC_IDLE_MS, isSessionId, resolveRoot, keyToSeq, isNewlineKey, isShiftEnter, imeCanReset, isClaudeUi, levelInfo, parseSuggestions, cleanQuestText, parseTodos, todosFromSuggestions, resolveTodos, todoKey, todoStarred, matchTodo, fillNoticeKey, sanitizeHostEnv, bgCount, showSubs, agentStatusText, TODO_MAX, isShellProcessName, isUserInput, bpStep, fillStep, retryCheck, sessionUuidOf, workspacesToSave, workspacesJson, decideRestore, pickAliveAt, startupMode, resumeFailureDecision, noteVisible, shouldDropPrev, resumeSessionsOn, RESTORE_ALIVE_SLACK_MS, OTHER_INSTANCE_MS, RESUME_FAIL_MS, RESUME_RECENT_MS, RETRY_TTL_MS, READY_QUIET_MS, TODO_SRC_MAX_BYTES, TODO_SRC_MAX_LINES, TODO_SRC_TTL_SEC, TODO_SRC_CWD_MAX, TODO_RESUME_STALE_SEC, validSessionUuid, validSrcCwd, parseTodoSrc, readTodoSrcFile, findTodoSrc, todoSrcHint, transcriptFileFor, transcriptSessionId, decideTodoOpen, openNoticeKey, validSkillName, mergeSkillNames,
-  parseBattery, parseDiskFree, parseLogEvents, mergeBriefing, rcScan, draftStep, rcView, rcCanSend, rcMarkerOk, RC_PENDING_MS, RC_MARKER_MS, RC_TAIL_MAX,
+  parseBattery, parseDiskFree, parseUsage, usageView, usageLevel, fmtUsageReset, fmtUsageAge, USAGE_MAX_BYTES, parseLogEvents, mergeBriefing, rcScan, draftStep, rcView, rcCanSend, rcMarkerOk, RC_PENDING_MS, RC_MARKER_MS, RC_TAIL_MAX,
   readRegular, cleanName, defaultLang, validateProfile, parseProfile, loadProfile, saveProfile, NAME_MAX_CHARS,
   HOOK_EVENTS, HOOK_SCRIPTS, hookStatus, parseAuthStatus, cleanBlock, parseInstallSections, sanitizeUpdate, cleanVersion,
   SETTINGS_PANES, settingsPaneUrl, projectSlug, CAL_SCRIPT, parseCalendarOutput, calMonthScript, calMonthDateSetup, parseCalendarMonth, calDayScript, calDayDateSetup, parseCalendarDay, calNotes, CAL_HELPER_FIRST_MS, CAL_HELPER_MS, CAL_OSA_MS, calHelperArgs, calHelperExit, calStatusWord, calChooseReader, calDayJobStale, calDayVictim, calDayAfterFail, CAL_DAY_FRESH_MS,
@@ -4032,7 +4217,7 @@ const api = {
   validateProjectState, projectStateFits, parseProjectState, readProjectStateFile, saveProjectState, projectRoot, daysBetween, buildProjects, groupProjects, canMerge,
   stateWithStatus, stateWithTitle, stateWithMerge,
   PROJ_UI_MAX_BYTES, PROJ_UI_MAX_TAGS, PROJ_UI_MAX_PER_TAG, GOTO_MAX, defaultProjectUi, validateProjectUi, parseProjectUi, readProjectUiFile, projectUiFits, pruneProjectUi, saveProjectUi, applyOrder, applyProjectUi, moveInOrder, visibleProjectKeys, numberTargets, parseMemoryMeta, relatedMemories, readMemoryMetas, buildProjectDetail,
-  MEMV_FILES_MAX, MEMV_FILE_MAX_BYTES, MEMV_TOTAL_MAX_BYTES, MEMV_TYPES, MEMV_TAG_EDGE_MEMBERS_MAX, MEMV_EDGES_MAX, parseMemoryFile, buildMemoryModel, readMemoryFiles, buildMemoryGraph, simulateGraph, fitGraph, layoutGraph, filterMemories, memorySearchText, MEMV_CACHE_TTL_MS, MEMV_DIR_SCAN_MAX, MEM_FILE_RE, MEM_LINE_MAX,
+  MEMV_FILES_MAX, MEMV_FILE_MAX_BYTES, MEMV_TOTAL_MAX_BYTES, MEMV_TYPES, MEMV_TAG_EDGE_MEMBERS_MAX, MEMV_EDGES_MAX, parseMemoryFile, buildMemoryModel, readMemoryFiles, buildMemoryGraph, simulateGraph, fitGraph, layoutGraph, graphDrift, graphStep, graphSettle, graphLabelCount, graphLabelOrder, GRAPH_LABEL_ALL_MAX, graphLabelOpacity, graphEaseView, GRAPH_DRIFT_AMP, GRAPH_DT_MAX_MS, filterMemories, memorySearchText, memoryDisplay, MEMV_CACHE_TTL_MS, MEMV_DIR_SCAN_MAX, MEM_FILE_RE, MEM_LINE_MAX,
   PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
   PANEL_DEFAULT, PANEL_RANGE, PANEL_CENTER_MIN, PANEL_STORE_KEY, panelRange, clampPanelWidths, parsePanelWidths, parseColsEnv, panelKeyDelta,
 };

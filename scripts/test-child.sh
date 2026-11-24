@@ -387,7 +387,11 @@ check "받은 인자는 --settings 뒤에 그대로" hooks_ok --resume 11111111-
 check "붙였으면 표지 파일(<id>.hooked)을 남긴다" [ -f "$DATA/state/app/outside-12345.hooked" ]
 rm -f "$DATA/state/app/outside-12345.hooked"
 WARGS=(); wrap_in "$OUTD" >/dev/null; check "MARU_APP_SESSION 없음(앱 밖 실행): 붙이지 않음" argv_is '[]'
-WARGS=(); wrap_in "$R" MARU_APP_SESSION=outside-12345 >/dev/null; check "저장소 폴더 안: 붙이지 않음(프로젝트 설정의 훅이 이미 돈다)" argv_is '[]'
+WARGS=(); wrap_in "$R" MARU_APP_SESSION=outside-12345 >/dev/null; check "저장소 폴더 안: 상태 훅은 붙이지 않음(프로젝트 설정의 훅이 이미 돈다). statusLine 만 붙는다" "$REAL_PY" -I -c '
+import json, sys
+a = [x.decode() for x in open(sys.argv[1], "rb").read().split(b"\0")[:-1]]
+assert a[0] == "--settings" and len(a) == 2, a
+d = json.loads(a[1]); assert list(d) == ["statusLine"], list(d)' "$STUB_OUT"
 mkdir -p "$R/sub/dir"; wrap_in "$R/sub/dir" MARU_APP_SESSION=outside-12345 >/dev/null; check "저장소의 하위 폴더: 붙인다(프로젝트 설정은 시작한 폴더에서만 읽힌다)" hooks_ok
 mkdir -p "${R}x"; wrap_in "${R}x" MARU_APP_SESSION=outside-12345 >/dev/null; check "이름만 저장소로 시작하는 형제 폴더는 밖이다" hooks_ok; rmdir "${R}x"
 rm -f "$DATA/state/app/"*.hooked

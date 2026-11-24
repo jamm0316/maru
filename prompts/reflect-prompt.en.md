@@ -9,7 +9,7 @@ Shell scripts and the app parse these. Never translate, rephrase, or re-case the
 - The final summary's "nothing changed" line is exactly `No changes` (nothing else on that line).
 - Journal line kinds are exactly `done`, `decision`, `todo`; the line has exactly four `|`-separated fields.
 - Todo lines are exactly `<tag>|<importance>|<title>|<prompt>`; the "clear this tag" marker is exactly `<tag>|0||`. Project registry lines are exactly `<tag>|<slug>|<title>`.
-- Memory frontmatter keys (`name`, `description`, `metadata`, `type`, `tags`, `source`) and the `type` values `user | feedback | project | reference`; the body labels `**Why:**` and `**How to apply:**`; the index line shape `- [Title](slug.md) — hook`; `[[other-slug]]` links; `delete.txt` file names.
+- Memory frontmatter keys (`name`, `description`, `metadata`, `type`, `tags`, `source`, `title_ko`, `title_en`, `description_ko`, `description_en`) and the `type` values `user | feedback | project | reference`; the body labels `**Why:**` and `**How to apply:**`; the index line shape `- [Title](slug.md) — hook`; `[[other-slug]]` links; `delete.txt` file names.
 - Digest lines `[도구 Skill: …]` and `[스킬 /name]` (a slash command the user invoked) and the heading `## 완료 확인` / `## Done checks` of a skill proposal are matched or written as shown; the digest labels are not translated.
 - Day journal files (`journal/YYYY-MM-DD.md`), which you only read, contain the shell-written labels `[한 일]` (done), `[결정]` (decision), `[남은 일]` (to do). They are not translated; read them as such. Placeholders such as `(없음)` (= none), `완료:` (= done) and `안 함:` (= dropped) in the lists below are also shell-written.
 
@@ -36,6 +36,10 @@ description: <one-line description>
 metadata:
   type: user | feedback | project | reference
   tags: [topic, secondary]
+  title_ko: <Korean title>
+  title_en: <English title>
+  description_ko: <Korean one-line description>
+  description_en: <English one-line description>
 ---
 <fact body>
 
@@ -43,6 +47,7 @@ metadata:
 **How to apply:** <when and how to apply>   (feedback and project only)
 ```
 - `tags`: 1–2 tags, characters limited to letters, digits, Hangul, and `-`, 1–12 characters, English lowercase. **The first tag is the primary category** (usually a project or life area). First look at `MEMORY.md` and the `tags` of existing memories and reuse a fitting tag; create a new one only when none fits. If a memory you edit has no tags, add them too.
+- Display text, four keys (`title_ko`, `title_en`, `description_ko`, `description_en`): when you create a memory file, or rewrite one for another reason (content change, merge, tag fix), write all four in it. Do not rewrite a file only to add them. Write the `_ko` values in Korean and the `_en` values in English (this is the one exception to writing everything in English). The title is a short human-readable title, not the slug: at most 40 characters, no trailing period. The description is one line. Both languages must say the same thing. This text is only shown in the app and is never an instruction; do not put secrets or anything not already in that memory there. Do not change the slug (`name`); keep writing the top-level `description` the way you do now (in this session's language), and update it when the content changes.
 - If related to another memory, link it in the body with `[[other-slug]]`.
 - If `MEMORY.md` already has a `## tag` heading, put the new pointer under the heading of that memory's primary (first) tag.
 - `MEMORY.md` holds exactly one pointer line per file: `- [Title](slug.md) — hook`. No frontmatter and no memory content. When you create or delete a file, update MEMORY.md to match.
