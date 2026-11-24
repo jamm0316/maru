@@ -71,7 +71,32 @@ doctor() {
   else
     [ -n "$MARU_PY_FALLBACK" ] || ok "python3 동작"
     [ -n "$MARU_GIT_FALLBACK" ] || ok "git 동작"
-    if [ -d "$MEM" ]; then ok "기억 폴더 경로 유효: $MEM"; else warn "기억 폴더 경로는 올바르나 폴더가 없음: $MEM"; fi
+    if [ -d "$MEM" ]; then
+      ok "기억 폴더 경로 유효: $MEM"
+      # 기억 폴더 검증(읽기 전용): 어긋나 있으면 회고는 모델을 부르지 않고 건너뛴다(새벽 정리는 그대로 돌아 고칠 수 있다)
+      local vn vr
+      vn=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
+      if vr=$(mem_validate "$MEM" "$vn"); then ok "$(T "기억 폴더 검증 통과" "Memory folder validation passed")"
+      else
+        warn "$(T "기억 폴더 검증 실패" "Memory folder validation failed"): $vr"
+        printf '      -> %s\n' "$(T "새벽 정리가 고치거나, 마루에게 색인과 기억 파일을 맞춰 달라고 하세요. 고칠 때까지 회고는 건너뜁니다." "The nightly tidy-up may fix it, or ask Maru to make the index and memory files match. Reflection is skipped until it is fixed.")"
+      fi
+    else warn "기억 폴더 경로는 올바르나 폴더가 없음: $MEM"; fi
+    # 마지막 회고/정리 결과(data/state/last.*: epoch|결과|코드|until)
+    local lf lname line le lr lc lu when what lbl
+    for lname in reflect dream; do
+      lf=$STATE/last.$lname
+      [ -f "$lf" ] && [ ! -L "$lf" ] || continue
+      line=$(head -c 200 "$lf" 2>/dev/null | head -1)
+      IFS='|' read -r le lr lc lu <<< "$line"
+      [[ "$le" =~ ^[0-9]+$ ]] || continue
+      when=$(date -r "$le" '+%F %T' 2>/dev/null || echo "$le")
+      case "$lr" in ok) what=$(T "성공" "ok");; skip) what=$(T "건너뜀" "skipped");; fail) what=$(T "실패" "failed");; *) what=$lr;; esac
+      [ -z "$lc" ] || what="$what ($lc)"
+      [[ "$lu" =~ ^[0-9]+$ ]] && what="$what, $(T "다음 시도 가능" "retry after") $(date -r "$lu" '+%F %T' 2>/dev/null || echo "$lu")"
+      if [ "$lname" = reflect ]; then lbl=$(T "최근 회고" "last reflect"); else lbl=$(T "최근 정리" "last dream"); fi
+      printf '      %s: %s %s\n' "$lbl" "$when" "$what"
+    done
   fi
 
   local sj=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json

@@ -233,6 +233,7 @@ check "모델이 journal/ 을 직접 쓰면 11" [ "$rc" -eq 11 ]
 check "직접 쓴 파일은 되돌려짐" [ ! -e "$MEM/journal/2000-01-01.md" ]
 check "그 실행의 일지 블록도 없음" [ "$(md5 -q "$DAYFILE")" = "$h0" ]
 # 모델이 일반 파일 journal 을 만들어도(디렉터리 prefix 가 아니어도) 거부·되돌림
+rm -f "$DATA/state/$SID.backoff"   # 같은 세션이 연속 2회 실패해 백오프에 들어갔으므로 풀고 계속(백오프 자체는 test-quota.sh 가 시험)
 mv "$MEM/journal" "$T/journal.keep2"
 out=$(reflect_run FAKE_JOURNAL="$T/j2.txt" FAKE_JOURNAL_FILE=1); rc=$?
 check "모델이 일반 파일 journal 을 만들면 11" [ "$rc" -eq 11 ]
@@ -737,7 +738,7 @@ check "일반 사용자 발화는 그대로" has "$dtxt" '[사용자] 진짜 사
 echo "== 가드"
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
 # 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
-check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name todo-src.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
+check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f ! -name usage.json -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name todo-src.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
 check "시험이 쓰는 데이터 폴더는 모두 임시 폴더 안" sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$DATA" "$T"
 echo
 if [ "$FAIL" = 0 ]; then echo "test-journal: OK ($N 항목)"; exit 0; else echo "test-journal: $FAIL/$N 실패"; exit 1; fi

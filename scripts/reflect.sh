@@ -1,6 +1,10 @@
 #!/bin/bash
 # 세션 종료 후 회고(학습 루프). 훅 모드(stdin JSON) / 실행 모드(--run <transcript> <session_id>)
 # 실행 모드 종료 코드: 0 성공 / 10 의도적 건너뜀(새 내용 없음·턴 부족·입력 부적합) / 11 실패(되돌림·환경 오류 포함) / 12 잠금 시간 초과
+#   / 13 나중에 다시 시도할 건너뜀(백오프 대기·사용량 게이트·기억 폴더 검증 실패 — dream 의 sweep 이 처리 완료로 표시하지 않는다)
+# dream 의 sweep(MARU_SWEEP=1)도 마지막 기회라 백오프·사용량 게이트를 건너뛴다(기억 폴더 사전 검증은 그대로 받는다).
+# 결과는 data/state/last.reflect 에도 `epoch|ok|skip|fail|코드|until` 한 줄로 남는다(lib.sh record_outcome). PreCompact 훅(MARU_TICK_PRECOMPACT=1)은
+# 백오프·사용량 게이트를 건너뛴다(압축되면 원문이 사라지므로). 실패는 그대로 센다.
 # 환경 오류(도구 실행 불가·기억 폴더 계산 실패)는 반드시 11 로 끝나고 연속 실패 알림에 센다(dream 이 처리 완료로 표시하지 않고 재시도).
 MODEL="${REFLECT_MODEL:-haiku}"          # 회고에 쓸 모델
 CLAUDE_TIMEOUT="${REFLECT_TIMEOUT:-300}" # claude -p 하드 제한(초)
@@ -15,7 +19,7 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 # 폴더 이름·하위 명령 출력 같은 믿을 수 없는 문자열을 로그에 찍기 전에 제어·서식(ESC·bidi 등) 문자를 지우고 줄여 출력한다. 실패하면 빈 문자열.
 clean_log() { printf '%s' "$1" | python3 -I -c 'import sys;sys.path.insert(0,sys.argv[1]);from textclean import safe_text;sys.stdout.write(safe_text(sys.stdin.buffer.read(),int(sys.argv[2])))' "$SCRIPTS" "${2:-80}" 2>/dev/null; }
 # 환경 오류: 로그 + 실패 횟수(첫 번째에 알림). 호출 쪽이 종료 코드를 정한다.
-env_fail() { log "환경 오류: $*"; fail_bump reflect env; }
+env_fail() { log "환경 오류: $*"; fail_bump reflect env; record_outcome reflect fail env; }
 envreason=""
 if [ "$lib_rc" -ne 0 ]; then envreason=${MARU_ENV_ERR:-도구/기억 폴더 확인 실패}
 elif [ -z "${MEM_SETTINGS:-}" ]; then envreason="jq 로 설정 JSON 을 만들지 못함(jq 실행 불가?)"
@@ -58,11 +62,17 @@ fi
 
 # ---- 실행 모드
 sid="$3"
-valid_sid "$sid" || { log "[run] session_id 형식 오류"; exit 10; }
+valid_sid "$sid" || { log "[run] session_id 형식 오류"; record_outcome reflect skip other; exit 10; }
 short="${sid:0:8}"
+OUTCOME_TAG="[$short] "
 tp=$(resolve_tp "$2"); rrc=$?
 if [ $rrc -eq 2 ]; then env_fail "[$short] python3 실행 실패로 transcript 경로를 확인하지 못함 — 재시도 대상"; exit 11; fi
-[ $rrc -eq 0 ] || { log "[$short] transcript 부적합(projects/ 밖이거나 일반 파일 아님)"; exit 10; }
+[ $rrc -eq 0 ] || { log "[$short] transcript 부적합(projects/ 밖이거나 일반 파일 아님)"; record_outcome reflect skip other; exit 10; }
+# 세션별 백오프: 연속 실패 2회째부터 다음 시도를 미룬다(lib.sh backoff_*). PreCompact 는 막지 않는다.
+bypass=""; { [ -n "${MARU_TICK_PRECOMPACT:-}" ] || [ -n "${MARU_SWEEP:-}" ]; } && bypass=1
+if [ -z "$bypass" ] && bo=$(backoff_until "$sid"); then
+  log "[$short] 연속 실패로 백오프 중 — 건너뜀"; record_outcome reflect skip backoff "$bo"; exit 13
+fi
 
 # 정리: 다이제스트 7일, 상태 파일 60일, 로그 1MB 초과 시 .1로 회전
 housekeeping() {
@@ -74,7 +84,7 @@ housekeeping() {
 
 # 잠금(lib.sh): 다른 회고가 끝나길 최대 15분 기다리고, 못 얻으면 아무것도 건드리지 않고 종료
 LOCK=$STATE/lock.d
-acquire_lock "$LOCK" 180 || { log "[$short] 잠금 실패 — 종료"; exit 12; }
+acquire_lock "$LOCK" 180 || { log "[$short] 잠금 실패 — 종료"; record_outcome reflect skip lock; exit 12; }
 trap 'housekeeping; rm -rf "$LOCK"' EXIT
 
 # 진행 상태: 이미 다이제스트한 transcript 줄 수
@@ -82,7 +92,7 @@ LINES_FILE=$STATE/$sid.lines
 from=$(cat "$LINES_FILE" 2>/dev/null); [[ "$from" =~ ^[0-9]+$ ]] || from=0
 dg=$DIGESTS/$sid.txt
 read -r turns total < <(python3 "$SCRIPTS/digest.py" "$tp" "$dg" --from-line "$from" 2>>"$LOG")
-if ! [[ "$turns" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]]; then log "[$short] digest 실패"; fail_bump reflect env; exit 11; fi
+if ! [[ "$turns" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]]; then log "[$short] digest 실패"; fail_bump reflect env; record_outcome reflect fail env; exit 11; fi
 if [ "$total" -lt "$from" ]; then   # transcript가 줄어듦 → 처음부터
   from=0
   read -r turns total < <(python3 "$SCRIPTS/digest.py" "$tp" "$dg" --from-line 0 2>>"$LOG")
@@ -91,8 +101,20 @@ fi
 # 세션 도중 tick 이 띄운 실행(MARU_TICK_RUN=1)과 처음 보는 세션은 MIN_TURNS 를 그대로 쓴다.
 need=$MIN_TURNS; [ "$from" -gt 0 ] && [ -z "${MARU_TICK_RUN:-}" ] && need=1
 if [ "$turns" -lt "$need" ]; then
-  log "[$short] 새 사용자 턴 ${turns}개(줄 $from→$total, 필요 $need) — 건너뜀"; exit 10
+  log "[$short] 새 사용자 턴 ${turns}개(줄 $from→$total, 필요 $need) — 건너뜀"; record_outcome reflect skip short; exit 10
 fi
+# 모델 호출 전 점검(둘 다 줄 수 파일을 앞으로 보내지 않고, 실패로 세지 않는다)
+# 1) 사용량 게이트(PreCompact 는 제외)  2) 기억 폴더 사전 검증: 이미 어긋나 있으면 호출해도 검증에서 되돌려지므로 호출하지 않는다.
+if [ -z "$bypass" ] && ! ug=$(usage_gate); then
+  log "[$short] 사용량 게이트 닫힘($ug) — 건너뜀"; record_outcome reflect skip usage; exit 13
+fi
+before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
+if ! pre=$(mem_validate "$MEM" "$before_n"); then
+  log "[$short] 기억 폴더 검증 실패 — 회고 건너뜀(고쳐질 때까지 계속 건너뜀): $pre"
+  notify_once invalid.reflect "$(T "기억 폴더가 서로 맞지 않아 회고를 건너뜁니다. 터미널에서 maru doctor 를 실행해 확인하세요." "The memory folder is inconsistent, so reflection is skipped. Run maru doctor in a terminal to check.")"
+  record_outcome reflect skip invalid; exit 13
+fi
+notify_clear invalid.reflect
 
 log "[$short] 회고 시작 (새 턴=$turns, 줄 $from→$total, model=$MODEL)"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
@@ -109,11 +131,10 @@ prompt="$(render_template "$(maru_localized "$MARU_HOME/prompts/reflect-prompt.m
 다이제스트 파일: $dg"
 # 되돌림 창을 최소화하려고 스냅샷은 모델 호출 직전에 뜬다(lib.sh txn_begin 설명 참고)
 TXN=$STATE/txn.reflect
-before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
 txn_begin "$MEM" "$TXN" || { env_fail "[$short] 기억 폴더 스냅샷 실패 — 건너뜀(MEM 경로·권한 확인)"; txn_end "$TXN"; rm -rf "$STAGE"; exit 11; }
 before=$(mem_snap "$MEM")
 # cwd는 저장소 밖의 빈 전용 폴더(lib.sh 설명 참고): cwd 아래 읽기는 자동 허용되므로 넓은 곳에서 돌리면 읽기 제한이 무력화됨
-mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { txn_end "$TXN"; rm -rf "$STAGE"; exit 11; }
+mkdir -p "$MARU_WORK" && cd "$MARU_WORK" || { txn_end "$TXN"; rm -rf "$STAGE"; record_outcome reflect fail env; exit 11; }
 # perl alarm으로 하드 타임아웃(macOS엔 timeout이 없음). 시간 초과 시 SIGALRM으로 종료 → rc=142
 # 읽기는 이 run의 다이제스트·memory·skills 로만 제한(dontAsk라 허용 목록 밖은 전부 거부)
 # 테스트 훅: REFLECT_FAKE_MODEL + REFLECT_ALLOW_FAKE=yes-i-am-testing 가 둘 다 있을 때만 claude 대신 실행(훅/launchd 환경엔 없음)
@@ -148,10 +169,15 @@ if [ -n "$reason" ]; then
   txn_restore "$MEM" "$TXN"; txn_end "$TXN"; rm -rf "$STAGE"; rm -f "$DKEYS"
   log "[$short] 되돌림(변경 폐기, 커밋 없음): $reason"
   fail_bump reflect   # 검증 거부도 실패로 센다
+  backoff_bump "$sid"   # 세션별 연속 실패(2회째부터 백오프)
+  fcode=other; [ $rc -eq 142 ] && fcode=timeout
+  record_outcome reflect fail "$fcode"
   exit 11
 fi
 txn_end "$TXN"
 fail_reset reflect
+backoff_reset "$sid"
+record_outcome reflect ok
 
 # staging -> skill-proposals/ (skills/에는 절대 쓰지 않는다. 사람이 검토 후 설치)
 today=$(date +%F)
@@ -231,7 +257,7 @@ while IFS= read -r f; do [ -n "$f" ] && paths+=("$MEM/${f#./}"); done <<< "$chan
 case "${summary:-변경 없음}" in "변경 없음"|"No changes") [ -n "$journaled" ] && summary="일지 기록";; esac
 if [ ${#paths[@]} -gt 0 ]; then hist_git add -A -- "${paths[@]}" >> "$LOG" 2>&1; fi
 if ! hist_git diff --cached --quiet -- "${paths[@]:-$MEM}" 2>/dev/null; then
-  hist_git commit -q -m "reflect: $short — ${summary:-회고}" -- "${paths[@]}" >> "$LOG" 2>&1 && log "[$short] 커밋 완료"
+  hist_git commit -q -m "reflect: $short — ${summary:-회고}" -- "${paths[@]}" >> "$LOG" 2>&1 && { hh=$(hist_head7); log "[$short] 커밋 완료${hh:+ hash=$hh}"; }
 else
   log "[$short] 변경 없음(커밋 안 함)"
 fi

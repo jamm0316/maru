@@ -1449,7 +1449,7 @@ rec=$(as_rc "$T/good" "ok-1" idle '{"cwd":"/tmp/z","background_tasks":[{"status"
 rec=$(as_rc "$T/good" "ok-1" busy "$(jq -nc --arg c "/$("$REAL_PY" -c 'print("가"*1100)')" '{cwd:$c}')"); check "cwd 가 크면 cwd 만 빠지고 rc 는 유지" [ "$("$REAL_PY" -I -c 'import json,sys;d=json.loads(sys.argv[1]);print("cwd" in d, d.get("rc"))' "$rec")" = "False True" ]
 
 echo "== 부작용·비밀 점검"
-check "실제 data/ 에 쓰지 않음(이 시험이 만든 파일 없음)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" \( -path '*/state/app/*' -o -path '*/projects/*' -o -name 'design-history.git' \) 2>/dev/null | head -1)" ]
+check "실제 data/ 에 쓰지 않음(이 시험이 만든 파일 없음)" [ -z "$(find "$REPO/data" -type f ! -name usage.json -newer "$T/good/python3" \( -path '*/state/app/*' -o -path '*/projects/*' -o -name 'design-history.git' \) 2>/dev/null | head -1)" ]
 check "실제 ~/.claude 에 쓰지 않음(임시 HOME 만 사용)" [ -d "$FAKE_HOME/.claude/projects" ]
 
 echo

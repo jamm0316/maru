@@ -170,7 +170,7 @@ check "맡긴 두 날짜가 설치됨" [ -f "$MEM/diary/$D1.md" ] && [ -f "$MEM/
 check "맡기지 않은 날짜는 설치 안 됨(로그에 거부 사유)" sh -c '[ ! -e "$1/diary/$2.md" ] && grep -q "이번에 맡기지 않은 날짜): $2" "$3"' _ "$MEM" "$D5" "$DATA/logs/dream.log"
 check "되돌림 없음" sh -c '! grep -q "되돌림" "$1"' _ "$DATA/logs/dream.log"
 check "hist 커밋에 diary 파일 포함" sh -c '"$1" --git-dir="$2/history.git" log --name-only --format=%s | grep -q "diary/$3.md"' _ "$REAL_GIT" "$DATA" "$D1"
-check "설치 뒤 마커가 현재 스냅샷과 같음(다음 실행은 건너뜀)" sh -c 'cd "$1" && cur=$(find . -type f -print0 | xargs -0 md5 -r | sort | md5 -q); [ "$cur" = "$(cat "$2")" ]' _ "$MEM" "$DATA/state/dream.marker"
+check "설치 뒤 마커가 v2 형식(본문 해시, journal/·diary/ 제외)으로 현재 본문과 같음" sh -c 'cd "$1" && cur=$(find . -type f -not -path "./journal/*" -not -path "./diary/*" -print0 | xargs -0 md5 -r | sort | md5 -q); [ "$(cut -d" " -f1,2 "$2")" = "v2 $cur" ]' _ "$MEM" "$DATA/state/dream.marker"
 check "stage 는 실행 뒤 지워짐" [ ! -e "$DATA/stage" ]
 # 같은 날짜는 두 번 맡기지 않고 덮어쓰지도 않는다
 printf '바뀐 제목\n\n%s 다른 내용이다.\n' "$BODY1" > "$T/dsrc/$D1.txt"; rm -f "$DATA/state/dream.marker"

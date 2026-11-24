@@ -257,7 +257,7 @@ check "15일 지난 일지는 archive 로, 13일은 그대로" [ -f "$MEM/journa
 check "dream 이 할 일을 반영" [ "$(cat "$TODOS")" = "maru|7|새벽 할 일|이어서 해줘" ]
 check "suggestions.txt 도 재생성" [ "$(cat "$SUGS")" = "이어서 해줘" ]
 check "hist 커밋에 archive 이동 포함" sh -c '"$1" --git-dir="$2/history.git" log --name-only --format=%s | grep -q "journal/archive/$3.md"' _ "$REAL_GIT" "$DATA" "$D15"
-check "보관 뒤 마커가 현재 스냅샷과 같음(다음 실행은 건너뜀)" sh -c 'cd "$1" && cur=$(find . -type f -print0 | xargs -0 md5 -r | sort | md5 -q); [ "$cur" = "$(cat "$2")" ]' _ "$MEM" "$DATA/state/dream.marker"
+check "보관 뒤 마커가 v2 형식(본문 해시, journal/·diary/ 제외)으로 현재 본문과 같음" sh -c 'cd "$1" && cur=$(find . -type f -not -path "./journal/*" -not -path "./diary/*" -print0 | xargs -0 md5 -r | sort | md5 -q); [ "$(cut -d" " -f1,2 "$2")" = "v2 $cur" ]' _ "$MEM" "$DATA/state/dream.marker"
 # 모델이 journal/ 을 건드리면 되돌림이고 보관도 하지 않음
 printf '# %s 일지\n' "$D20" > "$MEM/journal/$D20.md"; rm -f "$DATA/state/dream.marker"
 out=$(dream_run FAKE_TOUCH_JOURNAL="$D13.md"); rc=$?
@@ -975,7 +975,7 @@ fi
 echo "== 가드"
 # 실제 회고·정리 훅(이 시험과 동시에 돌 수 있음)이 만지는 경로(logs·state·digests·stage·history.git·할 일·추천·프로젝트 목록 등)는 감시에서 뺀다.
 # 시험 프로세스는 모두 MARU_DATA 가 임시 폴더로 강제돼 있고(맨 위 가드), 아래는 그 밖의 파일(maru.conf·profile.json·mac-inventory.md 등)이 바뀌지 않았는지 본다.
-check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name todo-src.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
+check "실제 data/ 에 쓰지 않음(훅이 만지는 경로 제외)" [ -z "$(find "$REPO/data" -type f ! -name usage.json -newer "$T/good/python3" ! -path "*/logs/*" ! -path "*/state/*" ! -path "*/digests/*" ! -path "*/stage/*" ! -path "*/history.git/*" ! -path "*/skills-view/*" ! -path "*/backups/*" ! -path "*/skill-proposals/*" ! -name todos.txt ! -name suggestions.txt ! -name projects.txt ! -name "projects.txt.bak" ! -name project-state.json ! -name workspaces.json ! -name todo-done.txt ! -name todo-src.txt ! -name ".*.??????" 2>/dev/null | head -1)" ]
 check "시험이 쓰는 데이터 폴더는 모두 임시 폴더 안" sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$DATA" "$T"
 echo
 if [ "$FAIL" = 0 ]; then echo "test-todos: OK ($N 항목)"; exit 0; else echo "test-todos: $FAIL/$N 실패"; exit 1; fi

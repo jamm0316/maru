@@ -34,6 +34,9 @@ MARU_TELEGRAM_SESSION=${MARU_TELEGRAM_SESSION:-maru-telegram}   # tmux 세션 �
 # 허용 목록: default(매 승인마다 멈춤, 가장 보수적) / acceptEdits / plan / auto. 그 외(빈 값·bypassPermissions·dontAsk 포함)는 거부. 장단점은 docs/manual.ko.md 「텔레그램으로 지시하기」의 「권한 모드」.
 MARU_TELEGRAM_PERMISSION_MODE=${MARU_TELEGRAM_PERMISSION_MODE-default}
 MARU_TELEGRAM_MAX_RESTARTS=${MARU_TELEGRAM_MAX_RESTARTS:-5}      # 1시간 안에 허용하는 자동 재시작 횟수(양의 정수)
+# 사용량 게이트(usage_gate): data/usage.json 의 사용률(%)이 이 값 이상이면 회고·정리의 모델 호출을 건너뛴다. 0 이면 그 기준을 끈다. 0~100 정수가 아니면 기본값을 쓴다.
+MARU_USAGE_GATE_5H=${MARU_USAGE_GATE_5H:-90}                      # 5시간 창 기준(%)
+MARU_USAGE_GATE_7D=${MARU_USAGE_GATE_7D:-95}                      # 7일 창 기준(%)
 # PATH 앞에 둘 디렉터리(시험에서는 MARU_PATH_PREFIX= 로 비울 수 있다)
 MARU_PATH_PREFIX=${MARU_PATH_PREFIX-/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin}
 [ -z "$MARU_PATH_PREFIX" ] || PATH="$MARU_PATH_PREFIX:$PATH"
@@ -77,6 +80,43 @@ acquire_lock() {
 
 # memory 디렉터리 스냅샷(파일별 md5): mem_snap <memdir>
 mem_snap() { (cd "$1" 2>/dev/null && find . -type f -print0 | xargs -0 md5 -r 2>/dev/null | sort); }
+# 기억 본문 해시(journal/·diary/ 제외): dream 의 "기억이 바뀌었나" 표지용. 일지·하루 회고만 늘어난 것은 본문 변경으로 보지 않는다.
+# 기억 본문 = journal/·diary/ 밖의 *.md 파일(MEMORY.md 포함)만. .DS_Store 같은 부스러기 파일은 해시에 넣지 않는다.
+mem_body_hash() { mem_snap "$1" | grep -v -e ' \./journal/' -e ' \./diary/' | grep -E ' \./.*\.md$' | md5 -q; }
+# 일지에서 epoch 이후 덧붙은 중요도 8 이상 항목 수: journal_high_since <memdir> <epoch>. journal/ 최상위 날짜 파일(일반 파일)의
+# `## HH:MM …` 블록 시각(파일 날짜 + 시각, 로컬)이 epoch 보다 뒤인 블록의 `- [한 일|결정|남은 일] (8~10) …` 줄을 센다.
+# 읽는 데 실패하면 보수적으로 1("있음")을 출력한다.
+journal_high_since() {
+  python3 -I - "$1/journal" "$2" <<'PY' 2>/dev/null || echo 1
+import datetime, os, re, stat, sys
+jd, since = sys.argv[1], int(sys.argv[2])
+if os.path.islink(jd) or not os.path.isdir(jd): print(0); sys.exit(0)
+ITEM = re.compile(r"^- \[(?:한 일|결정|남은 일)\] \((?:10|[89])\) \S")
+HEAD = re.compile(r"^## ([0-9]{2}):([0-9]{2})")
+NAME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})\.md")
+n = 0
+for name in os.listdir(jd):
+    m = NAME.fullmatch(name)
+    if not m: continue
+    try: d = datetime.date.fromisoformat(m.group(1))
+    except ValueError: continue
+    p = os.path.join(jd, name)
+    try:
+        st = os.lstat(p)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 262144 or st.st_mtime < since: continue
+        text = open(p, "rb").read().decode("utf-8")
+    except (OSError, UnicodeDecodeError): continue
+    ts = None
+    for line in text.split("\n"):
+        h = HEAD.match(line)
+        if h:
+            try: ts = datetime.datetime(d.year, d.month, d.day, int(h.group(1)), int(h.group(2))).timestamp()
+            except ValueError: ts = None
+            continue
+        if ts is not None and ts > since and ITEM.match(line.rstrip("\r")): n += 1
+print(n)
+PY
+}
 
 # ---- 트랜잭션: 모델 실행 직전 memory 를 복사하고 파일별 체크섬 목록 A 를 만든다.
 # 모델 종료 직후 목록 B 를 만든다. 되돌릴 대상은 diff(A,B), 즉 "이번 실행이 바꾼 경로"뿐이다.
@@ -179,6 +219,101 @@ fail_bump() {
   return 0
 }
 fail_reset() { rm -f "$STATE/fail.$1" "$STATE/fail.$1.notified"; }
+# 한 번만 알림: notify_once <이름> <문구>. $STATE/<이름>.notified 가 있으면 다시 알리지 않는다(notify_clear 가 지우면 다시 알린다).
+notify_once() {
+  local f="$STATE/$1.notified"
+  mkdir -p "$STATE" 2>/dev/null
+  [ -e "$f" ] && return 0
+  : > "$f"; notify_text "$2"
+  return 0
+}
+notify_clear() { rm -f "$STATE/$1.notified"; }
+
+# ---- 마지막 결과(기계가 읽는 한 줄) + 로그 한 줄: record_outcome <reflect|dream> <ok|skip|fail> [코드] [until epoch]
+# $STATE/last.<이름> 에 `epoch|결과|코드|until` 을 원자적으로(임시 파일 + mv) 덮어쓴다. 결과 ok|skip|fail,
+# 코드 = 빈 값(ok) | invalid | usage | short | backoff | timeout | lock | env | other (login 은 예약만 하고 지금은 내지 않는다). 심볼릭 링크인 STATE·대상 파일은 건드리지 않는다.
+# skip/fail 은 로그에 `skip code=<코드> [until=<epoch>]` / `fail code=<코드>` 한 줄도 남긴다(앞에 OUTCOME_TAG 를 붙일 수 있다). 항상 0.
+record_outcome() {
+  local name=$1 res=$2 code=${3:-} utl=${4:-} f tmp
+  case $res in
+    skip) type log >/dev/null 2>&1 && log "${OUTCOME_TAG:-}skip code=$code${utl:+ until=$utl}" ;;
+    fail) type log >/dev/null 2>&1 && log "${OUTCOME_TAG:-}fail code=$code" ;;
+  esac
+  f=$STATE/last.$name
+  [ -L "$STATE" ] && return 0
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  [ -L "$f" ] && return 0
+  tmp=$(mktemp "$STATE/.last.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s|%s|%s|%s\n' "$(date +%s)" "$res" "$code" "$utl" > "$tmp" 2>/dev/null; then mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"; else rm -f "$tmp"; fi
+  return 0
+}
+# last_outcome_is <이름> <결과> <코드>: 마지막 결과 파일이 그 결과·코드면 0
+last_outcome_is() {
+  local f=$STATE/last.$1 line r c
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  line=$(head -c 200 "$f" 2>/dev/null | head -1)
+  IFS='|' read -r _ r c _ <<< "$line"
+  [ "$r" = "$2" ] && [ "$c" = "$3" ]
+}
+
+# ---- 세션별 백오프(reflect): 연속 실패 2회째부터 30분×2^(n-2)(최대 6시간) 동안 그 세션의 다음 시도를 미룬다. 성공하면 지운다.
+# 파일 $STATE/<sid>.backoff = `연속실패수 until(epoch)`. backoff_bump <sid> / backoff_reset <sid> / backoff_until <sid>(기다려야 하면 until 을 출력하고 0)
+backoff_bump() {
+  local f=$STATE/$1.backoff n w=1800 i utl now
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  [ -L "$f" ] && return 0
+  n=""; [ -f "$f" ] && read -r n _ < "$f"; [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  n=$((n+1)); now=$(date +%s); utl=0
+  if [ "$n" -ge 2 ]; then
+    i=2; while [ "$i" -lt "$n" ] && [ "$w" -lt 21600 ]; do w=$((w*2)); i=$((i+1)); done
+    [ "$w" -gt 21600 ] && w=21600
+    utl=$((now+w))
+  fi
+  echo "$n $utl" > "$f" 2>/dev/null
+  return 0
+}
+backoff_reset() { rm -f "$STATE/$1.backoff"; }
+backoff_until() {
+  local f=$STATE/$1.backoff n u
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  read -r n u < "$f" 2>/dev/null
+  [[ "$u" =~ ^[0-9]+$ ]] || return 1
+  local now; now=$(date +%s)
+  [ "$u" -gt "$now" ] && [ $((u - now)) -le 21600 ] || return 1   # 최대 대기(6시간)보다 먼 미래 값은 시계가 거꾸로 갔던 것으로 보고 만료 처리
+  printf '%s' "$u"
+}
+
+# ---- 사용량 게이트: usage_gate. 열려 있으면(모델을 불러도 됨) 0, 닫혀 있으면 1 과 이유(`five_hour 92>=90`)를 출력한다.
+# 읽는 파일은 usage-status.sh(쓰는 쪽)·앱과 같은 <저장소>/data/usage.json 이다(MARU_DATA 와 무관: 저장소 = 이 lib.sh 의 상위 폴더).
+# ({"v":1,"at":epoch,"five_hour":{"pct","resets_at"},"seven_day":{...}})을 읽는다.
+# 파일이 없음·읽을 수 없음·형식 오류·at 이 6시간보다 오래됨·python3 없음이면 열린다. resets_at 이 지난 창은 0% 로 본다.
+# 기준 MARU_USAGE_GATE_5H(기본 90)·MARU_USAGE_GATE_7D(기본 95): 사용률 >= 기준이면 닫힌다. 0 이면 그 기준은 끈다. 0~100 정수가 아니면 기본값.
+usage_gate() {
+  local t5=${MARU_USAGE_GATE_5H:-90} t7=${MARU_USAGE_GATE_7D:-95} out
+  case $t5 in ''|*[!0-9]*) t5=90;; *) if [ ${#t5} -le 3 ] && [ $((10#$t5)) -le 100 ]; then t5=$((10#$t5)); else t5=90; fi;; esac
+  case $t7 in ''|*[!0-9]*) t7=95;; *) if [ ${#t7} -le 3 ] && [ $((10#$t7)) -le 100 ]; then t7=$((10#$t7)); else t7=95; fi;; esac
+  command -v python3 >/dev/null 2>&1 || return 0
+  out=$(python3 -I - "$_maru_lib/../data/usage.json" "$t5" "$t7" <<'PY' 2>/dev/null
+import json, math, sys, time
+path, t5, t7 = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+def num(v): return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+try:
+    with open(path, "rb") as f: o = json.loads(f.read(8192).decode("utf-8"))
+    now = time.time()
+    if not isinstance(o, dict) or o.get("v") != 1 or not num(o.get("at")) or now - o["at"] > 6 * 3600: sys.exit(0)
+    for k, thr in (("five_hour", t5), ("seven_day", t7)):
+        w = o.get(k)
+        if thr <= 0 or not isinstance(w, dict) or not num(w.get("pct")) or not num(w.get("resets_at")): continue
+        pct = 0 if w["resets_at"] <= now else w["pct"]
+        if pct >= thr:
+            print("%s %g>=%d" % (k, pct, thr)); break
+except Exception:
+    pass
+PY
+  ) || return 0
+  [ -n "$out" ] || return 0
+  printf '%s' "$out"; return 1
+}
 
 # ---- 삭제 가드(reflect·dream 공용): apply_deletions <memdir> <list>. 항목 하나라도 거부되거나 한도를 넘으면
 # 아무것도 지우지 않고 1을 반환한다(호출 쪽이 run 전체를 되돌림). 전부 통과하면 지우고 0.
@@ -977,6 +1112,9 @@ if os.path.isdir(root):
         os.makedirs(os.path.join(out, n)); shutil.copyfile(f, os.path.join(out, n, "SKILL.md"))
 PY
 }
+
+# 가장 최근 hist 커밋의 짧은 해시(7자). 못 구하면 빈 출력. 로그 줄 `커밋 완료 hash=<7자>` 용.
+hist_head7() { hist_git rev-parse --short=7 HEAD 2>/dev/null | head -1 | tr -cd '0-9a-f'; }
 
 # 변경 이력(기억 폴더만 추적하는 별도 git). scripts/hist 는 읽기 전용 명령만 열어 주고, 쓰기는 이 함수로만 한다.
 # git-dir: $MARU_DATA/history.git, work-tree: Claude 설정 폴더. 허용 목록(info/exclude)은 매번 재생성한다.

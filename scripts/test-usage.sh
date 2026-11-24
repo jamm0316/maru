@@ -45,7 +45,7 @@ check "five_hour pct·resets_at" [ "$(pyj "$UJ" '" ".join(map(str,[d["five_hour"
 check "seven_day pct" [ "$(pyj "$UJ" 'd["seven_day"]["pct"]')" = 24 ]
 check "at 이 지금 근처" [ "$(pyj "$UJ" 'abs(d["at"]-'"$now"')<=5')" = True ]
 check "임시 파일이 남지 않음" [ -z "$(ls -A "$R/data" | grep -v '^usage.json$')" ]
-check "테스트 폴더 밖 실제 data/ 에는 쓰지 않음" [ ! -e "$REPO/data/usage.json" ] || [ "$(stat -f %m "$REPO/data/usage.json")" -lt "$now" ]
+check "복사본은 자기 위치 기준 <복사본>/data 에만 씀(실제 저장소 경로는 보지 않음)" sh -c '[ "$(find "$1" -name usage.json | sort)" = "$2" ] && grep -q "\"pct\":39.4" "$2"' _ "$T" "$UJ"
 echo "== 덮어쓰기 규칙"
 cp "$UJ" "$T/before.json"
 us '{"model":{"id":"x"}}' >/dev/null; check "rate_limits 없음: 기존 파일 유지" cmp -s "$UJ" "$T/before.json"

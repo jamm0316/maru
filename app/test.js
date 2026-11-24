@@ -65,6 +65,12 @@ t('로그 파서 reflect + 잘린 첫 줄', () => {
   assert.deepStrictEqual(e.map(x => x.code), ['reflect.quests', 'reflect.commit', 'reflect.noChange', 'reflect.rollback']);
   assert.strictEqual(e[0].n, 4);
 });
+t('로그 파서: 커밋 완료 hash=… 와 skip/fail 고정 형식 줄', () => {
+  const r = ['2026-11-16 09:22:19 [e78a16cc] 커밋 완료 hash=abc1234', '2026-11-16 09:23:00 [e78a16cc] skip code=usage', '2026-11-16 09:24:00 [e78a16cc] fail code=other'].join('\n');
+  assert.deepStrictEqual(L.parseLogEvents(r, 'reflect').map(x => x.code), ['reflect.commit']);
+  const d = ['2026-11-16 06:12:19 [dream] 커밋 완료 hash=abc1234', '2026-11-16 06:13:00 [dream] skip code=usage', '2026-11-16 06:14:00 [dream] fail code=other'].join('\n');
+  assert.deepStrictEqual(L.parseLogEvents(d, 'dream').map(x => x.code), ['dream.commit']);
+});
 t('mergeBriefing 최신순·개수 제한', () => {
   const m = L.mergeBriefing([L.parseLogEvents(dream, 'dream'), L.parseLogEvents(refl, 'reflect')], 3);
   assert.strictEqual(m.length, 3); assert.strictEqual(m[0].at, '2026-11-16 09:26:00'); assert.ok(m[0].at >= m[1].at && m[1].at >= m[2].at);

@@ -43,6 +43,14 @@ macOS(launchd, BSD `stat`/`md5` 사용), `claude`(Claude Code, 구독 로그인)
 `scripts/lib.sh` 상단 블록의 값은 환경변수나 `data/maru.conf`(`VAR=${VAR:-값}` 형식)로 덮어씁니다. `CLAUDE_CONFIG_DIR`도 따릅니다(launchd plist에는 설치 때의 값이 기록됩니다).
 - `MARU_SKILL_AUTOINSTALL=1`(선택, 기본 꺼짐): install.sh가 `~/.claude/CLAUDE.md` 블록에 "에이전트가 검토 후 문제없으면 직접 설치하고 알린다"는 문구를 씁니다. **위험**: 세션에 주입된 텍스트(웹페이지·붙여넣은 문서)가 스킬 제안으로 흘러들어 사용자 승인 없이 설치되면, 그 스킬은 모든 프로젝트에서 로드됩니다. 켜기 전에 이 위험을 이해하고 설치 후 `install.sh`를 다시 실행하세요.
 
+### 사용량 아끼기: 회고·정리를 건너뛰는 경우
+회고(`reflect.sh`)와 새벽 정리(`dream.sh`)는 구독 사용량을 쓰는 모델 호출입니다. 아래 경우에는 호출하지 않고 건너뜁니다. 건너뛴 이유는 로그에 `skip code=<코드>` 로 남습니다.
+- **기억 폴더가 어긋나 있을 때(`invalid`)**: 회고는 모델을 부르기 전에 기억 폴더(`MEMORY.md` 색인과 기억 파일)를 검증하고, 이미 어긋나 있으면 호출하지 않습니다(호출해도 검증에서 되돌려지기 때문). 알림은 한 번만 뜨고, 고쳐지면 다시 돌아갑니다. `maru doctor` 가 이유를 보여 줍니다. 새벽 정리는 색인을 고칠 수 있으므로 이 검사 없이 호출한 뒤 결과를 검증합니다.
+- **연속 실패 뒤(`backoff`)**: 같은 세션이 2번 연속 실패하면 다음 시도를 30분 × 2^(n−2)(최대 6시간) 미룹니다. 성공하면 풀립니다. 세션 종료·30분 간격(Stop) 시도는 이 대기 동안 미뤄지고, 새벽 정리의 sweep(최근 36시간 안의 놓친 세션 보충)과 PreCompact 훅(대화가 압축되기 직전)의 회고는 마지막 기회라 이 대기를 무시합니다(실패는 그대로 세고 대기를 늘립니다). sweep 창 밖의 대화 기록은 다시 시도되지 않습니다.
+- **사용량이 한도에 가까울 때(`usage`)**: 앱이 띄운 세션이 기록하는 `data/usage.json` 의 5시간 창이 90% 이상이거나 7일 창이 95% 이상이면 건너뜁니다(진행 기록은 그대로고 실패로 세지 않습니다. 세션 종료·Stop 시도는 미뤄지며, 새벽 정리의 sweep 이 창 안의 세션을 이어서 처리합니다). 파일이 없거나 6시간보다 오래됐으면, 창의 리셋 시각이 지났으면(0%로 봄) 막지 않습니다. 새벽 정리 본체도 같은 기준이지만 이틀 연속으로 건너뛰지는 않습니다. PreCompact 회고와 새벽 정리의 sweep 은 이 기준을 무시합니다(기억 폴더 검증은 그대로 받습니다). 읽는 파일은 `<저장소>/data/usage.json` 하나입니다(`MARU_DATA` 를 바꿔도 같은 파일). 기준은 `MARU_USAGE_GATE_5H`(기본 90)·`MARU_USAGE_GATE_7D`(기본 95)로 바꾸며(환경변수 또는 `data/maru.conf`), `0` 이면 그 기준을 끕니다. 0~100 정수가 아닌 값은 기본값으로 처리합니다.
+- **새벽 정리에서 할 일이 없을 때**: 기억 본문(`journal/`·`diary/` 제외)이 지난 정리 뒤 그대로이고, 하루 회고를 맡길 날짜가 없고, 그 뒤 중요도 8 이상 일지 항목이 새로 생기지 않았으면 모델을 부르지 않습니다. 이때도 모델이 필요 없는 일지 정리(오래된 일지 보관, 완료 표시 반영)는 합니다.
+- **결과 파일**: `data/state/last.reflect`, `data/state/last.dream` 에 한 줄 `epoch|결과|코드|until` 로 마지막 결과가 남습니다(결과 `ok|skip|fail`, 코드 `invalid|usage|short|backoff|timeout|lock|env|other`(`login` 은 예약만 해 두었고 지금은 쓰지 않습니다), until 은 다시 시도할 수 있는 시각 또는 빈 값). `maru doctor` 가 읽기 쉽게 보여 줍니다.
+
 ## 텔레그램으로 지시하기
 폰의 텔레그램에서 봇에게 말하면 맥에서 도는 마루가 받아 일하고 같은 대화방으로 답합니다. Claude Code의 **채널(channels)** 기능(연구 미리보기)을 쓰며, `scripts/telegram.sh`가 tmux 안에서 상시 세션을 관리합니다. 근거: https://code.claude.com/docs/en/channels.md , https://code.claude.com/docs/en/channels-reference.md , https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram
 

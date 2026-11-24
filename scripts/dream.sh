@@ -1,6 +1,7 @@
 #!/bin/bash
 # 매일 1회 정리(dream): 놓친 세션 회고(sweep) → 기억 정리(consolidate) → 커밋
 # 테스트용: dream.sh --apply-deletions <memdir> <delete.txt>  (삭제 가드만 실행)
+# 결과는 data/state/last.dream 에도 `epoch|ok|skip|fail|코드|until` 한 줄로 남는다(lib.sh record_outcome).
 MODEL="${DREAM_MODEL:-sonnet}"            # 정리에 쓸 모델
 CLAUDE_TIMEOUT="${DREAM_TIMEOUT:-600}"    # claude -p 하드 제한(초)
 MAX_SWEEP="${DREAM_MAX_SWEEP:-8}"         # 한 번에 회고할 최대 세션 수
@@ -20,7 +21,7 @@ log() { echo "$(date '+%F %T') [dream] $*" >> "$LOG"; }
 if [ "${1:-}" = "--apply-deletions" ]; then apply_deletions "$2" "$3"; exit $?; fi
 
 # 환경 오류: 로그 + 실패 횟수(첫 번째에 알림) 후 종료. 이 경우 어떤 세션도 처리 완료로 표시하지 않는다.
-env_fail() { log "환경 오류: $*"; echo "마루 dream: $*" >&2; fail_bump dream env; }
+env_fail() { log "환경 오류: $*"; echo "마루 dream: $*" >&2; fail_bump dream env; record_outcome dream fail env; }
 envreason=""
 if [ "$lib_rc" -ne 0 ]; then envreason=${MARU_ENV_ERR:-도구/기억 폴더 확인 실패}
 elif [ -z "${MEM_SETTINGS:-}" ]; then envreason="jq 로 설정 JSON 을 만들지 못함(jq 실행 불가?)"
@@ -34,6 +35,7 @@ if [ "$SWEEP_HOURS" != bad ] && [ ${#SWEEP_HOURS} -le 4 ]; then SWEEP_HOURS=$((1
 if [ "$SWEEP_HOURS" = bad ] || [ "$SWEEP_HOURS" -lt 1 ] || [ "$SWEEP_HOURS" -gt 720 ]; then
   log "MARU_SWEEP_HOURS 값이 올바르지 않음(1~720 정수): ${MARU_SWEEP_HOURS:-} — 종료"
   echo "MARU_SWEEP_HOURS 는 1~720 사이 정수여야 합니다: ${MARU_SWEEP_HOURS:-}" >&2
+  record_outcome dream fail env
   exit 2
 fi
 
@@ -61,7 +63,7 @@ while IFS= read -r f; do
   [ "$cnt" -ge "$MAX_SWEEP" ] && break
   cnt=$((cnt+1))
   log "sweep $cnt: ${sid:0:8} (줄 ${done_l}→${total})"
-  bash "$SCRIPTS/reflect.sh" --run "$f" "$sid" >> "$LOGS/reflect.log" 2>&1 </dev/null
+  MARU_SWEEP=1 bash "$SCRIPTS/reflect.sh" --run "$f" "$sid" >> "$LOGS/reflect.log" 2>&1 </dev/null
   rrc=$?
   # 성공(0)이거나 의도적 건너뜀(10)일 때만 처리 완료로 표시한다. 실패(11)·잠금 시간 초과(12)는 다음 실행에서 재시도.
   case $rrc in
@@ -71,15 +73,42 @@ while IFS= read -r f; do
 done <<< "$cands"
 log "sweep 끝: 후보 ${found}개, 건너뜀 ${skipped}개, 처리 ${cnt}개(상한 $MAX_SWEEP)"
 
-# ---- b. Consolidate: 마지막 정리 이후 기억이 안 바뀌었으면 건너뜀
-cur=$(mem_snap "$MEM" | md5 -q)
-if [ "$cur" = "$(cat "$MARKER" 2>/dev/null)" ]; then log "기억 변경 없음 — 정리 건너뜀"; exit 0; fi
+# ---- b. Consolidate: 모델 호출(sonnet)이 필요한 경우에만 부른다.
+# 마커 = `v2 <기억 본문 해시> <epoch>`(해시는 journal/·diary/ 제외, epoch 는 그 정리를 시작한 때에서 1분 앞). 옛 형식(해시만)은 한 번 정상 실행시킨다.
+# 다음을 모두 만족하면 모델을 부르지 않는다: (a) 본문이 마커 이후 안 바뀜 (b) 하루 회고를 맡길 날짜가 없음 (c) 마커 이후 덧붙은 중요도 8 이상 일지 항목이 없음.
+cur=$(mem_body_hash "$MEM")
+mk=$(cat "$MARKER" 2>/dev/null); mk_hash=""; mk_at=0
+mk_re='^v2 ([0-9a-f]{32}) ([0-9]+)$'
+if [[ "$mk" =~ $mk_re ]]; then mk_hash=${BASH_REMATCH[1]}; mk_at=${BASH_REMATCH[2]}; fi
+if [ -n "$mk_hash" ] && [ "$cur" = "$mk_hash" ] && [ -z "$(diary_days_text)" ] && [ "$(journal_high_since "$MEM" "$mk_at")" = 0 ]; then
+  log "기억 변경 없음 — 정리 건너뜀"
+  # 모델 출력에 기대지 않는 정리만 한다: 일지 완료 표시 반영·오래된 일지 보관(기억 쓰기 잠금 아래에서)
+  RLOCK=$STATE/lock.d
+  acquire_lock "$RLOCK" 180 || { log "reflect 잠금 실패 — 일지 정리 건너뜀"; record_outcome dream skip lock; exit 0; }
+  trap 'rm -rf "$RLOCK" "$DLOCK"; rotate_log "$LOG"' EXIT
+  apply_todo_marks
+  archive_journal 14
+  hist_git add -A -- "$MEM" >> "$LOG" 2>&1
+  if ! hist_git diff --cached --quiet -- "$MEM" 2>/dev/null; then
+    hist_git commit -q -m "dream: $(date +%F) — 일지 정리" -- "$MEM" >> "$LOG" 2>&1 && log "일지 정리 커밋 hash=$(hist_head7)"
+  fi
+  record_outcome dream ok
+  exit 0
+fi
+
+# 사용량 게이트: 한도에 가까우면 모델을 부르지 않는다. 바로 전 시도가 사용량으로 건너뛴 것이면 이번에는 그대로 실행한다(이틀 연속 건너뛰지 않음).
+if last_outcome_is dream skip usage; then
+  log "어제도 사용량으로 건너뛰어 이번에는 게이트와 무관하게 실행"
+elif ! ug=$(usage_gate); then
+  log "사용량 게이트 닫힘($ug) — 정리 건너뜀"; record_outcome dream skip usage; exit 0
+fi
 
 # 기억 쓰기는 reflect와 같은 잠금을 쥐고 한다(최대 15분 대기)
 RLOCK=$STATE/lock.d
-acquire_lock "$RLOCK" 180 || { log "reflect 잠금 실패 — 정리 건너뜀"; exit 0; }
+acquire_lock "$RLOCK" 180 || { log "reflect 잠금 실패 — 정리 건너뜀"; record_outcome dream skip lock; exit 0; }
 trap 'rm -rf "$RLOCK" "$DLOCK"; rotate_log "$LOG"' EXIT
 rm -rf "$STAGE"; mkdir -p "$STAGE"
+CONSOLIDATE_AT=$(( $(date +%s) / 60 * 60 - 60 ))   # 마커 epoch(분 단위로 기록되는 일지 블록 시각과 비교하므로 한 분 앞)
 TXN=$STATE/txn.dream
 before_n=$(find "$MEM" -maxdepth 1 -type f -name '*.md' ! -name MEMORY.md | wc -l | tr -d ' ')
 DIARY_DAYS=$(diary_days_text)   # 하루 회고를 맡길 날짜(셸이 고른다, 최대 2개)
@@ -124,13 +153,16 @@ if [ -n "$reason" ]; then
   txn_restore "$MEM" "$TXN"
   log "되돌림(변경 폐기, 커밋·삭제 없음): $reason"
   fail_bump dream
+  fcode=other; [ $rc -eq 142 ] && fcode=timeout
+  record_outcome dream fail "$fcode"
 else
   # 모델의 journal/ 변조 검사가 끝난 뒤에 셸이 오래된 일지를 archive/ 로 옮긴다(검사에 걸리지 않는 순서). 보관 뒤 스냅샷으로 마커를 기록한다.
   apply_todo_marks   # 사용자가 표시한 완료/안 함을 일지에 한 번만 반영(모델의 journal 변조 검사 뒤, 보관·마커 기록 앞)
   archive_journal 14
   apply_diary "$STAGE/diary" "$DIARY_DAYS"   # 하루 회고 설치: 모델의 diary/ 변조 검사 뒤(검사에 걸리지 않는 순서), 마커 기록·hist 커밋 앞(lib.sh)
-  mem_snap "$MEM" | md5 -q > "$MARKER"
+  printf 'v2 %s %s\n' "$(mem_body_hash "$MEM")" "$CONSOLIDATE_AT" > "$MARKER"
   fail_reset dream
+  record_outcome dream ok
 fi
 txn_end "$TXN"
 if [ -z "$reason" ]; then   # 추천·할 일 목록: 기억 트랜잭션과 독립(lib.sh)
@@ -149,7 +181,7 @@ promoted=$(printf '%s\n' "$out" | grep -m1 -E '^(승격|Promoted):' | cut -c1-30
 [ -n "$promoted" ] && log "일지 승격 보고 — $promoted"
 hist_git add -A -- "$MEM" >> "$LOG" 2>&1
 if ! hist_git diff --cached --quiet -- "$MEM" 2>/dev/null; then
-  hist_git commit -q -m "dream: $(date +%F) — ${summary:-정리}" -- "$MEM" >> "$LOG" 2>&1 && log "커밋 완료"
+  hist_git commit -q -m "dream: $(date +%F) — ${summary:-정리}" -- "$MEM" >> "$LOG" 2>&1 && log "커밋 완료 hash=$(hist_head7)"
 else
   log "변경 없음(커밋 안 함)"
 fi
