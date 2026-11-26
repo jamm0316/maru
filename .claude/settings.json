@@ -86,6 +86,11 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/agent-state.sh busy"
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/talk-log.sh pre",
+            "timeout": 5
           }
         ]
       }
@@ -96,6 +101,11 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/agent-state.sh busy"
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/talk-log.sh post",
+            "timeout": 5
           }
         ]
       }
@@ -110,6 +120,28 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/talk-log.sh assistant",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/talk-log.sh start",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/talk-log.sh compact",
             "timeout": 5
           }
         ]

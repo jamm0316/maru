@@ -4248,6 +4248,12 @@ function readParseStore(text) {
 }
 // 저장된 상태가 없는 작업 공간의 기본값: 읽기 화면이 켜져 있고 터미널은 접힌 띠다. 저장된 상태가 있으면 그것을 따른다
 function readDefault() { return { on: true, w: READ_TERM_DEFAULT, rail: true }; }
+// 앱을 켤 때의 배치: 저장값에서 터미널 폭만 잇고, 읽기 화면 켜짐과 터미널 접힘은 언제나 기본값(둘 다 켜짐)으로 시작한다. 실행 중에 바꾼 배치는 그 실행 동안만 유지된다
+function readStoreStart(store) {
+  const out = {}; const base = store && typeof store === 'object' && !Array.isArray(store) ? store : {};
+  for (const id of Object.keys(base)) { const v = base[id]; if (!v || typeof v !== 'object') continue; out[id] = { ...readDefault(), w: panelNum(v.w, READ_TERM_DEFAULT) }; }
+  return out;
+}
 // store 에 id 의 상태 일부를 바꾼 새 객체. 상한을 넘으면 앞쪽(오래된) 것부터 뺀다
 function readStoreSet(store, id, patch) {
   const base = store && typeof store === 'object' ? store : {}; const cur = base[id] || readDefault(); const p = patch && typeof patch === 'object' ? patch : {};
@@ -4293,9 +4299,31 @@ function isClaudeFront(procName, knownName) {
 //  포커스 알림 ESC[I / ESC[O, 커서 위치 보고 ESC[<숫자>;<숫자>R, 장치 속성 응답 ESC[?…c / ESC[>…c(숫자와 ; 만), 상태 보고 ESC[0n~ESC[3n.
 // isUserInput·draftStep 은 CSI 를 넓게 걸러서(방향키 ESC[A 까지 응답으로 본다) 이 판정에 쓰지 않는다. 빈 문자열·문자열이 아닌 값은 false
 // 단 ESC[1;2R ~ ESC[1;8R 은 Shift·Ctrl·Alt 와 F3 을 함께 누른 입력과 같은 모양이라 입력으로 본다(실제 보고가 1행 2~8열일 때 입력으로 치는 것은 안전한 쪽의 오판)
-const TERM_REPLY_RE = /^(?:\x1b\[[IO]|\x1b\[(?!1;[2-8]R)\d{1,5};\d{1,5}R|\x1b\[[?>][0-9;]{0,32}c|\x1b\[[0-3]n)+$/;
+// 더한 응답(Claude Code 가 시작할 때 묻는 것): XTVERSION 답 ESC P > | 글 ESC \, DECRPM 답 ESC[?번호;0~4$y, OSC 색 답(10·11·12·4;번호), kitty 키보드 답 ESC[?숫자u
+const TERM_REPLY_ITEM = /\x1b\[[IO]|\x1b\[(?!1;[2-8]R)\d{1,5};\d{1,5}R|\x1b\[[?>][0-9;]{0,32}c|\x1b\[[0-3]n|\x1bP>\|[\x20-\x7e]{0,64}\x1b\\|\x1b\[\?\d{1,5};[0-4]\$y|\x1b\](?:10|11|12|4;\d{1,3});rgb:[0-9a-fA-F/]{1,32}(?:\x07|\x1b\\)|\x1b\[\?\d{0,3}u/;
+const TERM_REPLY_RE = new RegExp('^(?:' + TERM_REPLY_ITEM.source + ')+$');
 function isTermReply(data) {
   return typeof data === 'string' && data.length > 0 && data.length <= 4096 && TERM_REPLY_RE.test(data);
+}
+// 단추 없이 움직이기만 한 SGR 마우스 보고(마우스 모드 1003): b 에서 움직임 비트(32)가 켜지고 아래 두 비트가 3(눌린 단추 없음)이고 휠 비트(64)가 꺼진 것. 수식 키 비트(4·8·16)는 상관없다. 클릭·놓기(m)·끌기·휠은 아니다
+const MOUSE_MOVE_ITEM = /\x1b\[<(\d{1,3});\d{1,5};\d{1,5}M/y;
+const TERM_REPLY_STICKY = new RegExp(TERM_REPLY_ITEM.source, 'y');
+// 사용자 입력이 아닌 글인가(순수): 전체가 터미널 자동 응답과 움직임 보고의 이어 붙임일 때만 true(둘이 섞여도 된다). markIn 을 건너뛸지 가리는 데 쓴다
+function isPassiveTermInput(data) {
+  if (typeof data !== 'string' || data.length === 0 || data.length > 4096) return false;
+  let pos = 0;
+  while (pos < data.length) {
+    TERM_REPLY_STICKY.lastIndex = pos;
+    let m = TERM_REPLY_STICKY.exec(data);
+    if (m) { pos += m[0].length; continue; }
+    MOUSE_MOVE_ITEM.lastIndex = pos;
+    m = MOUSE_MOVE_ITEM.exec(data);
+    if (!m) return false;
+    const b = Number(m[1]);
+    if (!(b < 128 && (b & 32) && (b & 3) === 3 && !(b & 64))) return false;
+    pos += m[0].length;
+  }
+  return true;
 }
 // 대화 기록 파일의 끝부분 글 -> { role, at(밀리초) } | null. 마지막 비지 않은 줄 하나만 본다(talkLine 과 같은 검증). 해석하지 못하면 null.
 // atStart: 이 글이 파일의 맨 처음부터인가(아니면 첫 줄이 잘렸을 수 있으므로 줄이 하나뿐일 때 믿지 않는다). at 은 기록의 초 단위 값을 밀리초로 바꾼다(상태 기록의 atMs 와 같은 단위)
@@ -4308,6 +4336,19 @@ function talkLast(text, atStart) {
   if (i === 0 && atStart !== true) return null; // 앞이 잘려 줄 일부일 수 있다
   const c = talkLine(lines[i]);
   return c ? { role: c.role, at: c.at * 1000 } : null;
+}
+// 마지막 두 줄: { role, at(밀리초), prevRole, prevAt } | null. 앞 줄이 없거나 잘렸을 수 있거나(atStart 가 아니고 첫 줄) 해석하지 못하면 prevRole·prevAt 은 null. 마지막 줄은 talkLast 와 같은 규칙
+function talkLastTwo(text, atStart) {
+  const last = talkLast(text, atStart);
+  if (!last) return null;
+  const lines = text.split('\n');
+  let i = lines.length - 1;
+  while (i >= 0 && !lines[i].trim()) i--;
+  let j = i - 1;
+  while (j >= 0 && !lines[j].trim()) j--;
+  let prev = null;
+  if (j >= 0 && !(j === 0 && atStart !== true)) prev = talkLine(lines[j]);
+  return { role: last.role, at: last.at, prevRole: prev ? prev.role : null, prevAt: prev ? prev.at * 1000 : null };
 }
 // 입력창이 글을 터미널에 넣어도 되는가. 보내기를 통과하는 조합은 "모든 조건이 맞을 때" 하나뿐이다. 애매하면 거부한다.
 // 원칙: "방금 답변이 정상으로 끝났고 그 뒤로 터미널에 아무 입력도 없었다"가 확인될 때만 보낸다.
@@ -4322,7 +4363,7 @@ const READ_TALK_SLACK_MS = 15000;
 // 턴이 이보다 길다는 가정이다. 틀리면(더 짧은 턴) 잘못 거부하는 쪽이라 안전하다
 const READ_IN_SLACK_MS = 2000; // idle 기록과 assistant 줄 시각이 이 안이어야 같은 턴의 끝으로 본다(Stop 훅이 둘을 거의 동시에 쓴다)
 function readCanSend(c) {
-  const { hasTerm, cc, procName, knownName, hooked, ux, bg, bracketed, quietMs, dirty, rawState, recAt, talkRole, talkAt, inAt, startAt } = c && typeof c === 'object' ? c : {};
+  const { hasTerm, cc, procName, knownName, hooked, ux, bg, bracketed, quietMs, dirty, rawState, recAt, talkRole, talkAt, inAt, startAt, talkUserAt } = c && typeof c === 'object' ? c : {};
   if (hasTerm !== true || cc !== true) return { ok: false, reason: 'nosession' };
   if (!isClaudeFront(procName, knownName)) return { ok: false, reason: 'notclaude' };
   if (ux === 'waiting') return { ok: false, reason: 'waiting' };
@@ -4339,7 +4380,7 @@ function readCanSend(c) {
   if (!Number.isFinite(recAt) || !Number.isFinite(startAt) || recAt < startAt) return { ok: false, reason: 'first' }; // 시각이 없거나, 이 pty 가 뜨기 전의 낡은 기록
   if (talkRole === null || talkRole === undefined) return { ok: false, reason: 'first' }; // 대화 기록이 없거나 읽지 못했다
   if (talkRole !== 'assistant' || !Number.isFinite(talkAt) || Math.abs(talkAt - recAt) > READ_TALK_SLACK_MS) return { ok: false, reason: 'failed' }; // 정상 종료(Stop)가 아니면 assistant 줄이 그 시각에 없다
-  if (!Number.isFinite(inAt) || inAt > recAt - READ_IN_SLACK_MS) return { ok: false, reason: 'touched' }; // 답변이 끝난 뒤 터미널에 입력이 있었다(읽기 입력 자신의 쓰기 포함)
+  if (!Number.isFinite(inAt) || (inAt > recAt - READ_IN_SLACK_MS && !(Number.isFinite(talkUserAt) && talkUserAt <= talkAt && inAt < talkUserAt + 1000 && inAt < recAt && talkUserAt >= startAt - 1000))) return { ok: false, reason: 'touched' }; // 답변이 끝난 뒤 터미널에 입력이 있었다(읽기 입력 자신의 쓰기 포함)
   if (!(Number.isFinite(quietMs) && quietMs >= READY_QUIET_MS)) return { ok: false, reason: 'settling' };
   if (dirty !== false) return { ok: false, reason: 'draft' };
   return { ok: true };
@@ -4380,6 +4421,18 @@ function readCanSendFirst(c) {
 // 경계선·커서·선택 창 흔적은 lines 로, 비어 있음과 글 비교는 plain 으로 본다. text 가 없으면 사전 확인(상자 안이 비어 있고 커서가 입력줄 표시 줄에 있어야 한다), 있으면 사후 확인(붙여넣은 글이 상자 안에 보여야 한다) -> { ok, why }
 const PB_MAX_LINES = 1000; const PB_MAX_LINE = 2000; const PB_BOX_MAX = 30; const PB_FOLD_MIN = 800;
 const pbNoWs = (s) => s.replace(/\s+/g, '');
+// 상자 밖의 선택 창 흔적: 커서 표시가 붙은 번호 선택지, 숫자+쌍점 줄이 둘 이상 이어진 설문. 이유 문자열 또는 null(promptBoxCheck·promptBoxImages 가 같이 쓴다)
+function pbOutsideTrace(lines, a, b) {
+  let run = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (i >= a && i <= b) { run = 0; continue; }
+    const t = lines[i].replace(/^[\s│]+/, '');
+    if (/^[❯>]\s*\d+\s*[.)]/.test(t)) return 'choice';
+    if ((t.match(/(?:^|\s)\d+:\s/g) || []).length >= 2) return 'survey'; // 한 줄에 `숫자: ` 가 둘 이상
+    if (/^\d+:\s/.test(t)) { run++; if (run >= 2) return 'survey'; } else run = 0;
+  }
+  return null;
+}
 function promptBoxCheck(snap, text) {
   const no = (why) => ({ ok: false, why });
   try {
@@ -4410,15 +4463,7 @@ function promptBoxCheck(snap, text) {
       const col = lines[a + 1].length - first.length; // 표시 앞은 공백·│ 뿐(한 칸 글자)이라 글자 위치가 칸 위치다
       if (cursorX !== col + 1 && cursorX !== col + 2) return no('cursor');
     }
-    // 상자 밖의 선택 창 흔적: 커서 표시가 붙은 번호 선택지, 숫자+쌍점 줄이 둘 이상 이어진 설문
-    let run = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (i >= a && i <= b) { run = 0; continue; }
-      const t = lines[i].replace(/^[\s│]+/, '');
-      if (/^[❯>]\s*\d+\s*[.)]/.test(t)) return no('choice');
-      if ((t.match(/(?:^|\s)\d+:\s/g) || []).length >= 2) return no('survey'); // 한 줄에 `숫자: ` 가 둘 이상
-      if (/^\d+:\s/.test(t)) { run++; if (run >= 2) return no('survey'); } else run = 0;
-    }
+    const trace = pbOutsideTrace(lines, a, b); if (trace) return no(trace);
     const parts = [];
     for (let i = a + 1; i < b; i++) {
       let t = plain[i].replace(/^[\s│]+/, '');
@@ -4433,6 +4478,74 @@ function promptBoxCheck(snap, text) {
     if (oneLine) return inner === pbNoWs(text) ? { ok: true, why: 'same' } : no('mismatch'); // 한 줄 글: 공백을 뺀 전체가 같아야 한다(상자 안 줄바꿈은 이어 붙여 비교)
     const pre = Array.from(l1).length < 8 ? l1 + pbNoWs(tl[1]) : l1; // 여러 줄 글: 첫 줄 전체(8자 미만이면 둘째 줄까지)로 시작해야 한다
     return inner.startsWith(pre) ? { ok: true, why: 'prefix' } : no('mismatch');
+  } catch { return no('shape'); }
+}
+// 터미널 입력 상자에 흐리게 뜬 추천 글(순수). snap 은 promptBoxCheck 가 받는 것과 같다 -> 문자열(없으면 ''). 예외를 던지지 않는다.
+// promptBoxCheck 사전 확인(상자가 한 줄이고 plain 에서 비어 있으며 커서가 입력줄 표시 줄에 있다)이 통과할 때만 본다.
+// 입력줄(커서 줄)의 lines 글에서 표시(❯ 또는 >)와 그 뒤 공백(U+00A0 포함)을 뗀 나머지가 후보다. plain 의 같은 자리는 비어 있다(= 전부 흐린 글자였다).
+// 시작 안내(Try "…")·대기열 안내(Press up…)는 추천이 아니다. !·/·# 로 시작하는 글은 명령처럼 보낼 수 있으므로 채우지 않는다
+const GHOST_MAX = 200;
+function promptGhost(snap) {
+  try {
+    if (!promptBoxCheck(snap).ok) return '';
+    const { lines, plain, cursorY } = snap;
+    const first = lines[cursorY].replace(/^[\s│]+/, '');
+    if (!(first.startsWith('>') || first.startsWith('❯'))) return '';
+    const rest = first.slice(1).replace(/[\s│]+$/, '').replace(/^[\s  ]+/, '');
+    if (rest === '') return '';
+    const pl = plain[cursorY].replace(/^[\s│]+/, ''); // 표지 뒤가 모두 비어 있어야 한다(흐리지 않은 글이 있으면 쓰던 글이다)
+    if (pbNoWs((pl.startsWith('>') || pl.startsWith('❯')) ? pl.slice(1) : '?' + pl).replace(/│/g, '') !== '') return '';
+    const c = readCleanSend(rest); if (!c.ok) return '';
+    const t = c.text.replace(/\s+/g, ' ').trim();
+    if (t === '' || t.length > GHOST_MAX) return '';
+    if (t.startsWith('Try "') || t.startsWith('Press up') || '!/#'.includes(t[0])) return '';
+    return t;
+  } catch { return ''; }
+}
+// 이미지 붙이기용 화면 판정(순수). 상자 안 글(plain, 공백 제외)이 `[Image #N]` 표시 count 개로만 이뤄졌는지(text 가 있으면 표시 count 개 + 글인지) 본다.
+// 경계선·커서(상자 안)·상자 밖 선택 창 흔적은 promptBoxCheck 와 같다. 글 비교 규칙도 promptBoxCheck 의 사후 확인과 같다 -> { ok, why }
+const PB_IMG_ONE = /^\[Image#\d+\]/;
+function promptBoxImages(snap, count, text) {
+  const no = (why) => ({ ok: false, why });
+  try {
+    if (!Number.isInteger(count) || count < 1 || count > 20) return no('count');
+    if (!snap || typeof snap !== 'object' || !Array.isArray(snap.lines)) return no('shape');
+    const { lines, cursorX, cursorY, rows, cols } = snap;
+    if (lines.length < 1 || lines.length > PB_MAX_LINES) return no('size');
+    if (!Number.isInteger(cursorX) || cursorX < 0 || !Number.isInteger(cursorY) || cursorY < 0 || cursorY >= lines.length) return no('shape');
+    if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) return no('shape');
+    for (const s of lines) { if (typeof s !== 'string') return no('shape'); if (s.length > PB_MAX_LINE) return no('size'); }
+    const plain = snap.plain;
+    if (!Array.isArray(plain) || plain.length !== lines.length) return no('plain');
+    for (const s of plain) { if (typeof s !== 'string') return no('shape'); if (s.length > PB_MAX_LINE) return no('size'); }
+    if (text !== undefined && text !== null && typeof text !== 'string') return no('shape');
+    const hasText = typeof text === 'string' && text !== '';
+    if (isPromptBorder(lines[cursorY])) return no('cursor');
+    let a = -1; let b = -1;
+    for (let i = cursorY - 1; i >= 0; i--) if (isPromptBorder(lines[i])) { a = i; break; }
+    for (let i = cursorY + 1; i < lines.length; i++) if (isPromptBorder(lines[i])) { b = i; break; }
+    if (a < 0 || b < 0) return no('border');
+    if (b - a - 1 > PB_BOX_MAX || b - a - 1 < 1) return no('border');
+    const first = lines[a + 1].replace(/^[\s│]+/, '');
+    if (!(first.startsWith('>') || first.startsWith('❯'))) return no('marker');
+    if (first.length > 1 && !/[  ]/.test(first[1])) return no('marker');
+    const trace =pbOutsideTrace(lines, a, b); if (trace) return no(trace);
+    const parts = [];
+    for (let i = a + 1; i < b; i++) {
+      let t = plain[i].replace(/^[\s│]+/, '');
+      if (i === a + 1) t = (t.startsWith('>') || t.startsWith('❯')) ? t.slice(1) : '?' + t;
+      parts.push(t.replace(/[\s│]+$/, ''));
+    }
+    let rest = pbNoWs(parts.join('\n')); let k = 0;
+    for (let m = PB_IMG_ONE.exec(rest); m; m = PB_IMG_ONE.exec(rest)) { k++; rest = rest.slice(m[0].length); }
+    if (k !== count) return no('count');
+    if (!hasText) return rest === '' ? { ok: true, why: 'images' } : no('extra');
+    const tl = text.split('\n'); const l1 = pbNoWs(tl[0]); if (!l1) return no('text');
+    const oneLine = tl.length === 1;
+    if (/^\[Pastedtext#\d+/.test(rest) && (!oneLine || Array.from(text).length >= PB_FOLD_MIN)) return { ok: true, why: 'folded' };
+    if (oneLine) return rest === pbNoWs(text) ? { ok: true, why: 'same' } : no('mismatch');
+    const pre = Array.from(l1).length < 8 ? l1 + pbNoWs(tl[1]) : l1;
+    return rest.startsWith(pre) ? { ok: true, why: 'prefix' } : no('mismatch');
   } catch { return no('shape'); }
 }
 // 붙여넣은 뒤 Enter 를 보낼지 가리는 판단(순수). s = { elapsedMs, now, pasteAt, lastOutputAt, boxOk, ctx(readCtxOf 와 같은 모양), sameWs, sameTerm, ptyInN, firstPasteInN, snapAt(그 화면을 요청하기 직전 시각; 출력은 그보다 먼저여야 한다) }
@@ -4451,6 +4564,83 @@ function firstSendVerdict(s) {
     if (!Number.isFinite(s.elapsedMs) || s.elapsedMs >= READ_FIRST_WAIT_MS) return { act: 'fail', why: 'timeout' };
     return { act: 'wait' };
   } catch { return { act: 'fail', why: 'shape' }; }
+}
+
+// ---- 읽기 화면 입력창: 작업 중 보내기(Claude Code 의 대기열에 넣기)와 지금 보내기 ----
+// 원칙: 앱은 권한 확인 창·선택 창에 사용자 대신 답하지 않는다. 확신이 없으면 보내지 않는다. 위 readCanSend·readCanSendFirst 는 건드리지 않고 새 함수로 만든다.
+const READ_BUSY_TOOL_MS = 3000; // 짝 없는 pre(열린 도구 호출)가 이보다 새것이면 권한 확인 창이 막 뜨는 중일 수 있다
+const READ_BUSY_WAIT_MS = 1500; const READ_BUSY_POLL_MS = 50;
+const READ_NOW_KEY = '\x18\x13'; // Ctrl+X Ctrl+S: 대기열의 글을 지금 보낸다(진행 중인 작업은 멈춘다)
+// 활동 기록 항목({ done, at(밀리초) })에서 짝(post)이 없는 pre 가운데 가장 새 것의 나이(밀리초). 짝 없는 pre 가 없으면 Infinity, 입력이 틀리면 NaN
+function actOpenPreAge(items, now) {
+  try {
+    if (!Array.isArray(items) || !Number.isFinite(now)) return NaN;
+    let newest = -Infinity;
+    for (const it of items) {
+      if (!it || typeof it !== 'object' || it.done === true) continue;
+      if (!Number.isFinite(it.at)) return NaN; // 시각을 모르는 열린 호출: 모른다고 본다
+      if (it.at > newest) newest = it.at;
+    }
+    return newest === -Infinity ? Infinity : now - newest;
+  } catch { return NaN; }
+}
+// 작업 중 보내기의 판정(순수). c = readCtxOf 의 값 + { openPreAge(actOpenPreAge 의 결과; 활동 기록을 못 읽었으면 NaN·없음), precompact(대화 압축 중) }.
+// o.afterPaste 가 참이면 dirty 를 보지 않는다(앱이 방금 붙여넣어 참이다). -> { ok:true } | { ok:false, reason }
+// 이유: nosession·notclaude·waiting(어떤 경우에도 통과 못 함)·busy(작업 중이 아니거나 백그라운드 작업뿐)·first(상태 기록이 이 pty 보다 앞섬)·draft·busy-tool(열린 도구 호출이 새것)·busy-noact(활동 기록 못 읽음)
+function readCanSendBusy(c, o) {
+  try {
+    if (!c || typeof c !== 'object') return { ok: false, reason: 'nosession' };
+    const { hasTerm, cc, procName, knownName, claudeUp, hooked, bracketed, ux, rawState, bg, recAt, startAt, dirty, openPreAge, precompact } = c;
+    if (hasTerm !== true || cc !== true) return { ok: false, reason: 'nosession' };
+    if (!procBase(knownName) || !isClaudeFront(procName, knownName)) return { ok: false, reason: 'notclaude' };
+    if (ux === 'waiting' || rawState === 'waiting') return { ok: false, reason: 'waiting' }; // 권한 확인 창은 어떤 경우에도 건드리지 않는다
+    if (claudeUp !== true || hooked !== true || bracketed !== true) return { ok: false, reason: 'nosession' };
+    if (precompact === true) return { ok: false, reason: 'busy' }; // 대화를 압축하는 중
+    if (rawState !== 'busy' || ux !== 'busy') return { ok: false, reason: 'busy' }; // 두 값이 모두 busy 일 때만. 백그라운드 작업(bg)만 남은 경우·끝난 턴은 통과하지 않는다
+    if (typeof bg !== 'number' || !(bg >= 0)) return { ok: false, reason: 'nosession' };
+    if (!Number.isFinite(recAt) || !Number.isFinite(startAt) || recAt < startAt) return { ok: false, reason: 'first' }; // 상태 기록이 이 pty 가 뜨기 전의 것이다
+    if (!(o && o.afterPaste === true) && dirty !== false) return { ok: false, reason: 'draft' };
+    if (typeof openPreAge !== 'number' || Number.isNaN(openPreAge)) return { ok: false, reason: 'busy-noact' };
+    if (openPreAge < READ_BUSY_TOOL_MS) return { ok: false, reason: 'busy-tool' };
+    return { ok: true };
+  } catch { return { ok: false, reason: 'nosession' }; }
+}
+// 붙여넣은 뒤 Enter 를 보낼지 가리는 판단(순수). s = { elapsedMs, boxOk(promptBoxCheck(snap, text) 결과), ctx, sameWs, sameTerm, ptyInN, pasteInN }
+// -> { act:'send' } | { act:'wait' } | { act:'stop', why }. 조용함은 요구하지 않는다(작업 중에는 출력이 계속된다). 호출한 쪽은 화면을 받은 같은 틱에서 곧바로 \r 을 쓴다
+function busySendVerdict(s) {
+  try {
+    if (!s || typeof s !== 'object') return { act: 'stop', why: 'shape' };
+    if (s.sameWs !== true) return { act: 'stop', why: 'workspace' };
+    if (s.sameTerm !== true) return { act: 'stop', why: 'pty' };
+    if (!Number.isSafeInteger(s.ptyInN) || !Number.isSafeInteger(s.pasteInN) || s.ptyInN !== s.pasteInN) return { act: 'stop', why: 'input' };
+    const r = readCanSendBusy(s.ctx, { afterPaste: true });
+    if (!r.ok) return { act: 'stop', why: r.reason };
+    if (s.boxOk === true) return { act: 'send' };
+    if (!Number.isFinite(s.elapsedMs) || s.elapsedMs >= READ_BUSY_WAIT_MS) return { act: 'stop', why: 'timeout' };
+    return { act: 'wait' };
+  } catch { return { act: 'stop', why: 'shape' }; }
+}
+// 화면 글(lines)에 지금 보내기 키 안내(`ctrl+x ctrl+s`)가 있는가
+const QUEUE_LINE_RE = /^\s*⎿\s+Queued\b.{0,40}ctrl\+x ctrl\+s to send now\s*$/; // 대기열 표시 줄의 모양 그대로일 때만(대화 글에 든 같은 낱말은 맞지 않는다)
+// 작업 중 길로 보내기에는 위험한 글: 아주 짧거나 숫자·y·n 뿐이면 선택 창의 단축키로 읽힐 수 있다
+function busyTextRisky(text) { const t = typeof text === 'string' ? text.trim() : ''; return t.length <= 3 || /^[\s0-9yYnN.]+$/.test(t); }
+function queueKeyShown(lines) {
+  try { return Array.isArray(lines) && lines.length <= PB_MAX_LINES && lines.some((l) => typeof l === 'string' && l.length <= PB_MAX_LINE && QUEUE_LINE_RE.test(l)); } catch { return false; }
+}
+// 대기열에 넣은 뒤 지금 보내기 키를 쓸지 가리는 판단(순수). s = { elapsedMs, boxOk(promptBoxCheck(snap) 결과), keyShown(queueKeyShown), ctx, sameWs, sameTerm, ptyInN, queuedInN }
+// 상태가 busy 가 아니게 되면(턴이 끝나 대기열의 글이 자동으로 갔다) 키를 쓰지 않는다 -> { act:'send' } | { act:'wait' } | { act:'stop', why }
+function nowSendVerdict(s) {
+  try {
+    if (!s || typeof s !== 'object') return { act: 'stop', why: 'shape' };
+    if (s.sameWs !== true) return { act: 'stop', why: 'workspace' };
+    if (s.sameTerm !== true) return { act: 'stop', why: 'pty' };
+    if (!Number.isSafeInteger(s.ptyInN) || !Number.isSafeInteger(s.queuedInN) || s.ptyInN !== s.queuedInN) return { act: 'stop', why: 'input' };
+    const r = readCanSendBusy(s.ctx, { afterPaste: true });
+    if (!r.ok) return { act: 'stop', why: r.reason };
+    if (s.boxOk === true && s.keyShown === true) return { act: 'send' };
+    if (!Number.isFinite(s.elapsedMs) || s.elapsedMs >= READ_BUSY_WAIT_MS) return { act: 'stop', why: 'timeout' };
+    return { act: 'wait' };
+  } catch { return { act: 'stop', why: 'shape' }; }
 }
 
 // ---- 읽기 화면 사용 횟수(내용 없이 날짜별 횟수만): { v:1, days: { 'YYYY-MM-DD': { on, sent } } } ----
@@ -4750,9 +4940,12 @@ function mdParse(text) {
 }
 
 // ---- 화면 블록 해석(읽기 화면 2부). 언어 이름이 maru-surface 인 코드 블록의 글 -> 부품 목록. 규격은 docs/plans/surface-panel.md 11절 ----
-const SURF_LINES_MAX = 40; // 블록 줄 상한
-const SURF_CHARS_MAX = 4000; // 블록 글자 상한(정리 뒤, UTF-16 단위)
+const SURF_LINES_MAX = 60; // 블록 줄 상한
+const SURF_CHARS_MAX = 6000; // 블록 글자 상한(정리 뒤, UTF-16 단위)
 const SURF_TITLE_MAX = 60;
+const SURF_SUB_MAX = 120; // sub(제목 아래 부제) 는 1개
+const SURF_SECTIONS_MAX = 6; const SURF_SECTION_TITLE_MAX = 60; const SURF_SECTION_DESC_MAX = 120;
+const SURF_CARDS_MAX = 9; const SURF_CARD_TITLE_MAX = 40; const SURF_CARD_DESC_MAX = 160; const SURF_CARD_TAG_MAX = 24; // 연달은 card 줄은 한 묶음
 const SURF_STATS_MAX = 8; const SURF_STAT_LABEL_MAX = 30; const SURF_STAT_VALUE_MAX = 20; const SURF_STAT_NOTE_MAX = 40;
 const SURF_BARS_MAX = 8; const SURF_BAR_TEXT_MAX = 20; // 막대 이름은 SURF_STAT_LABEL_MAX 를 쓴다
 const SURF_KV_MAX = 12; const SURF_KV_KEY_MAX = 30; const SURF_KV_VALUE_MAX = 200;
@@ -4761,7 +4954,7 @@ const SURF_TABLE_COLS = 6; const SURF_TABLE_ROWS = 20; const SURF_CELL_MAX = 200
 const SURF_CHOICE_MIN = 2; const SURF_CHOICE_MAX = 5; const SURF_OPTION_MAX = 120; const SURF_QUESTION_MAX = 300;
 const SURF_NEXT_MAX = 3; const SURF_NEXT_TEXT_MAX = 120;
 const SURF_TEXT_MAX = 300; // 모르는 줄 한 줄의 글자 상한
-const SURF_KEYS = new Set(['title', 'stat', 'bar', 'kv', 'note', 'warn', 'table', 'choice', 'next']);
+const SURF_KEYS = new Set(['title', 'sub', 'section', 'card', 'stat', 'bar', 'kv', 'note', 'warn', 'table', 'choice', 'next']);
 const SURF_KEY_RE = /^ {0,4}([a-z]+) *:(.*)$/; // 앞 공백 4칸 이하, 콜론 앞 공백을 받는다
 const SURF_OPT_RE = /^[ \t]*[-*][ \t]+(.*)$/;
 const SURF_LSEP_RE = new RegExp('^[\\n\\r\\u2028\\u2029]$'); // 줄 구분 글자 하나
@@ -4781,7 +4974,7 @@ function surfCells(s) {
   return cells;
 }
 function surfaceParse(text) {
-  const out = { ok: false, title: '', parts: [], next: [], truncated: false };
+  const out = { ok: false, title: '', sub: '', parts: [], next: [], truncated: false };
   try {
     if (typeof text !== 'string') return out;
     let raw = text;
@@ -4808,7 +5001,7 @@ function surfaceParse(text) {
     };
     const full = (s) => { const r = readCleanSend(s); return r.ok ? r.text.replace(/\s+/g, ' ').trim() : ''; }; // 선택지·next: 입력창이 보낼 때와 같은 정리를 거친 한 줄. 자르지 않는다
     const addText = (s) => { const v = fit(s, SURF_TEXT_MAX); if (v) parts.push({ t: 'text', text: v }); };
-    const cnt = { stats: 0, bars: 0, kv: 0, notes: 0 }; let haveTitle = false; let haveTable = false; let haveChoice = false;
+    const cnt = { stats: 0, bars: 0, kv: 0, notes: 0, sections: 0, cards: 0 }; let haveTitle = false; let haveSub = false; let haveTable = false; let haveChoice = false;
     const group = (kind, item) => { const l = parts[parts.length - 1]; if (l && l.t === kind) l.items.push(item); else parts.push({ t: kind, items: [item] }); };
     let i = 0;
     while (i < lines.length) {
@@ -4820,6 +5013,18 @@ function surfaceParse(text) {
       const rest = m[2].trim();
       if (key === 'title') {
         if (!rest) addText(line); else if (!haveTitle) { out.title = fit(rest, SURF_TITLE_MAX); haveTitle = true; } else out.truncated = true; // 둘째 title 은 버린다
+      } else if (key === 'sub') {
+        if (!rest) addText(line); else if (!haveSub) { out.sub = fit(rest, SURF_SUB_MAX); haveSub = true; } else out.truncated = true; // 둘째 sub 는 버린다
+      } else if (key === 'section') {
+        const c = surfCells(rest);
+        if (!c[0]) addText(line);
+        else if (cnt.sections >= SURF_SECTIONS_MAX) out.truncated = true;
+        else { cnt.sections++; parts.push({ t: 'section', title: fit(c[0], SURF_SECTION_TITLE_MAX), desc: fit(c[1] || '', SURF_SECTION_DESC_MAX) }); }
+      } else if (key === 'card') {
+        const c = surfCells(rest);
+        if (!c[0]) addText(line);
+        else if (cnt.cards >= SURF_CARDS_MAX) out.truncated = true;
+        else { cnt.cards++; group('cards', { title: fit(c[0], SURF_CARD_TITLE_MAX), desc: fit(c[1] || '', SURF_CARD_DESC_MAX), tag: fit(c[2] || '', SURF_CARD_TAG_MAX) }); }
       } else if (key === 'stat') {
         const c = surfCells(rest);
         if (c.length < 2 || !c[0] || !c[1]) addText(line);
@@ -4873,9 +5078,9 @@ function surfaceParse(text) {
         else if (out.next.length >= SURF_NEXT_MAX) out.truncated = true; else out.next.push(v);
       }
     }
-    out.ok = haveTitle || out.next.length > 0 || parts.some((p) => p.t !== 'text');
+    out.ok = haveTitle || haveSub || out.next.length > 0 || parts.some((p) => p.t !== 'text');
     return out;
-  } catch { return { ok: false, title: '', parts: [], next: [], truncated: true }; }
+  } catch { return { ok: false, title: '', sub: '', parts: [], next: [], truncated: true }; }
 }
 
 // ---- 대화 기록(읽기 화면용). data/state/app/<세션 값>.talk.jsonl 의 글 -> 최근 항목 목록 ----
@@ -4914,7 +5119,7 @@ function talkSurface(blocks, mdTruncated) {
   for (let i = blocks.length - 1; i >= 0; i--) { if (blocks[i].t === 'code' && blocks[i].lang === 'maru-surface') { at = i; break; } }
   if (at < 0 || blocks[at].cut || blocks[at].open) return;
   const s = surfaceParse(blocks[at].text);
-  if (s.ok) blocks[at] = { t: 'surface', title: s.title, parts: s.parts, next: s.next, truncated: s.truncated };
+  if (s.ok) blocks[at] = { t: 'surface', title: s.title, sub: s.sub, parts: s.parts, next: s.next, truncated: s.truncated };
 }
 // 기록 파일의 글 -> { items, more }. 끝에서부터 훑어 max 개만 해석한다(옛 줄은 해석하지 않는다). 예외를 던지지 않는다
 function talkParse(text, opts) {
@@ -4960,7 +5165,375 @@ function talkParse(text, opts) {
   } catch { return { items: [], more: false }; }
 }
 
+// ---- 활동 기록(읽기 화면 3부). data/state/app/<세션 값>.act.jsonl 의 글 -> 항목 목록. 한 턴의 도구 호출만 담는다. 내용은 신뢰하지 않는다 ----
+const ACT_TEXT_MAX = 512 * 1024; // 읽는 글 상한(UTF-16 단위). 넘으면 뒤쪽만 읽고 첫 줄은 버린다
+const ACT_FILE_MAX = 4 * 1024 * 1024; // 이보다 큰 활동 파일은 읽지 않는다(훅은 256KB 근처에서 줄인다)
+const ACT_ITEMS_MAX = 200; // 돌려줄 항목 수(최근 것)
+const ACT_SUM_MAX = 160; // 요약 글자 수 상한(코드 포인트)
+const ACT_MS_MAX = 86400000; // 걸린 시간 상한(하루)
+const ACT_AT_MAX = 1e11; // 시각(초 단위) 상한: 약 5138년. 밀리초 값이 잘못 들어온 줄을 버린다
+const ACT_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
+const ACT_TOOL_RE = /^[A-Za-z0-9_.:-]{1,80}$/;
+const ACT_KINDS = { Bash: 'cmd', Read: 'read', NotebookRead: 'read', Edit: 'edit', Write: 'edit', NotebookEdit: 'edit', MultiEdit: 'edit', Grep: 'find', Glob: 'find', WebFetch: 'web', WebSearch: 'web', Agent: 'agent', Task: 'agent' };
+function actKind(tool) { return Object.prototype.hasOwnProperty.call(ACT_KINDS, tool) ? ACT_KINDS[tool] : 'other'; }
+function actSum(s) {
+  if (typeof s !== 'string') return '';
+  const t = s.replace(/[\r\n\t]+/g, ' ').replace(new RegExp('[\\u2028\\u2029]+', 'g'), ' ').replace(BAD_CHARS_G, '').replace(/ {2,}/g, ' ').trim();
+  return [...t].slice(0, ACT_SUM_MAX).join('').trim();
+}
+// 활동 기록 글 -> { items:[{id,tool,kind,sum,at(밀리초),done,ms,err}], more(버린 항목 수) }. 예외를 던지지 않는다
+function actParse(text) {
+  try {
+    if (typeof text !== 'string') return { items: [], more: 0 };
+    let t = text;
+    if (t.length > ACT_TEXT_MAX) { t = t.slice(t.length - ACT_TEXT_MAX); const nl = t.indexOf('\n'); t = nl < 0 ? '' : t.slice(nl + 1); }
+    const pres = new Map(); const posts = new Map();
+    for (const ln of t.split('\n')) {
+      if (!ln.trim()) continue;
+      let o; try { o = JSON.parse(ln); } catch { continue; }
+      if (!o || typeof o !== 'object' || Array.isArray(o)) continue;
+      const has = (k) => Object.prototype.hasOwnProperty.call(o, k);
+      if (!has('v') || o.v !== 1 || !has('k') || !has('id') || !has('tool') || !has('at')) continue;
+      const { k, id, tool, at } = o;
+      if (k !== 'pre' && k !== 'post') continue;
+      if (typeof id !== 'string' || !ACT_ID_RE.test(id) || typeof tool !== 'string' || !ACT_TOOL_RE.test(tool)) continue;
+      if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0 || at > ACT_AT_MAX) continue;
+      if (k === 'pre') {
+        if (pres.has(id)) continue; // 같은 id 의 pre 가 둘이면 첫 것만
+        pres.set(id, { id, tool, kind: actKind(tool), sum: has('sum') ? actSum(o.sum) : '', at: Math.round(at * 1000), done: false, ms: null, err: false });
+      } else if (!posts.has(id)) {
+        const ms = has('ms') && Number.isInteger(o.ms) && o.ms >= 0 && o.ms <= ACT_MS_MAX ? o.ms : null;
+        posts.set(id, { ms, err: has('err') && o.err === true });
+      }
+    }
+    const all = [];
+    for (const it of pres.values()) { const p = posts.get(it.id); if (p) { it.done = true; it.ms = p.ms; it.err = p.err; } all.push(it); }
+    const more = Math.max(0, all.length - ACT_ITEMS_MAX);
+    return { items: more ? all.slice(more) : all, more };
+  } catch { return { items: [], more: 0 }; }
+}
+
+// ---- 터미널 미리보기: 터미널 화면에서 입력줄 상자 위의 마지막 줄들 ----
+const TERM_PEEK_DEFAULT = 8; const TERM_PEEK_MAX = 20; const TERM_PEEK_LINE = 200;
+// snap = { lines:[문자열], cursorY, rows } (promptBoxCheck 가 받는 모양의 일부) -> { lines:[문자열] }. 예외를 던지지 않는다
+function termPeek(snap, maxLines) {
+  try {
+    if (!snap || typeof snap !== 'object' || !Array.isArray(snap.lines)) return { lines: [] };
+    const src = snap.lines;
+    if (src.length < 1 || src.length > PB_MAX_LINES) return { lines: [] };
+    for (const s of src) if (typeof s !== 'string') return { lines: [] };
+    const max = Number.isInteger(maxLines) && maxLines >= 1 ? Math.min(maxLines, TERM_PEEK_MAX) : TERM_PEEK_DEFAULT;
+    let end = src.length; // 이 줄 앞까지가 후보
+    for (let b = src.length - 1; b > 0; b--) {
+      if (!isPromptBorder(src[b])) continue;
+      let a = -1; for (let i = b - 1; i >= 0; i--) if (isPromptBorder(src[i])) { a = i; break; }
+      if (a >= 0 && b - a - 1 >= 1 && b - a - 1 <= PB_BOX_MAX) { end = a; break; }
+    }
+    const out = [];
+    for (let i = end - 1; i >= 0 && out.length < max; i--) {
+      const l = src[i].slice(0, PB_MAX_LINE).replace(/\t/g, ' ').replace(BAD_CHARS_G, '').trimEnd();
+      const c = [...l].slice(0, TERM_PEEK_LINE).join('').trimEnd();
+      if (!c) { if (!out.length || out[out.length - 1] === '') continue; out.push(''); } else out.push(c);
+    }
+    out.reverse();
+    while (out.length && out[0] === '') out.shift();
+    return { lines: out };
+  } catch { return { lines: [] }; }
+}
+
+// ---- 활동 상자(읽기 화면 3부)의 순수 함수 ----
+// 걸린 시간(밀리초) -> { key, params }. 1초 미만 "0.3초", 1분 미만 "12초", 1시간 미만 "1분 5초", 그 위 "1시간 2분". 잘못된 값은 0초
+function actDur(ms) {
+  const v = typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : 0;
+  if (v < 1000) return { key: 'read.d.s', params: { n: v === 0 ? '0' : (Math.max(1, Math.ceil(v / 100)) / 10).toFixed(1) } };
+  const s = Math.floor(v / 1000);
+  if (s < 60) return { key: 'read.d.s', params: { n: s } };
+  if (s < 3600) return { key: 'read.d.ms', params: { m: Math.floor(s / 60), s: s % 60 } };
+  return { key: 'read.d.hm', params: { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60) } };
+}
+// 활동 줄에서 보일 것과 접을 것: items(오래된 것부터), more(받은 목록 앞에서 이미 버려진 수), expanded -> { shown:[항목], folded:접힌 수 }
+function actWindow(items, more, expanded, maxShown) {
+  const list = Array.isArray(items) ? items : []; const max = Number.isInteger(maxShown) && maxShown >= 1 ? maxShown : 8;
+  const extra = Number.isInteger(more) && more > 0 ? more : 0;
+  if (expanded === true || list.length <= max) return { shown: list, folded: extra };
+  return { shown: list.slice(list.length - max), folded: list.length - max + extra };
+}
+// 턴이 끝난 뒤 한 줄 요약을 보일지. items: 활동 항목들(at 밀리초), conv: 대화 항목들(role, at 초). 마지막 항목이 답변이고, 바로 앞 질문보다 뒤의 활동이 1개 이상이면 { count, ms }, 아니면 null
+const ACT_TURN_PRE_MS = 1000; const ACT_TURN_POST_MS = 2000; // 대화 시각은 초 단위라 앞뒤로 오차를 둔다
+// 마지막 답변 턴의 활동만 거른다. 질문 시각 - 1초 < at <= 답변 시각 + 2초. 마지막 항목이 답변이 아니거나 앞 질문이 없으면 null. 요약의 개수와 펼친 목록이 같은 결과를 쓴다
+function actTurnItems(items, conv) {
+  try {
+    if (!Array.isArray(items) || !Array.isArray(conv) || conv.length < 2) return null;
+    const last = conv[conv.length - 1]; if (!last || last.role !== 'assistant' || !Number.isFinite(last.at)) return null;
+    let q = null; for (let i = conv.length - 2; i >= 0; i--) if (conv[i] && conv[i].role === 'user') { q = conv[i]; break; }
+    if (!q || !Number.isFinite(q.at)) return null;
+    const lo = q.at * 1000 - ACT_TURN_PRE_MS; const hi = last.at * 1000 + ACT_TURN_POST_MS;
+    return items.filter((it) => it && Number.isFinite(it.at) && it.at > lo && it.at <= hi);
+  } catch { return null; }
+}
+// 마지막 항목이 질문일 때 그 질문 시각 - 1초보다 뒤의 활동(작업 중 상자·중단된 턴의 요약용). 마지막 항목이 질문이 아니면 null
+function actSinceQuestion(items, conv) {
+  try {
+    if (!Array.isArray(items) || !Array.isArray(conv) || !conv.length) return null;
+    const q = conv[conv.length - 1]; if (!q || q.role !== 'user' || !Number.isFinite(q.at)) return null;
+    const lo = q.at * 1000 - ACT_TURN_PRE_MS;
+    return items.filter((it) => it && Number.isFinite(it.at) && it.at > lo);
+  } catch { return null; }
+}
+function actSummary(items, conv) {
+  try {
+    const turn = actTurnItems(items, conv); if (!turn || turn.length < 1) return null;
+    const last = conv[conv.length - 1]; let q = null; for (let i = conv.length - 2; i >= 0; i--) if (conv[i] && conv[i].role === 'user') { q = conv[i]; break; }
+    return { count: turn.length, ms: Math.max(0, last.at * 1000 - q.at * 1000) };
+  } catch { return null; }
+}
+// 이미지 보내기의 진입 판정(순수). can = readCanSend 또는 첫 메시지 길의 결과, ctx = readCtxOf 의 결과. 통과해도 Enter 직전 판정(readFirstBase)의 공통 조건을 못 넘으면 img-nosession
+function imgGateVerdict(can, ctx) {
+  try {
+    if (!can || typeof can !== 'object' || can.ok !== true) return can && typeof can === 'object' && can.ok === false ? can : { ok: false, reason: 'img-nosession' };
+    if (!ctx || typeof ctx !== 'object' || readFirstBase(ctx)) return { ok: false, reason: 'img-nosession' };
+    return can;
+  } catch { return { ok: false, reason: 'img-nosession' }; }
+}
+
+// ---- 세션 시작 표지(<세션 값>.sess; 훅이 쓴다) 읽기와 보내기 문맥 합성(순수 함수). 표지는 "첫 메시지 길을 쓴다"만 정한다. 보내기 전후의 화면 확인은 그대로다 ----
+// ---- 컨텍스트 사용량(<세션 값>.ctx; 상태줄 명령이 쓴다) 읽기와 화면 값(순수 함수) ----
+const CTX_TEXT_MAX = 4096; // 이보다 긴 글은 읽지 않는다
+const CTX_SIZE_MAX = 100000000; // 창 크기 상한(토큰)
+const CTX_FUTURE_MS = 5000; // 기록 시각이 지금보다 이만큼 넘게 뒤면 버린다
+const CTX_START_SLACK_MS = 1000; // pty 시작보다 이만큼 넘게 앞선 기록은 앞 세션의 것이다
+// 글(한 줄 JSON) -> { at(밀리초), pct(0~100), size(정수 또는 null) } | null
+function ctxParse(text) {
+  if (typeof text !== 'string' || text.length > CTX_TEXT_MAX) return null;
+  let o; try { o = JSON.parse(text); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o) || o.v !== 1) return null;
+  if (typeof o.at !== 'number' || !Number.isFinite(o.at) || o.at <= 0) return null;
+  if (typeof o.pct !== 'number' || !Number.isFinite(o.pct) || o.pct < 0 || o.pct > 100) return null;
+  const size = Number.isInteger(o.size) && o.size >= 1 && o.size <= CTX_SIZE_MAX ? o.size : null;
+  return { at: o.at, pct: o.pct, size };
+}
+// 읽은 값 -> 화면 값 { pct(정수), level('low'|'mid'|'high'), size } | null. 미래 시각·pty 시작 전 기록(앞 세션의 낡은 파일)은 null
+function ctxView(ctx, opts) {
+  if (!ctx || typeof ctx !== 'object') return null;
+  const now = opts && Number.isFinite(opts.now) ? opts.now : Date.now();
+  const startAt = opts ? opts.startAt : NaN;
+  if (!Number.isFinite(ctx.at) || !Number.isFinite(ctx.pct)) return null;
+  if (ctx.at > now + CTX_FUTURE_MS) return null;
+  if (Number.isFinite(startAt) && ctx.at < startAt - CTX_START_SLACK_MS) return null;
+  const pct = Math.min(100, Math.max(0, Math.round(ctx.pct)));
+  const level = pct >= 90 ? 'high' : pct >= 70 ? 'mid' : 'low'; // 화면에 보이는 정수로 가른다(69.5 는 70% 로 보이므로 mid)
+  return { pct, level, size: Number.isInteger(ctx.size) ? ctx.size : null };
+}
+// 창 크기(토큰) -> '1M' | '200K' | '123K' | ''
+function ctxSizeLabel(size) {
+  if (!Number.isFinite(size) || size < 1000) return '';
+  if (size >= 1000000) return (Math.round(size / 100000) / 10) + 'M';
+  return Math.round(size / 1000) + 'K';
+}
+const SESS_SOURCES = ['startup', 'resume', 'clear', 'compact', 'precompact'];
+const SESS_FUTURE_MS = 5000; // 표지 시각이 지금보다 이만큼 넘게 뒤면 버린다
+const SESS_MTIME_MS = 5000; // 표지 파일의 mtime 과 표지 시각이 이만큼 넘게 다르면 버린다
+const SESS_PRECOMPACT_MAX_MS = 120000; // precompact 표지는 이보다 오래되면 무시한다(압축이 실패해 끝 표지가 오지 않은 경우)
+const SESS_INPUT_SLACK_MS = 50; // 기준 시각 이 안의 입력은 표지 앞의 것으로 본다
+// 글 -> { at(밀리초), sid, source } | null
+function sessParse(text) {
+  try {
+    if (typeof text !== 'string' || text.length > 4096) return null;
+    const o = JSON.parse(text);
+    if (!o || typeof o !== 'object' || Array.isArray(o) || o.v !== 1) return null;
+    if (typeof o.at !== 'number' || !Number.isFinite(o.at) || !(o.at > 0) || o.at > 1e11) return null;
+    if (!isSessionId(o.sid)) return null;
+    if (typeof o.source !== 'string' || !SESS_SOURCES.includes(o.source)) return null;
+    return { at: o.at * 1000, sid: o.sid, source: o.source };
+  } catch { return null; }
+}
+// 표지가 살아 있는가. 아래 중 하나라도 맞으면 버린다.
+// - 표지 시각(at)이 이 pty 가 뜬 때(startAt)보다 앞선다(훅은 pty 가 뜬 뒤에만 돈다)
+// - 표지 시각이 지금(o.now)보다 5초 넘게 뒤다
+// - 표지 파일의 mtime(sess.mtimeMs 또는 o.mtimeMs)과 표지 시각이 5초 넘게 다르다
+// - 상태 기록이 있고 표지가 상태 기록 시각(recAt)보다 뒤가 아니다
+function sessAlive(sess, recAt, startAt, o) {
+  if (!sess || typeof sess !== 'object' || !Number.isFinite(sess.at) || !SESS_SOURCES.includes(sess.source)) return false;
+  const op = o && typeof o === 'object' ? o : {};
+  if (Number.isFinite(op.now) && sess.at > op.now + SESS_FUTURE_MS) return false;
+  if (Number.isFinite(startAt) && sess.at < startAt) return false;
+  const mt = Number.isFinite(op.mtimeMs) ? op.mtimeMs : sess.mtimeMs;
+  if (Number.isFinite(mt) && Math.abs(mt - sess.at) > SESS_MTIME_MS) return false;
+  if (Number.isFinite(recAt) && !(sess.at > recAt)) return false;
+  return true;
+}
+// 표지를 처음 본 때의 입력 횟수 기준값(sessInN): 기준 시각(표지 시각과 main 이 표지를 처음 본 시각 seenAt 중 앞선 것) 뒤로 입력이 없었으면 지금의 횟수, 있었으면 -1
+function sessBaseInN(sess, ptyInAt, ptyInN, seenAt) {
+  const n = Number.isSafeInteger(ptyInN) ? ptyInN : 0;
+  const ref = Number.isFinite(seenAt) ? Math.min(sess.at, seenAt) : sess.at;
+  return Number.isFinite(ptyInAt) && ptyInAt <= ref + SESS_INPUT_SLACK_MS ? n : -1;
+}
+// 보내기 판정용 문맥 합성. ctx 는 readCtxOf 의 값. o = { startAt, sessInN, now }. 표지가 없거나 살아 있지 않거나 원래 문맥이 busy·waiting 이면 ctx 를 그대로(같은 객체) 돌려준다
+function sessCtx(ctx, sess, o) {
+  try {
+    if (!ctx || typeof ctx !== 'object' || !sess) return ctx;
+    const op = o && typeof o === 'object' ? o : {};
+    if (!sessAlive(sess, ctx.recAt, op.startAt, { now: op.now })) return ctx;
+    if (ctx.rawState === 'busy' || ctx.rawState === 'waiting' || ctx.ux === 'busy' || ctx.ux === 'waiting') return ctx; // 표지가 원래의 busy·waiting 을 지우지 않는다(모든 source)
+    if (sess.source === 'precompact') {
+      if (!Number.isFinite(op.now) || op.now - sess.at > SESS_PRECOMPACT_MAX_MS) return ctx;
+      return { ...ctx, ux: 'busy' };
+    }
+    const inN = Number.isSafeInteger(ctx.inN) ? ctx.inN : 0;
+    const base = Number.isSafeInteger(op.sessInN) ? op.sessInN : null;
+    if (base === null) return { ...ctx, rawState: null, ux: 'none', launchInN: 0 }; // 기준을 모르면 첫 메시지 길이 거부한다
+    return { ...ctx, rawState: null, ux: 'none', launchInN: base === -1 ? inN + 1 : base }; // -1(표지 뒤 입력 있음): inN 과 다른 양수 -> first-touched
+  } catch { return ctx; }
+}
+// ---- 입력창의 슬래시 명령 ----
+// 알려진 내장 명령(clear·compact 만 뺀다). 이 이름은 목록에서 빼고 입력창에서 보내지 않는다
+const SLASH_BLOCK = new Set(['model', 'config', 'settings', 'resume', 'permissions', 'allowed-tools', 'login', 'logout', 'mcp', 'agents', 'hooks', 'memory', 'plugin', 'status', 'help', 'doctor', 'vim', 'theme', 'terminal-setup', 'ide', 'exit', 'quit', 'export', 'rewind', 'add-dir', 'bashes', 'tasks', 'output-style', 'privacy-settings', 'install-github-app', 'feedback', 'bug', 'upgrade', 'usage', 'sandbox', 'statusline', 'keybindings', 'color', 'rename', 'copy', 'stats', 'mobile', 'desktop', 'release-notes', 'remote-env', 'migrate-installer', 'plan', 'fast', 'effort', 'reset', 'new', 'context', 'cost', 'init', 'review', 'pr-comments', 'security-review', 'todos', 'skills', 'btw', 'loop', 'schedule']);
+const SLASH_BASE = ['clear', 'compact']; // 내장 중에서 입력창이 보내는 것
+const SLASH_NAME_RE = /^[a-z0-9][a-z0-9:_-]{0,63}$/;
+// 디스크에서 읽은 스킬·명령의 이름을 목록에 넣어도 되는가: 알려진 내장 명령·clear·compact 와 겹치면 안 된다
+function slashDiskOk(name) { return typeof name === 'string' && SLASH_NAME_RE.test(name) && !SLASH_BLOCK.has(name) && !SLASH_BASE.includes(name); }
+// 허용 목록 판단(순수): 이름이 목록(items = [{ name, kind }])에 정확히 있을 때만 참. 알려진 내장 명령은 목록에 있어도 거짓이고, clear·compact 는 kind 가 builtin 인 항목만 인정한다
+function slashAllowed(name, items) {
+  try {
+    if (typeof name !== 'string' || !SLASH_NAME_RE.test(name) || SLASH_BLOCK.has(name) || !Array.isArray(items)) return false;
+    const it = items.find((x) => x && typeof x === 'object' && x.name === name); if (!it) return false;
+    return SLASH_BASE.includes(name) ? it.kind === 'builtin' : (it.kind === 'skill' || it.kind === 'command');
+  } catch { return false; }
+}
+// 목록 거르기·정렬(순수). q 는 `/` 뒤의 글(소문자). 정확히 같은 이름 -> 앞머리가 맞는 것 -> 포함하는 것. 같은 급 안에서는 기본 명령이 먼저
+function slashFilter(items, q) {
+  try {
+    if (!Array.isArray(items) || typeof q !== 'string') return [];
+    const tier = (x) => (x.name === q ? 0 : x.name.startsWith(q) ? 1 : x.name.includes(q) ? 2 : 3);
+    const k = (x) => (x.kind === 'builtin' ? 0 : 1);
+    return items.filter((x) => x && typeof x.name === 'string' && tier(x) < 3).map((x, i) => ({ x, i })).sort((a, b) => tier(a.x) - tier(b.x) || k(a.x) - k(b.x) || a.i - b.i).map((o) => o.x);
+  } catch { return []; }
+}
+// 입력창에서 Enter 를 눌렀을 때의 동작(순수): 'send' | 'fill' | 'none' | 'wait'. items 는 목록(아직 못 받았으면 null), open 은 목록이 열려 있고 항목이 보이는가
+function slashEnterAction(text, items, open) {
+  try {
+    const c = readCleanSend(text);
+    if (!c.ok || c.text[0] !== '/' || c.text.includes('\n')) return 'send'; // 한 줄 슬래시 글이 아니면 이 규칙 밖(main 이 따로 거른다)
+    if (!Array.isArray(items)) return 'wait';
+    const word = /^\/(\S*)/.exec(c.text)[1].toLowerCase();
+    if (slashAllowed(word, items)) return 'send';
+    if (open === true && /^\/\S*$/.test(c.text) && slashFilter(items.filter((x) => x && slashAllowed(x.name, items)), word).length > 0) return 'fill';
+    return 'none';
+  } catch { return 'none'; }
+}
+// 글 -> 명령 이름(소문자) | null. 정리(readCleanSend) 뒤의 글이 / 로 시작하면 첫 낱말 앞머리에서 이름을 읽는다
+function slashCmdOf(text) {
+  try {
+    const c = readCleanSend(text); if (!c.ok || c.text[0] !== '/') return null;
+    const m = /^\/([A-Za-z0-9][A-Za-z0-9:_-]{0,63})/.exec(c.text);
+    return m ? m[1].toLowerCase() : null;
+  } catch { return null; }
+}
+// 스킬(SKILL.md)·사용자 명령(.md)의 앞머리(frontmatter) -> { name, desc } | null. name 이 없으면 fallback(폴더·파일 이름). 이름 규칙 불통과·user-invocable: false 이면 null. desc 는 나쁜 글자를 지우고 120자
+const SLASH_DESC_MAX = 120;
+// kind: 'skill' 이면 frontmatter name 이 폴더 이름(fallback)과 같을 때만 쓰고 다르면 폴더 이름. 'command' 이면 frontmatter name 을 쓰지 않고 파일 이름(fallback). kind 가 없으면 예전처럼 frontmatter name 우선
+function slashEntryParse(text, fallback, kind) {
+  try {
+    if (typeof text !== 'string') return null;
+    const t = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+    const fm = {};
+    if (t.startsWith('---\n')) {
+      const end = t.indexOf('\n---', 4);
+      const lines = (end < 0 ? t.slice(4) : t.slice(4, end)).split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const m = /^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)$/.exec(lines[i]); if (!m) continue;
+        let v = m[2].trim();
+        if (/^[>|][+-]?$/.test(v)) { const buf = []; while (i + 1 < lines.length && /^[ \t]+\S|^\s*$/.test(lines[i + 1])) { buf.push(lines[++i].trim()); } v = buf.join(' '); }
+        else if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) v = v.slice(1, -1);
+        if (!(m[1] in fm)) fm[m[1]] = v;
+      }
+    }
+    if (typeof fm['user-invocable'] === 'string' && fm['user-invocable'].toLowerCase() === 'false') return null;
+    const fb = String(fallback || '');
+    const fmName = typeof fm.name === 'string' && fm.name ? fm.name : '';
+    const name = (kind === 'command' ? fb : kind === 'skill' ? (fmName && fmName.toLowerCase() === fb.toLowerCase() ? fmName : fb) : (fmName || fb)).toLowerCase();
+    if (!SLASH_NAME_RE.test(name)) return null;
+    return { name, desc: cleanDisplay(typeof fm.description === 'string' ? fm.description : '', SLASH_DESC_MAX) };
+  } catch { return null; }
+}
+// 슬래시 명령을 입력줄에 넣은 뒤의 사후 확인(promptBoxCheck 와 같다. 다만 상자 밖에서 `❯ /` 로 시작하는 명령 안내 줄은 선택 창 흔적으로 보지 않는다)
+function promptBoxSlash(snap, text) {
+  try {
+    if (!snap || typeof snap !== 'object' || !Array.isArray(snap.lines) || !Array.isArray(snap.plain) || snap.plain.length !== snap.lines.length) return promptBoxCheck(snap, text);
+    const r = promptBoxCheck(snap, text);
+    if (!r.ok && r.why !== 'choice' && r.why !== 'survey') return r;
+    const name = slashCmdOf(text); if (!name) return { ok: false, why: 'slash-other' };
+    // 상자(커서 줄을 둘러싼 두 경계선) 밖에서 `❯` 가 붙은 `/…` 안내 줄은 고른 후보다. 그 이름이 보낼 이름과 정확히 같을 때만 허용한다. 다른 모양(`❯ /경로…`)이나 다른 이름이면 거부
+    const { cursorY } = snap; const L0 = snap.lines;
+    if (!Number.isInteger(cursorY) || cursorY < 0 || cursorY >= L0.length) return r;
+    let a = -1; let b = -1;
+    for (let i = cursorY - 1; i >= 0; i--) if (isPromptBorder(L0[i])) { a = i; break; }
+    for (let i = cursorY + 1; i < L0.length; i++) if (isPromptBorder(L0[i])) { b = i; break; }
+    if (a < 0 || b < 0) return r;
+    const lines = L0.slice(); let seen = false;
+    for (let i = 0; i < L0.length; i++) {
+      if (i >= a && i <= b) continue;
+      const s = L0[i]; if (typeof s !== 'string' || !/^[\s│]*[❯>][  ]*\//.test(s)) continue;
+      const m = /^[\s│]*[❯>][  ]+\/([A-Za-z0-9][A-Za-z0-9:_-]{0,63})(?=\s|$)/.exec(s);
+      if (!m || m[1].toLowerCase() !== name) return { ok: false, why: 'slash-other' };
+      lines[i] = ''; seen = true;
+    }
+    if (r.ok) return r;
+    return seen ? promptBoxCheck({ ...snap, lines }, text) : r;
+  } catch { return { ok: false, why: 'shape' }; }
+}
+
+// 읽기 화면 입력창: 줄바꿈이 들어가려는 순간(beforeinput)에 보낼지 판정한다(순수).
+// ctx = { now, enterAt(마지막 Enter keydown 시각), enterPlain(Shift·Alt·Ctrl·Meta 없음), enterRepeat, fillHeld, fillAt } -> 'send' | 'block' | 'newline'
+function enterLineBreakVerdict(ctx) {
+  const c = ctx && typeof ctx === 'object' ? ctx : {};
+  if (!Number.isFinite(c.enterAt) || !Number.isFinite(c.now) || c.now - c.enterAt > 400) return 'newline'; // Enter 키에서 온 줄바꿈이 아니다
+  if (!c.enterPlain) return 'newline'; // Shift·Alt·Ctrl·Meta 를 누른 Enter 는 줄바꿈
+  if (c.enterRepeat || c.fillHeld || c.now - (Number.isFinite(c.fillAt) ? c.fillAt : -Infinity) < 500) return 'block'; // 줄바꿈도 보내기도 하지 않는다
+  return 'send';
+}
+
+// 붙여넣기 항목이 이미지인가(순수). items = [{ kind, type }]
+function pasteIsImage(items) {
+  if (!Array.isArray(items)) return false;
+  const ok = items.filter((it) => it && typeof it === 'object');
+  if (!ok.some((it) => it.kind === 'file' && typeof it.type === 'string' && it.type.startsWith('image/'))) return false;
+  const strs = ok.filter((it) => it.kind === 'string').map((it) => (typeof it.type === 'string' ? it.type.toLowerCase() : ''));
+  if (!strs.includes('text/plain')) return true; // 이미지 복사에 text/html 글이 같이 올 수 있다
+  return !strs.includes('text/html') && !strs.includes('text/rtf'); // 파일 관리자에서 이미지 파일을 복사: 파일 이름 글만 같이 온다. html·rtf 가 있으면 문서 앱의 글이다
+}
+
+// 이미지 바이트의 머리에서 가로×세로를 읽는다(풀기 전에 큰 이미지를 거르기 위해). PNG 는 IHDR, JPEG 는 SOF 조각을 본다. 모르는 형식이면 null
+function imgHeaderPixels(buf) {
+  try {
+    if (!buf || typeof buf.length !== 'number' || buf.length < 24) return null;
+    const u32 = (i) => ((buf[i] * 16777216) + (buf[i + 1] << 16) + (buf[i + 2] << 8) + buf[i + 3]);
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 && buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) {
+      if (!(buf[12] === 0x49 && buf[13] === 0x48 && buf[14] === 0x44 && buf[15] === 0x52)) return null;
+      return u32(16) * u32(20);
+    }
+    if (buf[0] === 0xff && buf[1] === 0xd8) {
+      let i = 2;
+      for (let n = 0; n < 2000 && i + 9 < buf.length; n++) {
+        if (buf[i] !== 0xff) return null;
+        const m = buf[i + 1];
+        if (m === 0xff) { i += 1; continue; }
+        if (m === 0xd8 || (m >= 0xd0 && m <= 0xd7) || m === 0x01) { i += 2; continue; }
+        const len = (buf[i + 2] << 8) + buf[i + 3]; if (len < 2) return null;
+        if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return ((buf[i + 5] << 8) + buf[i + 6]) * ((buf[i + 7] << 8) + buf[i + 8]);
+        if (m === 0xda || m === 0xd9) return null;
+        i += 2 + len;
+      }
+    }
+    return null;
+  } catch (x) { return null; }
+}
+
 const api = {
+  busyTextRisky, enterLineBreakVerdict, pasteIsImage, imgHeaderPixels,
+  ctxParse, ctxView, ctxSizeLabel,
+  SESS_SOURCES, SESS_PRECOMPACT_MAX_MS, SESS_FUTURE_MS, SESS_MTIME_MS, SESS_INPUT_SLACK_MS, sessParse, sessAlive, sessBaseInN, sessCtx, SLASH_BLOCK, SLASH_BASE, slashDiskOk, slashAllowed, slashFilter, slashEnterAction, SLASH_NAME_RE, SLASH_DESC_MAX, slashEntryParse, slashCmdOf, promptBoxSlash,
+  ACT_TEXT_MAX, ACT_FILE_MAX, ACT_ITEMS_MAX, ACT_SUM_MAX, ACT_MS_MAX, ACT_ID_RE, ACT_TOOL_RE, actKind, actParse, actDur, actWindow, actSummary, actTurnItems, actSinceQuestion, imgGateVerdict, ACT_AT_MAX, termPeek, TERM_PEEK_DEFAULT, TERM_PEEK_MAX, TERM_PEEK_LINE,
   CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, consentChoice, squadChoices, cleanSquadAsk, SQUAD_ASK_MAX, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
   macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, CHILD_HEADER_USER, parseSubOpen, subDraftAdd, subDraftCheck, subDraftUse, subLimitCheck, subNoticeLine, cleanNoticePart, SUB_TITLE_MAX, SUB_BRIEF_MAX, SUB_DRAFT_MS, SUB_DRAFT_MAX, promptHandoff, childBriefPlan, briefAtSpawn, isMaruRootDir, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
   hierarchyOrder, reorderWs, visibleWsIds, stateDisplay, unreadNext, currentLocation, childSubNames, parseReport, readReportsDir, summarizeReports, reportFlash, childLogLine, validWsId, validStableId, validRecCwd, WS_COLLAPSED_MAX,
@@ -4991,9 +5564,9 @@ const api = {
   PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
   PANEL_DEFAULT, PANEL_RANGE, PANEL_CENTER_MIN, PANEL_STORE_KEY, panelRange, clampPanelWidths, parsePanelWidths, parseColsEnv, panelKeyDelta,
   talkParse, talkCleanText, talkKey, talkSame, TALK_MAX_DEFAULT, TALK_USER_MAX, TALK_USER_TOTAL_MAX, TALK_BLOCKS_MAX, TALK_FILE_MAX,
-  READ_TERM_DEFAULT, READ_TERM_MIN, READ_MAIN_MIN, READ_RAIL_W, READ_STORE_KEY, READ_STORE_MAX, readIsNarrow, readSideShown, readTermMax, readTermWidth, readIsNumText, readTableAligns, readParseStore, readStoreSet, readDefault, READ_SEND_MAX, readCleanSend, readCanSend, readCanSendFirst, promptBoxCheck, firstSendVerdict, READ_FIRST_WAIT_MS, READ_FIRST_POLL_MS, isClaudeFront, isTermReply, talkLast, READ_TALK_SLACK_MS, READ_STATS_KEEP_DAYS, READ_STATS_MAX, readDayKey, readStatsParse, readStatsBump, readStatsLoad, readStatsSave,
+  READ_TERM_DEFAULT, READ_TERM_MIN, READ_MAIN_MIN, READ_RAIL_W, READ_STORE_KEY, READ_STORE_MAX, readIsNarrow, readSideShown, readTermMax, readTermWidth, readIsNumText, readTableAligns, readParseStore, readStoreSet, readDefault, readStoreStart, READ_SEND_MAX, readCleanSend, readCanSend, readCanSendFirst, promptBoxCheck, promptGhost, promptBoxImages, firstSendVerdict, READ_BUSY_TOOL_MS, READ_BUSY_WAIT_MS, READ_BUSY_POLL_MS, READ_NOW_KEY, actOpenPreAge, readCanSendBusy, busySendVerdict, queueKeyShown, nowSendVerdict, READ_FIRST_WAIT_MS, READ_FIRST_POLL_MS, isClaudeFront, isTermReply, isPassiveTermInput, talkLast, talkLastTwo, READ_TALK_SLACK_MS, READ_STATS_KEEP_DAYS, READ_STATS_MAX, readDayKey, readStatsParse, readStatsBump, readStatsLoad, readStatsSave,
   mdParse, MD_INPUT_MAX, MD_BLOCK_MAX, MD_TABLE_COLS, MD_TABLE_ROWS, MD_CODE_LINES, MD_PIECE_MAX, MD_CELLS_MAX, MD_PIECES_MAX,
-  surfaceParse, SURF_LINES_MAX, SURF_CHARS_MAX, SURF_TITLE_MAX, SURF_STATS_MAX, SURF_STAT_LABEL_MAX, SURF_STAT_VALUE_MAX, SURF_STAT_NOTE_MAX, SURF_BARS_MAX, SURF_BAR_TEXT_MAX, SURF_KV_MAX, SURF_KV_KEY_MAX, SURF_KV_VALUE_MAX, SURF_NOTES_MAX, SURF_NOTE_TEXT_MAX, SURF_TABLE_COLS, SURF_TABLE_ROWS, SURF_CELL_MAX, SURF_CHOICE_MIN, SURF_CHOICE_MAX, SURF_OPTION_MAX, SURF_QUESTION_MAX, SURF_NEXT_MAX, SURF_NEXT_TEXT_MAX, SURF_TEXT_MAX,
+  surfaceParse, SURF_LINES_MAX, SURF_CHARS_MAX, SURF_TITLE_MAX, SURF_SUB_MAX, SURF_SECTIONS_MAX, SURF_SECTION_TITLE_MAX, SURF_SECTION_DESC_MAX, SURF_CARDS_MAX, SURF_CARD_TITLE_MAX, SURF_CARD_DESC_MAX, SURF_CARD_TAG_MAX, SURF_KEYS, SURF_STATS_MAX, SURF_STAT_LABEL_MAX, SURF_STAT_VALUE_MAX, SURF_STAT_NOTE_MAX, SURF_BARS_MAX, SURF_BAR_TEXT_MAX, SURF_KV_MAX, SURF_KV_KEY_MAX, SURF_KV_VALUE_MAX, SURF_NOTES_MAX, SURF_NOTE_TEXT_MAX, SURF_TABLE_COLS, SURF_TABLE_ROWS, SURF_CELL_MAX, SURF_CHOICE_MIN, SURF_CHOICE_MAX, SURF_OPTION_MAX, SURF_QUESTION_MAX, SURF_NEXT_MAX, SURF_NEXT_TEXT_MAX, SURF_TEXT_MAX,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.MaruLib = api; // 렌더러(번들러 없음)에서는 전역으로 노출

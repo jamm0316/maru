@@ -62,13 +62,13 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['read', 'readrail', 'readwait', 'readsurf', 'readsurftop', 'readempty', 'menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsdrag', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['read', 'readrail', 'readwait', 'readsurf', 'readsurftop', 'readempty', 'readcmd', 'readatt', 'readghost', 'readlive', 'readlivedone', 'readbusy', 'menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsdrag', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
 const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew' || TEST_UI === 'wsmenu' || TEST_UI === 'wsrename' || TEST_UI === 'wsdrag'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을, wsmenu 는 둘째 행의 우클릭 메뉴를, wsrename 은 둘째 행의 이름 편집을 연 채로 둔다, wsdrag 는 끌어 놓기 표시를 화면에 보인다)
 const FAKE_RC = ['on', 'off', 'turning-on', 'turning-off', 'unknown'].includes(process.env.MARU_APP_RC || '') ? process.env.MARU_APP_RC : null; // 시험 전용: MARU_APP_UI=hierarchy 에서 모든 작업 공간의 원격 표시를 이 값으로 고정(화면 캡처용)
 const FAKE_USAGE = !app.isPackaged && ['1', 'high'].includes(process.env.MARU_APP_USAGE || '') ? process.env.MARU_APP_USAGE : null; // 시험 전용: 하단 플랜 사용량 띠의 지어낸 값(1: 39%·45분 / 24%·4일, high: 96% / 83%). 패키징 빌드에서는 무시
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
-const FAKE_TALK = !app.isPackaged && (process.env.MARU_APP_TALK === '1' || TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait' || TEST_UI === 'readsurf' || TEST_UI === 'readsurftop' || TEST_UI === 'readempty'); // 시험 전용: 읽기 화면의 지어낸 대화(질문 3·답변 3). 읽기 화면 모드(MARU_APP_UI=read|readrail|readwait)는 변수 없이도 켠다. 패키징 빌드에서는 무시
+const FAKE_TALK = !app.isPackaged && (process.env.MARU_APP_TALK === '1' || TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait' || TEST_UI === 'readsurf' || TEST_UI === 'readsurftop' || TEST_UI === 'readempty' || TEST_UI === 'readcmd' || TEST_UI === 'readatt' || TEST_UI === 'readghost' || TEST_UI === 'readlive' || TEST_UI === 'readlivedone' || TEST_UI === 'readbusy'); // 시험 전용: 읽기 화면의 지어낸 대화(질문 3·답변 3). 읽기 화면 모드(MARU_APP_UI=read|readrail|readwait)는 변수 없이도 켠다. 패키징 빌드에서는 무시
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX && !FAKE_HIER && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
@@ -116,10 +116,74 @@ const STATE_DIR = () => path.join(ROOT, 'data', 'state', 'app');
 const PROMPT_DIR = () => path.join(ROOT, 'data', 'state', 'app', 'prompts');
 const REQUEST_DIR = () => path.join(ROOT, 'data', 'state', 'app', 'requests');
 const stateFile = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.json') : null);
-function removeStateFile(w) { w.lastTranscript = null; w.lastModel = null; w.hooked = false; const f = stateFile(w); if (f) { try { fs.unlinkSync(f); } catch { /* 없음 */ } try { fs.unlinkSync(f.replace(/\.json$/, '.hooked')); } catch { /* 없음 */ } } clearSubs(w); }
+function removeStateFile(w) { w.lastTranscript = null; w.lastModel = null; w.hooked = false; const f = stateFile(w); if (f) { try { fs.unlinkSync(f); } catch { /* 없음 */ } try { fs.unlinkSync(f.replace(/\.json$/, '.hooked')); } catch { /* 없음 */ } try { const sf = f.replace(/\.json$/, '.sess'); if (fs.lstatSync(sf).isFile()) fs.unlinkSync(sf); } catch { /* 없음 */ } try { const cf = f.replace(/\.json$/, '.ctx'); if (fs.lstatSync(cf).isFile()) fs.unlinkSync(cf); } catch { /* 없음 */ } } sessCache.delete(w.id); ctxCache.delete(w.id); w.sessSeenAt = null; w.sessSeenSid = null; w.sessSeenSrc = null; w.sessInN = null; clearSubs(w); } // 세션 시작 표지(.sess)도 함께 지운다(pty 를 새로 띄울 때·작업 공간을 닫을 때)
 // 대화 기록 파일(<Claude 세션 id>.talk.jsonl; 훅이 훅 입력의 session_id 로 이름을 붙인다). 작업 공간을 닫을 때만 지운다(pty 다시 시작·앱 종료에서는 지우지 않는다: 같은 세션을 이어 열 수 있다). STATE_DIR 바로 아래의 일반 파일만
 // 작업 공간의 현재 Claude 세션 값: 훅이 알려 준 uuid(상태 파일의 transcript; 훅이 파일 이름으로 쓰는 session_id 와 같은 값) 우선, 없으면 앱이 정한 claudeSid. /clear 로 세션이 바뀌면 값도 바뀐다
+// ---- 세션 시작 표지(<앱이 터미널에 준 세션 값>.sess): 훅이 세션 시작·/clear·/compact 때 통째로 바꿔 쓴다. 내용은 믿지 않고 형식을 검사한다(L.sessParse) ----
+const SESS_MAX_BYTES = 4096;
+const sessFile = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.sess') : null);
+const sessCache = new Map(); // 작업 공간 id -> { file, mtime, size, sess }
+const FAKE_SESS = !app.isPackaged && ['clear', 'compact', 'precompact'].includes(process.env.MARU_APP_SESS) ? process.env.MARU_APP_SESS : null; // 시험 전용: 표지가 있는 것처럼 화면만 그린다(디스크 없음)
+function sessOf(w) {
+  if (!w || !w.term) return null;
+  if (SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK) return FAKE_SESS ? { at: Date.now(), sid: 'fake-session-0001', source: FAKE_SESS } : null; // 개발용·스모크 모드는 실제 디스크를 읽지 않는다
+  const f = sessFile(w); if (!f) return null;
+  let r = null;
+  try {
+    const dir = STATE_DIR(); if (fs.lstatSync(dir).isSymbolicLink()) return null; // 폴더 확인
+    const ls = fs.lstatSync(f);
+    if (!ls.isFile() || ls.size < 1 || ls.size > SESS_MAX_BYTES) { sessCache.delete(w.id); return null; } // 보통 파일·크기 4KB 이하
+    const c = sessCache.get(w.id);
+    if (c && c.file === f && c.mtime === ls.mtimeMs && c.size === ls.size) return c.sess;
+    const rr = readRegular(f, SESS_MAX_BYTES, false);
+    r = rr && !rr.truncated ? L.sessParse(rr.text) : null;
+    if (r) r = { ...r, mtimeMs: ls.mtimeMs }; // 표지 시각과 파일 mtime 이 어긋나면 L.sessAlive 가 버린다
+    sessCache.set(w.id, { file: f, mtime: ls.mtimeMs, size: ls.size, sess: r });
+  } catch { sessCache.delete(w.id); return null; }
+  return r;
+}
+// ---- 컨텍스트 사용량(<앱이 터미널에 준 세션 값>.ctx): 상태줄 명령이 한 줄 JSON 으로 바꿔 쓴다. 내용은 믿지 않고 형식을 검사한다(L.ctxParse) ----
+const ctxFile = (w) => (ROOT && w.sessionId ? path.join(STATE_DIR(), w.sessionId + '.ctx') : null);
+const ctxCache = new Map(); // 작업 공간 id -> { file, mtime, size, ctx }
+const FAKE_CTX_ENV = process.env.MARU_APP_CTX !== undefined && process.env.MARU_APP_CTX.trim() !== '' ? Number(process.env.MARU_APP_CTX) : NaN;
+function ctxOf(w) {
+  if (!w || !w.term) return null;
+  if (SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK) { // 개발용·스모크 모드는 실제 디스크를 읽지 않는다. 읽기 화면 개발용 모드만 가짜 값을 준다
+    if (!(TEST_UI && TEST_UI.startsWith('read'))) return null;
+    const pct = !app.isPackaged && Number.isFinite(FAKE_CTX_ENV) && FAKE_CTX_ENV >= 0 && FAKE_CTX_ENV <= 100 ? FAKE_CTX_ENV : 42;
+    return { at: Date.now(), pct, size: 1000000 };
+  }
+  const f = ctxFile(w); if (!f) return null;
+  let r = null;
+  try {
+    const dir = STATE_DIR(); if (fs.lstatSync(dir).isSymbolicLink()) return null; // 폴더 확인
+    const ls = fs.lstatSync(f);
+    if (!ls.isFile() || ls.size < 1 || ls.size > SESS_MAX_BYTES) { ctxCache.delete(w.id); return null; } // 보통 파일·크기 4KB 이하
+    const c = ctxCache.get(w.id);
+    if (c && c.file === f && c.mtime === ls.mtimeMs && c.size === ls.size) return c.ctx;
+    const rr = readRegular(f, SESS_MAX_BYTES, false);
+    r = rr && !rr.truncated ? L.ctxParse(rr.text) : null;
+    ctxCache.set(w.id, { file: f, mtime: ls.mtimeMs, size: ls.size, ctx: r });
+  } catch { ctxCache.delete(w.id); return null; }
+  return r;
+}
+// 살아 있는 표지(없으면 null): pty 시작보다 1초 넘게 앞서지 않고, 상태 기록이 없거나 표지가 상태 기록보다 뒤다. 표지를 처음 본 때(at 이 바뀔 때마다 한 번) 입력 횟수 기준값을 적는다
+function sessLive(w) {
+  const s = sessOf(w); if (!s) return null;
+  const rec = readAgentState(w);
+  const nowMs = Date.now();
+  if (!L.sessAlive(s, rec ? rec.atMs : NaN, w.ptyStartAt, { now: nowMs })) return null;
+  if (w.sessSeenAt !== s.at || w.sessSeenSid !== s.sid || w.sessSeenSrc !== s.source) { w.sessSeenAt = s.at; w.sessSeenSid = s.sid; w.sessSeenSrc = s.source; w.sessInN = L.sessBaseInN(s, w.ptyInAt, w.ptyInN, nowMs); } // 기준 시각 = min(표지 시각, 처음 본 시각)
+  return s;
+}
+function sessView(w, now) { // 렌더러에 주는 표지: precompact 가 120초를 넘으면 압축이 실패한 것으로 보고 주지 않는다
+  const s = sessLive(w); if (!s) return null;
+  if (s.source === 'precompact' && !(now - s.at <= L.SESS_PRECOMPACT_MAX_MS)) return null;
+  return { source: s.source, at: s.at };
+}
 function talkSid(w) {
+  const sl = sessLive(w); // 표지가 살아 있으면 표지의 세션 값(/clear 뒤에 읽기 화면이 새 세션의 빈 기록을 읽는다)
+  if (sl) return sl.sid;
   const h = hookSessionUuid(w);
   if (L.isSessionId(h)) return h;
   return L.isSessionId(w.claudeSid) ? w.claudeSid : null;
@@ -135,11 +199,16 @@ function bumpReadStat(key) {
   } catch { /* 기능을 막지 않는다 */ }
 }
 const talkCache = new Map(); // 작업 공간 id -> { sid, mtime, size, key, res }
-// sid: 닫기 직전(killPty 가 훅 상태를 지우기 전)에 구한 현재 세션 값. 이전 세션의 파일은 오래된 파일 정리가 지운다
+// 활동 기록 파일(<세션 값>.act.jsonl; 한 턴의 도구 호출). 대화 기록 파일과 같은 폴더·같은 조건
+const actFileOf = (sid) => (ROOT && L.isSessionId(sid) ? path.join(STATE_DIR(), sid + '.act.jsonl') : null);
+const actCache = new Map(); // 작업 공간 id -> { sid, mtime, size, key, res }
+// sid: 닫기 직전(killPty 가 훅 상태를 지우기 전)에 구한 현재 세션 값. 이전 세션의 파일은 오래된 파일 정리가 지운다. 활동 기록 파일도 함께 지운다
 function removeTalkFile(w, sid) {
-  talkCache.delete(w.id);
-  const f = talkFileOf(sid); if (!f) return;
-  try { if (fs.lstatSync(f).isFile()) fs.unlinkSync(f); } catch { /* 없음 */ }
+  talkCache.delete(w.id); actCache.delete(w.id);
+  for (const f of [talkFileOf(sid), actFileOf(sid), actFileOf(sid) && actFileOf(sid).replace(/\.act\.jsonl$/, '.act.lock')]) { // 잠금 파일(훅이 만든다)도 함께 지운다
+    if (!f) continue;
+    try { if (fs.lstatSync(f).isFile()) fs.unlinkSync(f); } catch { /* 없음 */ }
+  }
 }
 // 래퍼(maru-claude.sh)가 이 세션에 상태 훅을 붙였다는 표지(<id>.hooked, 일반 파일). 한 번 보면 그 세션 동안 기억한다(오래된 파일 정리가 표지를 지워도 유지)
 function sessionHooked(w) {
@@ -225,6 +294,27 @@ function wsState(w) {
   }
   return w.exited ? 'exited' : 'pending';
 }
+// ---- 읽기 화면 입력창의 붙여넣은 이미지: main 이 클립보드에서 직접 읽어 STATE_DIR/paste/<hex>.png 로 쓴다. 렌더러는 경로를 모르고 표(token)만 가진다 ----
+const PASTE_NAME_RE = /^[0-9a-f]{32}\.png$/;
+const PASTE_MAX_BYTES = 10 * 1024 * 1024; const PASTE_PER_WS = 8;
+const pasteTokens = new Map(); // token -> { path(실제 파일 경로; 가짜 모드는 null), wsId, at }
+const pasteDir = () => path.join(STATE_DIR(), 'paste');
+// 폴더를 준비한다(없으면 모드 700; 링크·폴더가 아니면 null). 경로 또는 null
+function pasteDirReady() {
+  if (!ROOT) return null;
+  const d = pasteDir();
+  try {
+    fs.mkdirSync(STATE_DIR(), { recursive: true, mode: 0o700 });
+    let st = null; try { st = fs.lstatSync(d); } catch { /* 없음 */ }
+    if (!st) { fs.mkdirSync(d, { mode: 0o700 }); st = fs.lstatSync(d); }
+    return st.isDirectory() && !st.isSymbolicLink() ? d : null;
+  } catch { return null; }
+}
+function pasteForget(token) { // 표를 버리고 파일을 지운다(링크는 지우지 않는다)
+  const t = pasteTokens.get(token); pasteTokens.delete(token);
+  if (t && t.path) { try { if (fs.lstatSync(t.path).isFile()) fs.unlinkSync(t.path); } catch { /* 이미 없음 */ } }
+}
+function pasteForgetWs(wsId) { for (const [k, v] of [...pasteTokens]) if (v.wsId === wsId) pasteForget(k); }
 const STATE_MAX_AGE_MS = 24 * 3600 * 1000;
 // 대화 기록은 더 오래 둔다: 앱이 이틀(48시간) 안의 세션을 이어 열 수 있으므로 그 사이에 지워지지 않게 72시간
 const TALK_MAX_AGE_MS = 72 * 3600 * 1000;
@@ -236,7 +326,7 @@ function cleanOldStateFiles() {
     if (fs.lstatSync(dir).isSymbolicLink()) return;
     for (const name of fs.readdirSync(dir)) {
       if (name === READ_STATS_FILE) continue; // 사용 횟수 파일은 날짜별 기록이라 나이로 지우지 않는다(60일은 bumpReadStat 이 자른다)
-      if (!(name.startsWith('.') || name.endsWith('.json') || name.endsWith('.talk.jsonl') || name.endsWith('.subs') || name.endsWith('.hooked'))) continue;
+      if (!(name.startsWith('.') || name.endsWith('.json') || name.endsWith('.talk.jsonl') || name.endsWith('.act.jsonl') || name.endsWith('.act.lock') || name.endsWith('.subs') || name.endsWith('.hooked') || name.endsWith('.sess') || name.endsWith('.ctx'))) continue;
       try { // 항목마다 따로 감싸 하나가 실패해도 나머지를 계속한다
         const f = path.join(dir, name);
         const st = fs.lstatSync(f);
@@ -244,10 +334,24 @@ function cleanOldStateFiles() {
           for (const n of fs.readdirSync(f)) { try { const g = path.join(f, n); if (fs.lstatSync(g).isFile()) fs.unlinkSync(g); } catch { /* 무시 */ } }
           fs.rmdirSync(f); continue;
         }
-        if (st.isFile() && Date.now() - st.mtimeMs > (name.endsWith('.talk.jsonl') ? TALK_MAX_AGE_MS : STATE_MAX_AGE_MS)) fs.unlinkSync(f);
+        if (st.isFile() && Date.now() - st.mtimeMs > (name.endsWith('.talk.jsonl') || name.endsWith('.act.jsonl') || name.endsWith('.act.lock') ? TALK_MAX_AGE_MS : STATE_MAX_AGE_MS)) fs.unlinkSync(f);
       } catch { /* 이 항목만 건너뜀 */ }
     }
   } catch { /* 디렉터리 없음 */ }
+  cleanOldPastes();
+}
+function cleanOldPastes() { // 붙여넣은 이미지: 이름이 <32자 hex>.png 이고 24시간 넘은 일반 파일만(링크는 건드리지 않는다). 시작 때와 6시간마다
+  if (!ROOT) return;
+  try {
+    const pd = pasteDir();
+    const ps = fs.lstatSync(pd);
+    if (ps.isDirectory() && !ps.isSymbolicLink()) {
+      for (const name of fs.readdirSync(pd)) {
+        if (!PASTE_NAME_RE.test(name)) continue;
+        try { const f = path.join(pd, name); const st = fs.lstatSync(f); if (st.isFile() && Date.now() - st.mtimeMs > STATE_MAX_AGE_MS) fs.unlinkSync(f); } catch { /* 이 항목만 건너뜀 */ }
+      }
+    }
+  } catch { /* 폴더 없음 */ }
 }
 const INDEX_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 let cache = {
@@ -602,7 +706,7 @@ function spawnPty(w, cols, rows) {
   if (resume) { w.claudeSid = resume; w.claudeSidAt = Date.now(); } else if (fresh) { w.claudeSid = fresh; w.claudeSidAt = Date.now(); saveWsLater(); } else if (!w.fx) { w.claudeSid = null; w.claudeSidAt = null; }
   if (w.startNote) { w.noteKind = w.startNote; w.noteShownAt = null; w.startNote = null; } // 이어 열었거나 새로 시작한 이유(탭 안내용): 처음 보일 때까지 남고, 보인 뒤 몇 초만 // 앱을 다시 켜며 이어 열었거나 새로 시작한 이유(탭 안내용, 몇 초만)
   w.awaitClaude = !!w.expectClaude || !!resume; w.expectClaude = false; w.sawOff = false; w.claudeUp = false; w.claudeProc = ''; w.typedN = 0; rcReset(w);
-  w.launchInAt = 0; w.launchInN = 0; w.firstPasteInAt = 0; w.firstPasteInN = 0; w.claudeUpAt = 0; // 첫 메시지 길: claude 실행 줄을 쓴 직후의 ptyInAt·ptyInN, 첫 붙여넣기 직후의 같은 값, claudeUp 이 참이 된 시각(새 pty 마다 지운다)
+  w.launchInAt = 0; w.launchInN = 0; w.firstPasteInAt = 0; w.firstPasteInN = 0; w.claudeUpAt = 0; w.sessSeenAt = null; w.sessSeenSid = null; w.sessSeenSrc = null; w.sessInN = null; sessCache.delete(w.id); // 첫 메시지 길: claude 실행 줄을 쓴 직후의 ptyInAt·ptyInN, 첫 붙여넣기 직후의 같은 값, claudeUp 이 참이 된 시각(새 pty 마다 지운다)
   w.ptyStartAt = Date.now(); w.ptyInAt = 0; w.ptyInN = 0; w.watchProc = false; w.sawUp = false; // 읽기 입력창의 판정용: pty 를 띄운 시각, 그 pty 에 마지막으로 쓴 시각(markIn), 앱이 claude 를 띄웠는가(이름 기억 대상), 붙여넣기 모드 켬을 봤는가
   self.onData((d) => {
     if (w.term !== self) return;
@@ -838,12 +942,14 @@ const wsView = () => {
     const reportAt = reportedAtOf(w);
     const ux = derivedState(w, state);
     const v = { id: w.id, title: w.title, path: L.shortenPath(w.cwd, os.homedir()), state, ux, bp: w.bracketed, bg: L.bgCount(rec, state, now, SUBS_TTL_MS), note: L.noteVisible({ kind: w.noteKind, shownAt: w.noteShownAt, now }) ? w.noteKind : null, prev: !!w.prevSid, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }),
+      sess: w.id === activeId && w.term ? sessView(w, now) : null, // 살아 있는 세션 시작 표지의 { source, at }(활성 작업 공간만; 아니면 null)
       sub: !w.fx && L.maruEligible(w), // 사용자가 이 작업 공간 아래에 하위 세션을 직접 열 수 있다(마루가 요청한 하위 세션의 부모와 같은 자격)
       parentId: o.depth === 1 ? w.parentId : null, depth: o.depth, project: w.project || null, team: L.teamChip(w.squad, FAKE_SQ_UI ? fakeSquads() : squads), loc: L.currentLocation({ recCwd: rec && rec.cwd, cwd: w.cwd, cwdReal: w.cwdReal }),
       reports: own ? own.count : 0, reportAt, flash: !!w.flashUntil && w.flashUntil > now, auto: !!w.autoStart && !w.term && !w.exited && !w.unavailable,
       cnote: w.childNote && now - w.childNote.at < CNOTE_MS ? { kind: w.childNote.kind, reason: w.childNote.reason || null, title: w.childNote.title || null } : null,
       subs: w.parentId ? L.childSubNames(readSubs(w)) : [], unread: !!w.unread, rc: rcViewOf(w, rec, now),
-      sr: w.id === activeId && w.term ? (() => { const cx = readCtxOf(w, now); const r = L.readCanSend(cx); if (r.ok) return ''; return r.reason === 'first' && cx.rawState == null && cx.ux === 'none' && L.readCanSendFirst(cx).ok ? '' : r.reason; })() : '' }; // sr: 읽기 화면 입력창의 미리 잠금용(활성 작업 공간만; 최종 판단은 read:send 가 다시 한다). rc 는 시간에 따라 바뀐다: 렌더러가 1초마다 ws:get 을 하므로 60초 진행 중 표시가 끝나는 순간도 따로 알릴 필요가 없다
+      sr: w.id === activeId && w.term ? (() => { const cx = readCtxOf(w, now); const r = L.readCanSend(cx); if (r.ok) return ''; if (r.reason === 'first' && cx.rawState == null && cx.ux === 'none') { const f = firstReasonOf(L.readCanSendFirst(cx)); return f.ok ? '' : f.reason === 'settling' ? '' : f.reason; } return r.reason; })() : '',
+      bs: w.id === activeId && w.term ? (() => { const cx = readCtxOf(w, now); return L.readCanSend(cx).reason === 'busy' && L.readCanSendBusy(readCtxBusy(w, now)).ok; })() : false }; // bs: 작업 중에도 대기열에 넣어 보낼 수 있는가(렌더러는 입력창을 잠그지 않는다; 판단은 read:send 가 다시 한다) // sr: 읽기 화면 입력창의 미리 잠금용(활성 작업 공간만; 최종 판단은 read:send 가 다시 한다). rc 는 시간에 따라 바뀐다: 렌더러가 1초마다 ws:get 을 하므로 60초 진행 중 표시가 끝나는 순간도 따로 알릴 필요가 없다
     if (FAKE_HIER && w.fakeView) return { ...v, ...(FAKE_RC ? { rc: FAKE_RC, cc: true } : {}), ...w.fakeView, state: w.fakeView.state || state }; // fakeView 에 rc 를 직접 줄 수도 있다
     return v;
   });
@@ -910,7 +1016,7 @@ async function closeWorkspace(id) {
     }
     const tsid = talkSid(w); killPty(w); removeStateFile(w); removeTalkFile(w, tsid); dropPromptFile(w);
     const idx = wsOrder().findIndex((x) => x.id === id);
-    wss.delete(id); reportSum.delete(id);
+    wss.delete(id); reportSum.delete(id); pasteForgetWs(id);
     for (const k of wss.values()) if (k.parentId === id) k.parentId = null; // 부모를 닫아도 하위 세션은 닫지 않는다: 최상위가 되고 프로젝트 이름표는 남는다
     if (activeId === id) { const rest = wsOrder(); activeId = rest.length ? rest[Math.min(idx, rest.length - 1)].id : null; }
     wsChanged(true);
@@ -1491,7 +1597,7 @@ ipcMain.on('pty:write', (e, id, data) => {
   if (L.isUserInput(data)) w.typedN = (w.typedN || 0) + 1; // 터미널이 스스로 보내는 응답은 입력으로 세지 않는다
   if (L.shouldDropPrev({ data, typedN: w.typedN || 0, hasPrev: !!w.prevSid })) { w.prevSid = null; saveWsLater(); } // 새 세션에서 첫 프롬프트를 보냈다
   w.draft = L.draftStep(w.draft, data); // 입력줄에 보내지 않은 글이 있을 것 같은가(원격 토글이 쓰던 글을 건드리지 않게)
-  if (!L.isTermReply(data)) markIn(w); // 터미널의 자동 응답(포커스·커서 위치·장치 속성·상태 보고)만 입력이 아니다. 조금이라도 다르면 입력(isUserInput 은 방향키까지 응답으로 봐서 쓰지 않는다)
+  if (!L.isPassiveTermInput(data)) markIn(w); // 터미널의 자동 응답(포커스·커서 위치·장치 속성·상태 보고·시작 질문의 답)과 단추 없는 마우스 움직임 보고만 입력이 아니다. 조금이라도 다르면 입력(isUserInput 은 방향키까지 응답으로 봐서 쓰지 않는다)
   w.term.write(data);
 });
 // 사용자가 이 작업 공간 터미널에서 Esc 를 눌렀다(렌더러가 신뢰된 keydown 만 보낸다). busy/waiting 일 때만 시각을 적는다. 상태 파일은 쓰지 않는다
@@ -1814,16 +1920,21 @@ function talkLastOf(w) {
     if (!st.isFile() || st.size < 1 || st.size > L.TALK_FILE_MAX) return null;
     const len = Math.min(st.size, TALK_TAIL_BYTES); const buf = Buffer.alloc(len);
     const got = fs.readSync(fd, buf, 0, len, st.size - len);
-    const last = got === len ? L.talkLast(buf.toString('utf8'), len === st.size) : null;
+    const last = got === len ? L.talkLastTwo(buf.toString('utf8'), len === st.size) : null; // 마지막 두 줄(앞 줄이 읽은 범위 밖이면 prev 는 null)
     talkTailCache.set(w.id, { sid, mtime: st.mtimeMs, size: st.size, last });
     return last;
   } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch { /* 무시 */ } } }
 }
 function readCtxOf(w, now) {
+  const cx = readCtxBase(w, now);
+  const sl = sessLive(w);
+  return sl ? L.sessCtx(cx, sl, { startAt: w.ptyStartAt, sessInN: w.sessInN, now }) : cx; // 표지가 없거나 살아 있지 않으면 cx 그대로(같은 객체)
+}
+function readCtxBase(w, now) {
   const state = wsState(w); const rec = readAgentState(w);
   const last = talkLastOf(w);
   return {
-    rawState: rec ? rec.state : null, recAt: rec ? rec.atMs : NaN, talkRole: last ? last.role : null, talkAt: last ? last.at : NaN, inAt: Number.isFinite(w.ptyInAt) ? w.ptyInAt : NaN, startAt: Number.isFinite(w.ptyStartAt) ? w.ptyStartAt : NaN, // 새 규칙의 입력: 원래 기록(낮추지 않은 값)·시각(밀리초)·마지막 대화 줄·마지막 pty 입력·pty 시작
+    rawState: rec ? rec.state : null, recAt: rec ? rec.atMs : NaN, talkRole: last ? last.role : null, talkAt: last ? last.at : NaN, talkUserAt: last && last.role === 'assistant' && last.prevRole === 'user' && Number.isFinite(last.prevAt) ? last.prevAt : null, inAt: Number.isFinite(w.ptyInAt) ? w.ptyInAt : NaN, startAt: Number.isFinite(w.ptyStartAt) ? w.ptyStartAt : NaN, // 새 규칙의 입력: 원래 기록(낮추지 않은 값)·시각(밀리초)·마지막 대화 줄·마지막 pty 입력·pty 시작
     hasTerm: !!w.term, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }),
     procName: termProc(w), knownName: w.claudeProc || '', hooked: !!ROOT && (w.isRoot === true || sessionHooked(w)), ux: derivedState(w, state),
     bg: L.bgCount(rec, state, now, SUBS_TTL_MS), bracketed: w.bracketed === true, quietMs: now - (w.lastOutputAt || 0), dirty: w.draft === true,
@@ -1852,6 +1963,7 @@ ipcMain.on('read:snap', (e, id, nonce, snap) => {
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 // 첫 메시지(훅 기록이 아직 없는 세션)를 입력창으로 보낸다. 붙여넣기만 쓰고 화면에서 글이 상자 안에 보이는 것을 확인한 뒤에야 Enter 를 보낸다.
 // 반환: { ok:true } | { ok:false, reason }. 이유 first-screen(화면 사전 확인 실패: 아무것도 쓰지 않았다), first-unsent(글은 넣었지만 Enter 는 보내지 않았다), 그 밖에는 L.readCanSendFirst 의 이유
+function firstReasonOf(r) { return r && r.ok === false && r.reason === 'touched' ? { ok: false, reason: 'first-touched' } : r; } // 첫 메시지 길의 touched 는 "마지막 답변 뒤"가 아니라 "claude 를 띄운 뒤" 입력이 있었다는 뜻이다: 이름을 따로 준다
 async function readSendFirst(w, text) {
   if (w.readFirstBusy) return { ok: false, reason: 'rate' };
   if (Date.now() - (w.readSendAt || 0) < READ_SEND_GAP_MS) return { ok: false, reason: 'rate' };
@@ -1860,12 +1972,12 @@ async function readSendFirst(w, text) {
   try {
     const term = w.term;
     if (!term) return { ok: false, reason: 'nosession' };
-    const p0 = L.readCanSendFirst(readCtxOf(w, Date.now()));
+    const p0 = firstReasonOf(L.readCanSendFirst(readCtxOf(w, Date.now())));
     if (!p0.ok) return p0;
     const snap = await readSnapOf(w);
     if (!L.promptBoxCheck(snap).ok) return { ok: false, reason: 'first-screen' }; // 아무것도 쓰지 않았다
     if (w.term !== term || !wsOk()) return { ok: false, reason: 'invalid' };
-    const p1 = L.readCanSendFirst(readCtxOf(w, Date.now())); // 화면을 읽는 사이에 바뀐 것이 없는지 쓰기 직전에 다시 본다
+    const p1 = firstReasonOf(L.readCanSendFirst(readCtxOf(w, Date.now()))); // 화면을 읽는 사이에 바뀐 것이 없는지 쓰기 직전에 다시 본다
     if (!p1.ok) return p1;
     const paste = '\x1b[200~' + text + '\x1b[201~';
     const pasteAt = Date.now();
@@ -1893,6 +2005,204 @@ async function readSendFirst(w, text) {
     }
   } finally { w.readFirstBusy = false; }
 }
+// ---- 작업 중 보내기(Claude Code 의 대기열에 넣기)와 지금 보내기 ----
+// 가장 중요한 원칙: 앱은 권한 확인 창·선택 창에 사용자 대신 답하지 않는다. 확신이 없으면 보내지 않는다(Enter 가 들어가면 기본 선택지가 눌린다).
+// 순서: 판정(L.readCanSendBusy) -> 화면 사전 확인(상자가 비고 커서가 입력줄) -> 쓰기 직전 재판정 -> 글만 붙여넣기 -> 화면을 되풀이해 읽다가
+// 넷(같은 작업 공간·pty, 글이 상자 안, 판정 유지, 다른 입력 없음)이 참인 화면을 받은 같은 틱에서 곧바로 \r. 시간이 다 되면 Enter 없이 busy-unsent.
+// 지금 보내기(opts.now)는 대기열에 넣은 뒤 같은 방식으로 화면(상자 비어 있음 + 안내 글에 ctrl+x ctrl+s)을 확인하고 같은 틱에서 Ctrl+X Ctrl+S 를 쓴다.
+// 남는 위험: 화면을 확인한 직후부터 Enter 가 닿기 전의 짧은 틈에 확인 창이 뜨면 그 창에 Enter 가 들어갈 수 있다. 짝 없는 pre 3초 규칙과 같은 틱 쓰기가 이 틈을 줄인다
+// 활동 기록(.act.jsonl)에서 짝 없는 pre 의 가장 새 것의 나이(밀리초). 동기로 읽는다(화면을 받은 같은 틱에서 쓰려면 await 가 없어야 한다). 못 읽으면 NaN
+function actOpenAgeOf(w, now) {
+  if (SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK) return NaN;
+  const file = actFileOf(talkSid(w)); if (!file) return NaN;
+  let fd = null;
+  try {
+    const ls = fs.lstatSync(file);
+    if (!ls.isFile() || ls.size > L.ACT_FILE_MAX) return NaN;
+    if (path.dirname(fs.realpathSync(file)) !== fs.realpathSync(STATE_DIR())) return NaN;
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+    const st = fs.fstatSync(fd); if (!st.isFile() || st.size > L.ACT_FILE_MAX) return NaN;
+    return L.actOpenPreAge(L.actParse(fs.readFileSync(fd, 'utf8')).items, now);
+  } catch { return NaN; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch { /* 무시 */ } } }
+}
+function readCtxBusy(w, now) {
+  const s = sessView(w, now);
+  return { ...readCtxOf(w, now), openPreAge: actOpenAgeOf(w, now), precompact: !!s && s.source === 'precompact' };
+}
+const BUSY_PASS = new Set(['nosession', 'notclaude', 'waiting', 'draft', 'busy-tool', 'busy-short']);
+const busyReasonOf = (r) => ({ ok: false, reason: BUSY_PASS.has(r.reason) ? r.reason : 'busy' }); // 그 밖의 이유(작업 중이 아님·낡은 기록·활동 기록 없음 등)는 모두 busy
+const READ_BUSY_SNAP_MS = 60;
+async function readSendBusy(w, text, opts) {
+  if (SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK) return { ok: false, reason: 'busy' };
+  if (w.readFirstBusy) return { ok: false, reason: 'rate' };
+  if (Date.now() - (w.readSendAt || 0) < READ_SEND_GAP_MS) return { ok: false, reason: 'rate' };
+  w.readFirstBusy = true;
+  const wsOk = () => w.id === activeId && !picking && !closing && !quitAsking && !restarting;
+  const wantNow = !!(opts && opts.now === true);
+  try {
+    const term = w.term;
+    if (!term) return { ok: false, reason: 'nosession' };
+    if (L.busyTextRisky(text)) return { ok: false, reason: 'busy-short' }; // 아무것도 쓰지 않았다
+    const p0 = L.readCanSendBusy(readCtxBusy(w, Date.now()));
+    if (!p0.ok) return busyReasonOf(p0);
+    const snap = await readSnapOf(w);
+    if (!L.promptBoxCheck(snap).ok) return { ok: false, reason: 'busy-screen' }; // 아무것도 쓰지 않았다
+    if (w.term !== term || !wsOk()) return { ok: false, reason: 'invalid' };
+    const p1 = L.readCanSendBusy(readCtxBusy(w, Date.now())); // 화면을 읽는 사이에 바뀐 것이 없는지 쓰기 직전에 다시 본다
+    if (!p1.ok) return busyReasonOf(p1);
+    const paste = '\x1b[200~' + text + '\x1b[201~';
+    const pasteAt = Date.now();
+    markIn(w);
+    try { term.write(paste); } catch { return { ok: false, reason: 'nosession' }; }
+    w.draft = L.draftStep(w.draft, paste); w.readSendAt = pasteAt; w.typedN = (w.typedN || 0) + 1; // 붙여넣기는 초안이 있는 것으로 센다
+    const pasteInN = w.ptyInN;
+    const t0 = Date.now();
+    for (;;) {
+      await sleepMs(L.READ_BUSY_POLL_MS);
+      const live = w.term === term && wsOk();
+      const rq = Date.now();
+      let sn = live ? await readSnapOf(w) : null;
+      if (Date.now() - rq > READ_BUSY_SNAP_MS) sn = null; // 받는 데 오래 걸린 화면은 낡았을 수 있다: 버리고 다시 읽는다
+      // 아래에는 기다리는 곳이 하나도 없다: 화면을 받은 같은 틱에서 판정하고 곧바로 쓴다
+      const n = Date.now();
+      const boxOk = live && sn ? L.promptBoxCheck(sn, text).ok : false;
+      const v = L.busySendVerdict({ elapsedMs: n - t0, boxOk, ctx: readCtxBusy(w, n), sameWs: live && wsOk(), sameTerm: w.term === term, ptyInN: w.ptyInN, pasteInN });
+      if (v.act === 'wait') continue;
+      if (v.act !== 'send') return { ok: false, reason: 'busy-unsent' }; // 붙여넣은 글은 지우지 않는다. w.draft 는 참이라 다음 보내기는 draft 로 막힌다
+      markIn(w);
+      try { term.write('\r'); } catch { return { ok: false, reason: 'busy-unsent' }; }
+      break;
+    }
+    const queuedInN = w.ptyInN;
+    bumpReadStat('sent');
+    if (L.shouldDropPrev({ data: paste + '\r', typedN: w.typedN, hasPrev: !!w.prevSid })) { w.prevSid = null; saveWsLater(); }
+    w.draft = L.draftStep(w.draft, paste + '\r');
+    if (!wantNow) return { ok: true, queued: true, now: false };
+    const t1 = Date.now();
+    for (;;) {
+      await sleepMs(L.READ_BUSY_POLL_MS);
+      const live = w.term === term && wsOk();
+      const rq = Date.now();
+      let sn = live ? await readSnapOf(w) : null;
+      if (Date.now() - rq > READ_BUSY_SNAP_MS) sn = null; // 받는 데 오래 걸린 화면은 낡았을 수 있다: 버리고 다시 읽는다
+      // 아래에도 기다리는 곳이 없다
+      const n = Date.now();
+      const boxOk = live && sn ? L.promptBoxCheck(sn).ok : false;
+      const keyShown = live && sn ? L.queueKeyShown(sn.lines) : false;
+      const v = L.nowSendVerdict({ elapsedMs: n - t1, boxOk, keyShown, ctx: readCtxBusy(w, n), sameWs: live && wsOk(), sameTerm: w.term === term, ptyInN: w.ptyInN, queuedInN });
+      if (v.act === 'wait') continue;
+      if (v.act !== 'send') return { ok: true, queued: true, now: false }; // 글은 대기열에 있다. 키는 쓰지 않았다
+      markIn(w);
+      try { term.write(L.READ_NOW_KEY); } catch { return { ok: true, queued: true, now: false }; }
+      return { ok: true, queued: true, now: true };
+    }
+  } finally { w.readFirstBusy = false; }
+}
+// 슬래시 명령을 화면을 확인하며 보낸다(readSendFirst 와 같은 순서: 화면 사전 확인 -> 글만 붙여넣기 -> 화면 사후 확인 -> Enter 직전 확인 -> Enter). readSendFirst 는 답변 직후 상태에서 진입 판정(readCanSendFirst)을 넘지 못하므로 따로 둔다.
+// gate(ctx) -> { ok } | { ok:false, reason }: 진입 판정과 쓰기 직전 재판정(답변 직후는 L.readCanSend, 훅 기록이 없는 세션은 L.readCanSendFirst). 이유 slash-nosession(공통 조건 불통과), slash-screen(아무것도 쓰지 않았다), slash-unsent(넣었으나 Enter 는 보내지 않았다)
+async function readSendChecked(w, text, gate) {
+  if (w.readFirstBusy) return { ok: false, reason: 'rate' };
+  if (Date.now() - (w.readSendAt || 0) < READ_SEND_GAP_MS) return { ok: false, reason: 'rate' };
+  w.readFirstBusy = true;
+  const wsOk = () => w.id === activeId && !picking && !closing && !quitAsking && !restarting;
+  try {
+    const term = w.term;
+    if (!term) return { ok: false, reason: 'nosession' };
+    const c0 = readCtxOf(w, Date.now());
+    const p0 = gate(c0); if (!p0.ok) return p0;
+    if (L.readFirstBase(c0)) return { ok: false, reason: 'slash-nosession' };
+    const snap = await readSnapOf(w);
+    if (!L.promptBoxCheck(snap).ok) return { ok: false, reason: 'slash-screen' }; // 아무것도 쓰지 않았다
+    if (w.term !== term || !wsOk()) return { ok: false, reason: 'invalid' };
+    const c1 = readCtxOf(w, Date.now());
+    const p1 = gate(c1); if (!p1.ok) return p1; // 화면을 읽는 사이에 바뀐 것이 없는지 쓰기 직전에 다시 본다
+    if (L.readFirstBase(c1)) return { ok: false, reason: 'slash-nosession' };
+    const paste = '\x1b[200~' + text + '\x1b[201~';
+    const pasteAt = Date.now();
+    markIn(w);
+    try { term.write(paste); } catch { return { ok: false, reason: 'nosession' }; }
+    w.draft = true; w.firstPasteInAt = w.ptyInAt; w.firstPasteInN = w.ptyInN; w.readSendAt = pasteAt; w.typedN = (w.typedN || 0) + 1;
+    const t0 = Date.now();
+    for (;;) {
+      await sleepMs(L.READ_FIRST_POLL_MS);
+      const live = w.term === term && wsOk();
+      const snapAt = Date.now();
+      const boxOk = live ? L.promptBoxSlash(await readSnapOf(w), text).ok : false;
+      const n = Date.now();
+      const v = L.firstSendVerdict({ elapsedMs: n - t0, now: n, pasteAt, lastOutputAt: w.lastOutputAt, snapAt, boxOk, ctx: readCtxOf(w, n), sameWs: live && wsOk(), sameTerm: w.term === term, ptyInN: w.ptyInN, firstPasteInN: w.firstPasteInN });
+      if (v.act === 'wait') continue;
+      if (v.act !== 'send') return { ok: false, reason: 'slash-unsent' }; // 넣은 글은 지우지 않는다. w.draft 는 참이라 다음 보내기는 draft 로 막힌다
+      if (!(w.lastOutputAt < snapAt)) return { ok: false, reason: 'slash-unsent' };
+      markIn(w);
+      try { term.write('\r'); } catch { return { ok: false, reason: 'slash-unsent' }; }
+      const data = paste + '\r';
+      bumpReadStat('sent');
+      if (L.shouldDropPrev({ data, typedN: w.typedN, hasPrev: !!w.prevSid })) { w.prevSid = null; saveWsLater(); }
+      w.draft = L.draftStep(w.draft, data);
+      return { ok: true };
+    }
+  } finally { w.readFirstBusy = false; }
+}
+// ---- 입력창의 명령 목록: 기본(/clear·/compact) + 작업 폴더·사용자 폴더의 .claude/skills/<이름>/SKILL.md, .claude/commands/<이름>.md ----
+// 보통 파일·폴더만(링크는 따라가지 않는다), 파일마다 앞 4KB, 폴더 항목은 각 200개까지(opendirSync 로 열어 200개에서 멈춘다), 100개까지. 작업 공간별로 30초 캐시. 알려진 내장 명령(L.SLASH_BLOCK)·clear·compact 와 이름이 겹치는 스킬·명령은 뺀다(L.slashDiskOk)
+// 이 목록이 허용 목록이다: read:send 의 슬래시 명령은 이름이 여기에 정확히 있을 때만 쓴다
+const CMD_MAX = 100; const CMD_DIR_SCAN = 200; const CMD_FILE_BYTES = 4096; const CMD_CACHE_MS = 30000;
+const cmdCache = new Map(); // 작업 공간 id -> { at, cwd, items }
+const plainDirOf = (p) => { try { const st = fs.lstatSync(p); return st.isDirectory() && !st.isSymbolicLink(); } catch { return false; } };
+function readDirLimited(p, max) { // 폴더 항목을 max 개까지만 읽는다
+  const out = []; let dir = null;
+  try { dir = fs.opendirSync(p); for (let i = 0; i < max; i++) { const d = dir.readSync(); if (!d) break; out.push(d); } } catch { /* 읽은 데까지 */ } finally { if (dir) { try { dir.closeSync(); } catch { /* 무시 */ } } }
+  return out;
+}
+function commandItemsReal(cwd) {
+  const items = [{ name: 'clear', desc: '', kind: 'builtin' }, { name: 'compact', desc: '', kind: 'builtin' }];
+  const seen = new Set(items.map((x) => x.name));
+  const add = (e, kind) => { if (!e || items.length >= CMD_MAX || seen.has(e.name) || !L.slashDiskOk(e.name)) return; seen.add(e.name); items.push({ name: e.name, desc: e.desc, kind }); };
+  const roots = [];
+  if (typeof cwd === 'string' && path.isAbsolute(cwd)) roots.push(cwd);
+  const home = os.homedir(); if (!roots.includes(home)) roots.push(home);
+  for (const root of roots) { // 작업 폴더가 먼저
+    const cd = path.join(root, '.claude');
+    if (!plainDirOf(cd)) continue;
+    const sd = path.join(cd, 'skills');
+    if (plainDirOf(sd)) {
+      const ents = readDirLimited(sd, CMD_DIR_SCAN);
+      for (const d of ents) {
+        if (items.length >= CMD_MAX) break;
+        if (!d.isDirectory() || d.isSymbolicLink()) continue;
+        const f = path.join(sd, d.name, 'SKILL.md');
+        try { if (!fs.lstatSync(f).isFile()) continue; } catch { continue; }
+        const r = readRegular(f, CMD_FILE_BYTES, false); if (!r) continue;
+        add(L.slashEntryParse(r.text, d.name, 'skill'), 'skill'); // 이름은 폴더 이름(frontmatter name 이 같을 때만 그것)
+      }
+    }
+    const md = path.join(cd, 'commands');
+    if (plainDirOf(md)) {
+      const ents = readDirLimited(md, CMD_DIR_SCAN);
+      for (const d of ents) {
+        if (items.length >= CMD_MAX) break;
+        if (!d.isFile() || d.isSymbolicLink() || !d.name.endsWith('.md')) continue;
+        const r = readRegular(path.join(md, d.name), CMD_FILE_BYTES, false); if (!r) continue;
+        add(L.slashEntryParse(r.text, d.name.slice(0, -3), 'command'), 'command'); // 이름은 파일 이름(frontmatter name 은 쓰지 않는다)
+      }
+    }
+  }
+  return items;
+}
+function cmdItemsOf(w) { // 작업 공간의 명령 목록(캐시 사용). read:commands 와 read:send 의 허용 목록이 같은 함수를 쓴다
+  if (SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK) return [{ name: 'clear', desc: '', kind: 'builtin' }, { name: 'compact', desc: '', kind: 'builtin' }, { name: 'review-notes', desc: 'Sample skill: summarize the notes of the day', kind: 'skill' }, { name: 'deploy-check', desc: 'Sample skill: check a release before shipping', kind: 'skill' }, { name: 'daily:standup', desc: 'Sample command: draft the daily stand-up', kind: 'command' }]; // 가짜 목록(디스크를 읽지 않는다)
+  const now = Date.now(); const c = cmdCache.get(w.id);
+  if (c && c.cwd === w.cwd && now - c.at < CMD_CACHE_MS) return c.items;
+  let items = [];
+  try { items = commandItemsReal(w.cwd); } catch { items = [{ name: 'clear', desc: '', kind: 'builtin' }, { name: 'compact', desc: '', kind: 'builtin' }]; }
+  cmdCache.set(w.id, { at: now, cwd: w.cwd, items });
+  return items;
+}
+ipcMain.handle('read:commands', (e, id) => {
+  const w = wsFrom(e, id); // 발신 창·작업 공간 확인
+  if (!w) return { items: [] };
+  return { items: cmdItemsOf(w) };
+});
 // 읽기 화면을 사용자가 단추로 켰다는 표지. 같은 창에서 2초 안의 반복은 한 번만 센다
 // 화면 블록을 그렸다('surf')·단추로 입력창을 채웠다('fill') 표지도 받는다. 횟수만 세고 내용은 받지 않는다
 const readMarkAt = { on: 0, surf: 0, fill: 0 }; const READ_MARK_GAP = { on: 2000, surf: 1000, fill: 300 };
@@ -1903,12 +2213,27 @@ ipcMain.on('read:mark', (e, kind) => {
   readMarkAt[kind] = now;
   bumpReadStat(kind);
 });
-const FAKE_READ_SEND = !!TEST_UI && (TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait' || TEST_UI === 'readsurf' || TEST_UI === 'readsurftop' || TEST_UI === 'readempty'); // 시험 전용: 실제로 쓰지 않고 성공만 돌려준다
+const FAKE_READ_SEND = !!TEST_UI && (TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait' || TEST_UI === 'readsurf' || TEST_UI === 'readsurftop' || TEST_UI === 'readempty' || TEST_UI === 'readcmd' || TEST_UI === 'readatt' || TEST_UI === 'readghost' || TEST_UI === 'readbusy'); // 시험 전용: 실제로 쓰지 않고 성공만 돌려준다
 ipcMain.handle('read:send', async (e, arg) => {
   const w = arg && typeof arg === 'object' ? wsFrom(e, arg.id) : null;
   if (!w) return { ok: false, reason: 'invalid' };
+  if (Array.isArray(arg.tokens) && arg.tokens.length > 0 && L.slashCmdOf(arg.text)) return { ok: false, reason: 'invalid' }; // 이미지와 슬래시 명령은 함께 보내지 않는다
+  if (Array.isArray(arg.tokens) && arg.tokens.length > 0) return readSendWithImages(w, arg); // 이미지가 있을 때만 따로 가는 길. tokens 가 없거나 비면 아래 기존 경로 그대로
   const c = L.readCleanSend(arg.text);
   if (!c.ok) return c;
+  const slash = L.slashCmdOf(c.text);
+  if (slash) { // 슬래시 명령: 한 줄만. 이름이 이 작업 공간의 명령 목록(main 이 구한 것)에 정확히 있을 때만 보낸다(허용 목록). 없으면 아무것도 쓰지 않고 거부. 화면을 확인하며 보내는 길로
+    if (c.text.includes('\n')) return { ok: false, reason: 'invalid' };
+    const word = /^\/(\S+)/.exec(c.text); // 첫 낱말 전체가 이름과 같아야 한다(`/clear/x` 거부)
+    if (!word || word[1].toLowerCase() !== slash || !L.slashAllowed(slash, cmdItemsOf(w))) return { ok: false, reason: 'slash-term' };
+    if (SMOKE || FAKE_READ_SEND) return { ok: true };
+    if (w.id !== activeId || picking || closing || quitAsking || restarting) return { ok: false, reason: 'invalid' };
+    const sc = readCtxOf(w, Date.now());
+    const scan = L.readCanSend(sc);
+    if (scan.ok) return readSendChecked(w, c.text, (cx) => L.readCanSend(cx));
+    if (scan.reason === 'first' && sc.rawState == null && sc.ux === 'none') return readSendChecked(w, c.text, (cx) => firstReasonOf(L.readCanSendFirst(cx)));
+    return scan;
+  }
   if (SMOKE || FAKE_READ_SEND) return { ok: true };
   if (w.id !== activeId || picking || closing || quitAsking || restarting) return { ok: false, reason: 'invalid' };
   const now = Date.now();
@@ -1916,6 +2241,7 @@ ipcMain.handle('read:send', async (e, arg) => {
   if (!can.ok) {
     const ctx = readCtxOf(w, now);
     if (can.reason === 'first' && ctx.rawState == null && ctx.ux === 'none') return readSendFirst(w, c.text); // 훅 기록이 하나도 없는 세션의 첫 메시지: 화면을 확인하는 따로의 길. 다른 first(낡은 기록·대화 기록 없음)는 그대로 거부한다
+    if (can.reason === 'busy') return readSendBusy(w, c.text, { now: arg.now === true }); // 지금 턴이 진행 중: 대기열에 넣는 따로의 길(판정은 L.readCanSendBusy). 이미지·슬래시 명령은 위에서 이미 갈라졌다
     return can;
   }
   if (now - (w.readSendAt || 0) < READ_SEND_GAP_MS) return { ok: false, reason: 'rate' };
@@ -1929,6 +2255,187 @@ ipcMain.handle('read:send', async (e, arg) => {
   w.draft = L.draftStep(w.draft, data); // 붙여넣기 뒤의 Enter 가 초안을 비운다
   return { ok: true };
 });
+
+// ---- 읽기 화면 입력창: 이미지 붙이기 ----
+// 클립보드의 이미지를 main 이 직접 읽어 파일로 쓰고 표(token)만 돌려준다. 경로는 렌더러에 주지 않는다
+const FAKE_IMG = !!(SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK); // 시험 전용: 어떤 개발용 화면 모드에서도 실제 클립보드·디스크·세션 쓰기를 건드리지 않는다
+const PASTE_PIXELS_MAX = 40000000; const PASTE_TOTAL_MAX = 32;
+const PASTE_TOKEN_MS = 24 * 3600 * 1000;
+function pastePurgeOld() { const now = Date.now(); for (const [k, v] of [...pasteTokens]) if (!v || !Number.isFinite(v.at) || now - v.at > PASTE_TOKEN_MS) pasteForget(k); } // 파일을 지우는 기한(24시간)과 같다. 렌더러가 잃어버린 표가 상한을 계속 채우지 않게 한다
+const pasteBusy = new Set(); // 진행 중인 붙여넣기 요청이 있는 작업 공간 id
+ipcMain.handle('read:paste-image', async (e, id) => {
+  const w = wsFrom(e, id);
+  if (!w) return { ok: false, reason: 'invalid' };
+  if (pasteBusy.has(w.id)) return { ok: false, reason: 'busy' };
+  pastePurgeOld();
+  if (pasteTokens.size >= PASTE_TOTAL_MAX || [...pasteTokens.values()].filter((v) => v.wsId === w.id).length >= PASTE_PER_WS) return { ok: false, reason: 'full' }; // 오래된 표를 지우지 않고 새 요청을 거부한다
+  pasteBusy.add(w.id);
+  try {
+    await new Promise((r) => setImmediate(r)); // 같은 작업 공간의 되풀이 요청이 겹칠 수 있게 한 번 양보한다(busy 가 막는다)
+    if (FAKE_IMG) return pasteFake(w);
+    let img = null;
+    try { img = clipboard.readImage(); } catch { img = null; }
+    if (!img || img.isEmpty()) return { ok: false, reason: 'noimage' };
+    return pasteImageSave(w, img);
+  } finally { pasteBusy.delete(w.id); }
+});
+// 렌더러가 paste 이벤트의 파일 바이트를 보낸다. 받은 바이트는 파일로 쓰지 않는다: nativeImage 로 풀어 다시 인코딩한 PNG 만 쓴다
+ipcMain.handle('read:paste-bytes', async (e, id, bytes) => {
+  const w = wsFrom(e, id);
+  if (!w) return { ok: false, reason: 'invalid' };
+  if (pasteBusy.has(w.id)) return { ok: false, reason: 'busy' };
+  pastePurgeOld();
+  if (pasteTokens.size >= PASTE_TOTAL_MAX || [...pasteTokens.values()].filter((v) => v.wsId === w.id).length >= PASTE_PER_WS) return { ok: false, reason: 'full' };
+  const isBytes = bytes instanceof Uint8Array || (bytes && bytes.buffer instanceof ArrayBuffer && typeof bytes.byteLength === 'number' && ArrayBuffer.isView(bytes));
+  if (!isBytes) return { ok: false, reason: 'invalid' };
+  if (bytes.byteLength < 1) return { ok: false, reason: 'noimage' };
+  if (bytes.byteLength > PASTE_MAX_BYTES) return { ok: false, reason: 'toobig' };
+  pasteBusy.add(w.id);
+  try {
+    await new Promise((r) => setImmediate(r));
+    if (FAKE_IMG) return pasteFake(w);
+    const buf0 = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const px = L.imgHeaderPixels(buf0); // 풀기 전에 머리의 가로×세로로 먼저 거른다(작게 압축된 아주 큰 이미지)
+    if (px !== null && (!Number.isFinite(px) || px < 1 || px > PASTE_PIXELS_MAX)) return { ok: false, reason: px >= 1 ? 'toobig' : 'noimage' };
+    let img = null;
+    try { img = nativeImage.createFromBuffer(buf0); } catch { img = null; }
+    if (!img || img.isEmpty()) return { ok: false, reason: 'noimage' };
+    return pasteImageSave(w, img);
+  } finally { pasteBusy.delete(w.id); }
+});
+const FAKE_THUMB = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='; // 개발용 가짜 응답의 미리보기
+function pasteFake(w) { // 개발용 가짜 응답: 클립보드도 디스크도 건드리지 않는다
+  const token = 'fake' + crypto.randomBytes(8).toString('hex');
+  pasteTokens.set(token, { path: null, wsId: w.id, at: Date.now() });
+  return { ok: true, token, w: 64, h: 48, bytes: 1234, thumb: FAKE_THUMB };
+}
+function pasteImageSave(w, img) { // 두 길(클립보드·바이트)이 같이 쓴다: 픽셀 수 검사 -> PNG 로 다시 인코딩 -> 크기 검사 -> wx·0600 저장 -> 표 발급
+  let buf = null; let size = null;
+  try { size = img.getSize(); } catch { return { ok: false, reason: 'noimage' }; }
+  if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width * size.height > PASTE_PIXELS_MAX) return { ok: false, reason: 'toobig' }; // 인코딩 전에 픽셀 수로 먼저 거른다
+  try { buf = img.toPNG(); } catch { return { ok: false, reason: 'noimage' }; }
+  if (!buf || !buf.length) return { ok: false, reason: 'noimage' };
+  if (buf.length > PASTE_MAX_BYTES) return { ok: false, reason: 'toobig' };
+  const dir = pasteDirReady();
+  if (!dir) return { ok: false, reason: 'invalid' };
+  const file = path.join(dir, crypto.randomBytes(16).toString('hex') + '.png');
+  try { fs.writeFileSync(file, buf, { flag: 'wx', mode: 0o600 }); } catch { return { ok: false, reason: 'invalid' }; }
+  const token = crypto.randomBytes(16).toString('hex');
+  pasteTokens.set(token, { path: file, wsId: w.id, at: Date.now() });
+  const out = { ok: true, token, w: size && Number.isInteger(size.width) ? size.width : 0, h: size && Number.isInteger(size.height) ? size.height : 0, bytes: buf.length };
+  try { // 입력 상자 안 미리보기: 높이 144(원본이 더 작으면 그대로)의 data: PNG. 너무 길면 뺀다
+    const th = size.height > 144 ? img.resize({ height: 144 }) : img;
+    const url = th.toDataURL();
+    if (typeof url === 'string' && url.startsWith('data:image/png;base64,') && url.length <= 400000) out.thumb = url;
+  } catch { /* 미리보기는 없어도 된다 */ }
+  return out;
+}
+ipcMain.handle('read:paste-drop', (e, id, token) => {
+  const w = wsFrom(e, id);
+  if (!w || typeof token !== 'string' || token.length > 64) return { ok: false, reason: 'invalid' };
+  const t = pasteTokens.get(token);
+  if (!t || t.wsId !== w.id) return { ok: false, reason: 'invalid' };
+  pasteForget(token);
+  return { ok: true };
+});
+// 쓰기 직전의 경로 확인(동기): main 이 만든 이름의 보통 파일이고 paste 폴더 안이며 제어 문자가 없다
+function pastePathOk(p) {
+  try {
+    const bad = '\u0000-\u001f\u007f\u0080-\u009f  '; // 거부할 글자의 범위: 제어 문자와 줄 구분(U+2028·U+2029)
+    if (typeof p !== 'string' || !p || !path.isAbsolute(p) || new RegExp('[' + bad + ']').test(p)) return false;
+    if (!PASTE_NAME_RE.test(path.basename(p))) return false;
+    if (!fs.lstatSync(p).isFile()) return false;
+    const dirReal = fs.realpathSync(pasteDir());
+    return fs.realpathSync(p) === path.join(dirReal, path.basename(p));
+  } catch { return false; }
+}
+// 이미지가 있는 보내기의 입구. tokens 는 이 작업 공간의 살아 있는 표여야 한다. 경로는 pasteTokens 에서만 나온다
+async function readSendWithImages(w, arg) {
+  const tk = arg.tokens;
+  if (tk.length > 4 || !tk.every((t) => typeof t === 'string' && t.length <= 64) || new Set(tk).size !== tk.length) return { ok: false, reason: 'invalid' };
+  const ents = tk.map((t) => pasteTokens.get(t));
+  if (!ents.every((v) => v && v.wsId === w.id)) return { ok: false, reason: 'invalid' };
+  if (typeof arg.text !== 'string') return { ok: false, reason: 'invalid' };
+  let text = '';
+  if (arg.text.trim() !== '') { const c = L.readCleanSend(arg.text); if (!c.ok) return c; text = c.text; }
+  if (FAKE_IMG) { for (const t of tk) pasteTokens.delete(t); return { ok: true }; }
+  if (w.id !== activeId || picking || closing || quitAsking || restarting) return { ok: false, reason: 'invalid' };
+  const res = await readSendImages(w, text, ents.map((v) => v.path));
+  if (res.ok) for (const t of tk) pasteTokens.delete(t); // 파일은 세션이 읽어야 하므로 남긴다(24시간 정리)
+  return res;
+}
+// 기존 read:send 와 같은 판정: readCanSend 가 ok, 또는 첫 메시지 길(훅 기록 없음)의 readCanSendFirst 가 ok
+function readSendGate(w) {
+  const cx = readCtxOf(w, Date.now());
+  const can = L.readCanSend(cx);
+  if (!can.ok && can.reason === 'first' && cx.rawState == null && cx.ux === 'none') return L.imgGateVerdict(firstReasonOf(L.readCanSendFirst(cx)), cx);
+  return L.imgGateVerdict(can, cx); // 통과해도 Enter 직전 판정과 같은 공통 조건(readFirstBase)을 넘어야 한다: 못 넘으면 img-nosession
+}
+// 반환: { ok:true } | { ok:false, reason }. img-nosession: 진입 판정 거부. img-screen: 아무것도 쓰지 않았다. img-unsent: 일부를 넣었을 수 있으나 Enter 는 보내지 않았다(넣은 것은 지우지 않는다)
+async function readSendImages(w, text, paths) {
+  if (w.readFirstBusy) return { ok: false, reason: 'rate' };
+  if (Date.now() - (w.readSendAt || 0) < READ_SEND_GAP_MS) return { ok: false, reason: 'rate' };
+  w.readFirstBusy = true;
+  const wsOk = () => w.id === activeId && !picking && !closing && !quitAsking && !restarting;
+  try {
+    const term = w.term;
+    if (!term) return { ok: false, reason: 'nosession' };
+    const g0 = readSendGate(w); if (!g0.ok) return g0;
+    const snap = await readSnapOf(w);
+    if (!L.promptBoxCheck(snap).ok) return { ok: false, reason: 'img-screen' }; // 입력줄 상자가 비어 있지 않다. 아무것도 쓰지 않았다
+    if (w.term !== term || !wsOk()) return { ok: false, reason: 'invalid' };
+    const g1 = readSendGate(w); if (!g1.ok) return g1; // 화면을 읽는 사이에 바뀐 것이 없는지 쓰기 직전에 다시 본다
+    let lastN = -1; let lastAt = 0; let k = 0;
+    const stillOk = () => w.term === term && wsOk() && L.isClaudeFront(termProc(w), w.claudeProc) && !L.readFirstBase(readCtxOf(w, Date.now())); // 쓰기 직전마다 동기로 다시 본다
+    const waitBox = async (count, txt, limitMs) => { // 상자 안 글이 표시 count 개(+ 글)로 보일 때까지. 그 사이 다른 입력·작업 공간 바뀜이 있으면 멈춘다
+      const t0 = Date.now();
+      for (;;) {
+        await sleepMs(L.READ_FIRST_POLL_MS);
+        if (!(w.term === term && wsOk() && w.ptyInN === lastN)) return false;
+        if (L.promptBoxImages(await readSnapOf(w), count, txt).ok) return true;
+        if (Date.now() - t0 >= limitMs) return false;
+      }
+    };
+    for (const p of paths) {
+      if (!pastePathOk(p)) return k === 0 ? { ok: false, reason: 'invalid' } : { ok: false, reason: 'img-unsent' };
+      if (k > 0 && !stillOk()) return { ok: false, reason: 'img-unsent' };
+      const pasted = '\x1b[200~' + p + '\x1b[201~';
+      lastAt = Date.now(); markIn(w);
+      try { term.write(pasted); } catch { return k === 0 ? { ok: false, reason: 'nosession' } : { ok: false, reason: 'img-unsent' }; }
+      w.draft = L.draftStep(w.draft, pasted); w.readSendAt = lastAt; lastN = w.ptyInN; k++; // 붙여넣기는 초안이 있는 것으로 센다
+      if (!(await waitBox(k, undefined, 2000))) return { ok: false, reason: 'img-unsent' };
+    }
+    if (text) {
+      if (!stillOk()) return { ok: false, reason: 'img-unsent' };
+      const pasted = '\x1b[200~' + text + '\x1b[201~';
+      lastAt = Date.now(); markIn(w);
+      try { term.write(pasted); } catch { return { ok: false, reason: 'img-unsent' }; }
+      w.draft = L.draftStep(w.draft, pasted); w.readSendAt = lastAt; lastN = w.ptyInN;
+      if (!(await waitBox(k, text, L.READ_FIRST_WAIT_MS))) return { ok: false, reason: 'img-unsent' };
+    }
+    const t0 = Date.now();
+    for (;;) { // Enter 직전 확인: firstSendVerdict 와 같은 조건
+      await sleepMs(L.READ_FIRST_POLL_MS);
+      const live = w.term === term && wsOk();
+      const snapAt = Date.now();
+      const boxOk = live ? L.promptBoxImages(await readSnapOf(w), k, text || undefined).ok : false;
+      const n = Date.now();
+      const v = L.firstSendVerdict({ elapsedMs: n - t0, now: n, pasteAt: lastAt, lastOutputAt: w.lastOutputAt, snapAt, boxOk, ctx: readCtxOf(w, n), sameWs: live && wsOk(), sameTerm: w.term === term, ptyInN: w.ptyInN, firstPasteInN: lastN });
+      if (v.act === 'wait') continue;
+      if (v.act !== 'send') return { ok: false, reason: 'img-unsent' };
+      if (!(w.lastOutputAt < snapAt)) return { ok: false, reason: 'img-unsent' };
+      markIn(w);
+      try { term.write('\r'); } catch { return { ok: false, reason: 'img-unsent' }; }
+      break;
+    }
+    const data = '\x1b[200~' + (text || 'image') + '\x1b[201~\r';
+    bumpReadStat('sent');
+    w.typedN = (w.typedN || 0) + 1;
+    if (L.shouldDropPrev({ data, typedN: w.typedN, hasPrev: !!w.prevSid })) { w.prevSid = null; saveWsLater(); }
+    w.draft = L.draftStep(w.draft, data);
+    return { ok: true };
+  } finally { w.readFirstBusy = false; }
+}
 
 // ---- 하위 세션: 마루가 요청 파일로 다른 폴더의 세션을 연다 ----
 // 요청 폴더·프롬프트 폴더·보고 폴더는 <루트>/data/state/app 아래. 인증(mac)·판정·예산·동의·전달 파일은 lib.js 의 순수 함수가 맡고, 여기서는 연결과 상태만 가진다.
@@ -2215,9 +2722,10 @@ function fakeTalkRes() {
       'title: 지난 점검 요약', 'stat: 항목 수 | 12 | 점검함', 'stat: 오류 | 0', 'bar: 진행 | 3 / 4', 'kv: 구역 | 가', 'note: 나머지는 다음에 봅니다.',
       'choice: 지난 선택지입니다.', '- 지난 선택지 하나', '- 지난 선택지 둘', 'next: 지난 다음 질문']);
     const last = '이번 점검 결과입니다. 숫자와 결정할 일을 화면으로 정리했습니다.\n\n' + fence([
-      'title: 가상 점검 결과',
+      'title: 가상 점검 결과', 'sub: 가상 구역 나를 오늘 한 번 훑은 결과입니다.',
       'stat: 시험 | 448 | 실패 0', 'stat: 스크립트 | 6 | 모두 통과', 'stat: 소요 | 12분', 'stat: 경고 | 2 | 확인 필요', 'stat: 열린 일 | 5',
-      'bar: 구현 단계 | 6 / 6', 'bar: 실제 사용 확인 | 1 / 7', 'bar: 문서 | 40%',
+      'section: 원인 후보 | 가능성이 높은 순서', 'card: 설정 누락 | 새 항목이 설정 파일에 없을 수 있습니다. | 설정', 'card: 오래된 캐시 | 이전 결과가 남아 같은 값이 보일 수 있습니다. | 캐시', 'card: 순서 문제 | 두 단계가 거꾸로 실행되었을 수 있습니다.', 'card: 이름 충돌 | 같은 이름의 두 항목이 서로 덮어쓸 수 있습니다. | 이름',
+      'section: 진행 | 단계별 현황', 'bar: 구현 단계 | 6 / 6', 'bar: 실제 사용 확인 | 1 / 7', 'bar: 문서 | 40%',
       'kv: 구역 | 나', 'kv: 번호 | 0a1b2c3', 'kv: 상태 | 점검 중',
       'note: 시험 환경이 가상입니다.', 'warn: 새 상자는 아직 적용 전입니다.',
       'table: 남은 확인', '| 항목 | 상태 |', '|---|---|', '| 첫째 확인 | 확인 전 |', '| 둘째 확인 | 확인 전 |',
@@ -2225,6 +2733,16 @@ function fakeTalkRes() {
       'next: 남은 위험을 자세히 알려 줘', 'next: 다음 범위를 다시 보여 줘']);
     const lines = [row(0, 'user', '이번 구역을 점검해 줘.'), row(1, 'assistant', prior), row(2, 'user', '결과를 한 화면으로 보여 줘.'), row(3, 'assistant', last)];
     const r = L.talkParse(lines.join('\n'));
+    fakeTalk = { key: 'fake', items: r.items, more: r.more };
+  }
+  if (!fakeTalk && TEST_UI === 'readlivedone') { // 시험 전용: 턴이 끝난 대화(마지막 항목이 답변). 질문 82초 뒤에 답변. 데이터는 모두 가상이다
+    const t0 = Math.floor(Date.now() / 1000) - 300; const row = (at, role, text) => JSON.stringify({ v: 1, at, role, text });
+    const r = L.talkParse([row(t0, 'user', '가상 구역의 점검 목록을 만들어 줘.'), row(t0 + 20, 'assistant', '## 점검 목록\n\n- 첫째 구역\n'), row(t0 + 100, 'user', '둘째 구역의 항목을 확인해 줘.'), row(t0 + 182, 'assistant', '## 결과\n\n- 둘째 구역: 이상 없음\n')].join('\n'));
+    fakeTalk = { key: 'fake', items: r.items, more: r.more };
+  }
+  if (!fakeTalk && (TEST_UI === 'readlive' || TEST_UI === 'readbusy')) { // readbusy 도 같은 가짜 대화(작업 중) // 시험 전용: 마지막 항목이 답 없는 질문인 대화(턴 도중). 데이터는 모두 가상이다
+    const t0 = Math.floor(Date.now() / 1000) - 600; const row = (i, role, text) => JSON.stringify({ v: 1, at: t0 + i * 60, role, text });
+    const r = L.talkParse([row(0, 'user', '가상 구역의 점검 목록을 만들어 줘.'), row(1, 'assistant', '## 점검 목록\n\n- 첫째 구역\n- 둘째 구역\n'), row(2, 'user', '둘째 구역의 항목을 하나씩 확인하고 결과를 알려 줘.')].join('\n'));
     fakeTalk = { key: 'fake', items: r.items, more: r.more };
   }
   if (!fakeTalk) {
@@ -2277,7 +2795,73 @@ ipcMain.handle('talk:get', async (e, arg) => {
   const w = arg && typeof arg === 'object' ? wsFrom(e, arg.id) : null;
   if (!w) return empty;
   const key = typeof arg.key === 'string' && arg.key.length <= 160 ? arg.key : '';
-  try { return await readTalk(w, key); } catch { return empty; }
+  let ctx = null; try { const c0 = ctxOf(w); ctx = L.ctxView(c0, { now: Date.now(), startAt: w.ptyStartAt }); const sl = ctx ? sessLive(w) : null; if (ctx && sl && sl.source === 'clear' && Number.isFinite(sl.at) && sl.at > c0.at) ctx = { ...ctx, pct: 0, level: 'low' }; } catch { ctx = null; } // /clear 뒤 새 값이 오기 전에는 앞 대화의 값을 보이지 않는다 // 컨텍스트 사용량: 대화가 그대로(same)여도 매번 같이 준다
+  try { return { ...(await readTalk(w, key)), ctx }; } catch { return { ...empty, ctx }; }
+});
+// ---- 활동 기록 읽기(읽기 화면 3부): <세션 값>.act.jsonl -> { key, items, more }. readTalk 과 같은 안전 장치(폴더·보통 파일·크기·O_NONBLOCK·캐시 key) ----
+let fakeAct = null;
+function fakeActRes() { // 시험 전용(MARU_APP_UI=readlive): 가상 활동 6개(끝남 4, 실패 1, 진행 중 1). 데이터는 모두 가상이다
+  if (!fakeAct) {
+    const t0 = Math.floor(Date.now() / 1000) - 90; let n = 0;
+    const rec = (k, id, tool, extra) => JSON.stringify(Object.assign({ v: 1, at: t0 + (n++) * 5, k, id, tool }, extra));
+    const lines = [
+      rec('pre', 'a1', 'Read', { sum: 'sample/목록.txt' }), rec('post', 'a1', 'Read', { ms: 40 }),
+      rec('pre', 'a2', 'Grep', { sum: '구역 둘째' }), rec('post', 'a2', 'Grep', { ms: 120 }),
+      rec('pre', 'a3', 'Bash', { sum: '가상 점검 스크립트 실행' }), rec('post', 'a3', 'Bash', { ms: 8400, err: true }),
+      rec('pre', 'a4', 'Edit', { sum: 'sample/결과.txt' }), rec('post', 'a4', 'Edit', { ms: 15 }),
+      rec('pre', 'a5', 'WebFetch', { sum: 'docs.example.test' }), rec('post', 'a5', 'WebFetch', { ms: 950 }),
+      rec('pre', 'a6', 'Agent', { sum: '남은 항목 확인' }),
+    ];
+    const r = L.actParse(lines.join('\n'));
+    fakeAct = { key: 'fakeact', items: r.items, more: r.more };
+  }
+  return fakeAct;
+}
+const actInflight = new Map(); // 작업 공간 id -> { sid, job }
+async function readAct(w, key) {
+  const empty = { key: '', items: [], more: 0 };
+  if (FAKE_TALK && TEST_UI === 'readlivedone') { // 시험 전용: 마지막 질문(t0+100) 뒤의 활동 7개(모두 끝남)
+    if (!fakeAct) {
+      const t0 = Math.floor(Date.now() / 1000) - 300 + 105; const tools = ['Read', 'Grep', 'Bash', 'Read', 'Edit', 'Bash', 'Read']; const lines = [];
+      tools.forEach((tool, i) => { lines.push(JSON.stringify({ v: 1, at: t0 + i * 8, k: 'pre', id: 'd' + i, tool, sum: 'sample/항목' + i })); lines.push(JSON.stringify({ v: 1, at: t0 + i * 8 + 1, k: 'post', id: 'd' + i, tool, ms: 300 + i * 100 })); });
+      const r = L.actParse(lines.join('\n')); fakeAct = { key: 'fakeactdone', items: r.items, more: r.more };
+    }
+    return key === fakeAct.key ? { key: fakeAct.key, same: true } : fakeAct;
+  }
+  if (FAKE_TALK) { if (TEST_UI !== 'readlive' && TEST_UI !== 'readbusy') return empty; const f = fakeActRes(); return key === f.key ? { key: f.key, same: true } : f; }
+  const sid = talkSid(w); const file = actFileOf(sid); if (!file || SMOKE || TEST_UI || TEST_FX || FAKE_PROJ) return empty;
+  const answer = (k, res) => (L.talkSame(key, k) ? { key: k, same: true } : { key: k, items: res.items, more: res.more });
+  try {
+    const ls = await fs.promises.lstat(file); // 없으면 던진다
+    if (!ls.isFile() || ls.size > L.ACT_FILE_MAX) return empty;
+    const real = await fs.promises.realpath(file); const dirReal = await fs.promises.realpath(STATE_DIR());
+    if (path.dirname(real) !== dirReal) return empty; // 실제 경로가 data/state/app 바로 아래가 아니면 읽지 않는다
+    const c = actCache.get(w.id);
+    if (c && c.sid === sid && c.mtime === ls.mtimeMs && c.size === ls.size) return answer(c.key, c.res);
+    const inf = actInflight.get(w.id);
+    if (inf && inf.sid === sid) { const r = await inf.job; return r ? answer(r.key, r.res) : empty; }
+    const job = (async () => {
+      let fh = null;
+      try {
+        fh = await fs.promises.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+        const st = await fh.stat();
+        if (!st.isFile() || st.size > L.ACT_FILE_MAX) return null;
+        const text = await fh.readFile({ encoding: 'utf8' });
+        const res = L.actParse(text); const k = L.talkKey(sid, st.mtimeMs, st.size);
+        if (wss.get(w.id) === w && talkSid(w) === sid) actCache.set(w.id, { sid, mtime: st.mtimeMs, size: st.size, key: k, res });
+        return { key: k, res };
+      } finally { if (fh) { try { await fh.close(); } catch { /* 무시 */ } } }
+    })();
+    const rec = { sid, job }; actInflight.set(w.id, rec);
+    try { const r = await job; return r ? answer(r.key, r.res) : empty; } finally { if (actInflight.get(w.id) === rec) actInflight.delete(w.id); }
+  } catch { return empty; }
+}
+ipcMain.handle('act:get', async (e, arg) => {
+  const empty = { key: '', items: [], more: 0 };
+  const w = arg && typeof arg === 'object' ? wsFrom(e, arg.id) : null;
+  if (!w) return empty;
+  const key = typeof arg.key === 'string' && arg.key.length <= 160 ? arg.key : '';
+  try { return await readAct(w, key); } catch { return empty; }
 });
 ipcMain.handle('reports:get', async (e, id) => {
   const w = wsFrom(e, id);
@@ -3053,6 +3637,7 @@ app.whenReady().then(() => {
   }, 1000).unref();
   if (!SMOKE && !FAKE_PROJ) { readCalendar(); setInterval(readCalendar, 15 * 60 * 1000).unref(); } // 스모크에서는 캘린더를 읽지 않는다
   if (!SMOKE) { finishPendingInstall().then(() => checkUpdates(false)); setInterval(() => checkUpdates(false), 6 * 3600 * 1000).unref(); }
+  if (!(SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK)) setInterval(cleanOldPastes, 6 * 3600 * 1000).unref(); // 보낸 이미지 파일: 24시간 넘은 것을 6시간마다 지운다
   if (SMOKE) setTimeout(() => { console.error('SMOKE FAIL: 15초 초과 (pty-output/rendered 미충족)'); app.exit(1); }, 15000);
 });
 // 시스템 종료·재시작·로그아웃: 확인 창으로 막지 않는다. 이 신호 뒤에 오는 before-quit 은 확인된 것으로 취급한다.

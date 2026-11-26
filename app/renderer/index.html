@@ -80,21 +80,31 @@
     <section class="read-wrap" id="read" role="region" aria-labelledby="read-title" hidden>
       <div class="read-top">
         <h2 class="read-title" id="read-title" data-i18n="read.title">읽기 화면</h2>
+        <button type="button" id="rc-toggle-read" class="rc-toggle" role="switch" aria-checked="false" hidden><span class="rc-track" aria-hidden="true"><span class="rc-thumb"></span></span><span class="rc-label"></span></button>
         <button type="button" class="btn ghost read-x" id="read-close" data-i18n="read.close" data-i18n-aria="read.close.aria" aria-label="읽기 화면 끄기">닫기</button>
       </div>
       <div class="read-body" id="read-body" role="log" aria-live="off" tabindex="0" data-i18n-aria="read.log.aria" aria-label="질문과 답변">
         <div class="read-col">
           <div class="read-list" id="read-list"></div>
+          <p class="read-compacted" id="read-compacted" hidden></p>
           <div class="read-status" id="read-status" role="status" hidden></div>
         </div>
       </div>
       <div class="read-input-wrap">
         <div class="read-col">
           <div class="read-input" id="read-input">
-            <textarea id="read-ta" class="read-ta" rows="1" spellcheck="false" autocomplete="off" data-i18n-aria="read.input.aria" aria-label="Claude 에게 보낼 글"></textarea>
-            <button type="button" id="read-send" class="btn read-send" data-i18n="read.send" data-i18n-aria="read.send.aria" aria-label="보내기">보내기</button>
+            <ul class="read-cmds" id="read-cmds" role="listbox" data-i18n-aria="read.cmd.aria" aria-label="명령 목록" hidden></ul>
+            <div class="read-att" id="read-att" role="list" data-i18n-aria="read.att.aria" aria-label="첨부한 이미지" hidden></div>
+            <div class="read-input-row">
+              <textarea id="read-ta" class="read-ta" rows="1" spellcheck="false" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="read-cmds" data-i18n-aria="read.input.aria" aria-label="Claude 에게 보낼 글"></textarea>
+              <span class="read-ghost-tab" id="read-ghost-tab" aria-hidden="true" hidden>Tab</span>
+              <button type="button" id="read-send" class="btn read-send" data-i18n="read.send" data-i18n-aria="read.send.aria" aria-label="보내기">보내기</button>
+            </div>
           </div>
-          <p class="read-input-note" id="read-input-note" role="status" hidden></p>
+          <div class="read-input-foot">
+            <p class="read-input-note" id="read-input-note" role="status" hidden></p>
+            <span class="read-ctx" id="read-ctx" role="img" data-i18n-title="ctx.title" title="이 세션이 쓴 컨텍스트 창의 비율입니다. 값은 Claude Code 상태줄이 알려 준 것입니다." hidden><span class="read-ctx-bar" aria-hidden="true"><span class="read-ctx-fill" id="read-ctx-fill"></span></span><span class="read-ctx-t" id="read-ctx-t"></span></span>
+          </div>
         </div>
       </div>
     </section>

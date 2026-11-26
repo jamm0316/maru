@@ -5,6 +5,20 @@
 #   입력이 상한에서 잘려 JSON 해석에 실패하면 원문에서 정규식 "session_id"\s*:\s*"([A-Za-z0-9-]{8,64})" 로 값을 찾고, 못 찾으면 쓰지 않는다.
 #   talk-log.sh user      : UserPromptSubmit 훅. 훅 JSON 의 prompt 를 쓴다.
 #   talk-log.sh assistant : Stop 훅. 훅 JSON 의 last_assistant_message 를 쓴다.
+#   talk-log.sh pre | post : PreToolUse·PostToolUse 훅. 활동 기록 data/state/app/<session_id>.act.jsonl 에 한 줄을 덧붙인다(docs/plans/surface-panel.md 14.3).
+#     {"v":1,"at":<초, 소수 3자리>,"k":"pre","id":"<tool_use_id>","tool":"<tool_name>","sum":"<요약 160자까지>"}
+#     {"v":1,"at":…,"k":"post","id":…,"tool":…[,"ms":<duration_ms 정수 0~86400000>][,"err":true]}   (err: tool_response 의 is_error 또는 interrupted 가 true)
+#     id 는 [A-Za-z0-9_-]{1,80}, tool 은 [A-Za-z0-9_.:-]{1,80} 만 받는다(아니면 쓰지 않는다). 요약은 도구별로 정한 칸만 쓴다(명령 전체·파일 내용·도구 결과는 쓰지 않는다):
+#     Bash=description(없으면 shlex 로 나눠 앞의 NAME=값 을 건너뛴 첫 낱말의 마지막 경로 마디. [A-Za-z0-9_.+-]{1,32} 에 전부 맞을 때만, 아니면 빈 글),
+#     Read·Edit·Write·NotebookEdit=경로 마지막 두 마디, Grep·Glob=pattern(80자까지), WebFetch=호스트 이름, WebSearch=query(80자까지),
+#     Agent·Task=description, Skill=skill, 그 밖=빈 글. 제어 문자·줄바꿈은 공백, 방향 제어·보이지 않는 글자는 지운다.
+#     비밀값처럼 보이는 글(공백 없는 영숫자·_·- 24자 이상 덩어리에 숫자와 글자가 모두 있음)은 Bash(description·첫 낱말)·Grep·Glob·WebSearch·Agent·Task 에서 빈 글로 한다.
+#     입력은 python 이 직접 1048577바이트까지 읽는다. 1MB 이상이라 JSON 해석이 실패하면 앞쪽에서 session_id·tool_use_id·tool_name 을 정규식으로 찾아,
+#     셋 다 찾으면 sum 이 빈 pre 줄 또는 ms 없는 post 줄을 쓰고 못 찾으면 쓰지 않는다. 1MB 미만의 깨진 JSON 은 쓰지 않는다.
+#     평소에는 파일을 읽지 않고 O_APPEND 로 한 줄만 덧붙인다. 크기가 16KB(이 스크립트의 가장 짧은 줄 59바이트 x 300줄 보다 작은 값)를 넘을 때만 잠금을 잡고 읽어
+#     300줄 또는 256KB 를 넘으면 앞에서부터 버려 250줄·200KB 이하로 줄인다. 잠금은 <세션 id>.act.lock(모드 600, 링크 거부, flock LOCK_EX|LOCK_NB 를 0.5초까지 재시도).
+#     못 잡으면 줄이기를 건너뛰고 덧붙이기만 한다. user 동작은 같은 잠금을 잡고(못 잡아도 진행) 그 세션의 .act.jsonl 을 비운다(없으면 만들지 않음). 잠금 파일은 지우지 않는다.
+#     쓰는 조건·모드 600·링크 거부·조용한 종료는 talk 와 같다.
 # 한 줄: {"v":1,"at":<epoch 초>,"role":"user"|"assistant","text":"<글>"[,"cut":true]}   (파일 모드 600)
 #   text 는 65536자까지(파이썬 문자열의 코드포인트 단위로 자르므로 짝 없는 서로게이트가 남지 않는다. 넘으면 자르고 cut 을 더한다).
 #   문자열이 아니거나 공백뿐인 글은 아무것도 쓰지 않는다.
@@ -30,21 +44,17 @@ exec 2>/dev/null
 [ -n "${AGENT_REFLECTING:-}" ] && exit 0
 [ "${MARU_NO_TALK_LOG:-}" = 1 ] && exit 0
 [ "${CLAUDE_CODE_ENTRYPOINT:-}" = sdk-cli ] && exit 0
-input=""; hitlimit=0
-if [ ! -t 0 ]; then
-  # 끝에 x 를 붙여 마지막 줄바꿈이 깎이지 않게 하고, 바이트 수로 상한(1048576)에 닿았는지 본다
-  { input=$(head -c 1048576 2>/dev/null; printf x); cat >/dev/null 2>&1; } 2>/dev/null
-  input=${input%x}
-  [ "$(printf '%s' "$input" | LC_ALL=C wc -c | tr -d ' ')" -ge 1048576 ] 2>/dev/null && hitlimit=1
-fi
-case "$role" in user|assistant) ;; *) exit 0 ;; esac
+case "$role" in user|assistant|pre|post|start|compact) ;; *) exit 0 ;; esac
 case "$id" in *[!A-Za-z0-9-]*) exit 0 ;; esac
 [ "${#id}" -ge 8 ] && [ "${#id}" -le 64 ] || exit 0
-[ -n "$input" ] || exit 0
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
+[ ! -t 0 ] || exit 0
+# 스크립트 폴더(외부 명령 dirname 을 쓰지 않는다: pre·post 는 도구 호출마다 돈다)
+_self=${BASH_SOURCE[0]}
+case "$_self" in */*) _sd=${_self%/*} ;; *) _sd=. ;; esac
+here=$(cd "$_sd" 2>/dev/null && pwd -P) || exit 0
 dir=$here/../data/state/app
 [ -L "$dir" ] && exit 0
-mkdir -p "$dir" 2>/dev/null || exit 0
+[ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || exit 0
 [ -L "$dir" ] && exit 0
 
 # python3 찾기: 폴백 후보 디렉터리 먼저, 없으면 PATH. 못 찾으면 조용히 끝난다.
@@ -57,8 +67,354 @@ done
 if [ -z "$py" ]; then py=$(command -v python3 2>/dev/null); [ "$py" != /usr/bin/python3 ] || py=""; fi
 [ -n "$py" ] || exit 0
 
-printf '%s' "$input" | "$py" -I -c '
+if [ "$role" = start ] || [ "$role" = compact ]; then
+  # 세션 시작 표지(start·compact): data/state/app/<MARU_APP_SESSION 값>.sess 를 한 줄로 통째로 바꿔 쓴다(docs/plans/surface-panel.md 16.2).
+  #   {"v":1,"at":<초, 소수 3자리>,"sid":"<session_id>","source":"startup"|"resume"|"clear"|"compact"|"precompact"}
+  #   start 는 SessionStart 훅(source 가 위 네 값일 때만 쓴다), compact 는 PreCompact 훅(source 는 precompact). 아무것도 지우지 않는다.
+  #   임시 파일에 써서 rename 으로 바꾼다(모드 600). 대상이 심볼릭 링크이거나 일반 파일이 아니면 쓰지 않는다.
+  #   SessionStart 훅의 표준출력은 세션 컨텍스트에 들어가므로 어떤 경우에도 아무것도 출력하지 않는다.
+  SESS=""
+  read -r -d '' SESS <<'EOF_SESS'
 import json, os, re, stat, sys, time
+kind, dirpath, appid = sys.argv[1], sys.argv[2], sys.argv[3]
+raw = sys.stdin.buffer.read(1048577)
+if len(raw) > 1048576:
+    sys.exit(0)
+try:
+    o = json.loads(raw)
+except Exception:
+    sys.exit(0)
+if not isinstance(o, dict):
+    sys.exit(0)
+sid = o.get("session_id")
+if not (isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9-]{8,64}", sid)):
+    sys.exit(0)
+if kind == "compact":
+    source = "precompact"
+else:
+    source = o.get("source")
+    if source not in ("startup", "resume", "clear", "compact"):
+        sys.exit(0)
+path = os.path.join(dirpath, appid + ".sess")
+try:
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(0)
+except FileNotFoundError:
+    pass
+data = ('{"v":1,"at":%.3f,"sid":%s,"source":%s}\n' % (time.time(), json.dumps(sid), json.dumps(source))).encode("utf-8")
+tmp = "%s.tmp.%d" % (path, os.getpid())
+try:
+    os.unlink(tmp)
+except OSError:
+    pass
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+try:
+    try:
+        mv = memoryview(data)
+        while len(mv):
+            mv = mv[os.write(fd, mv):]
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+EOF_SESS
+  "$py" -I -S -c "$SESS" "$role" "$dir" "$id" >/dev/null 2>&1
+  exit 0
+fi
+
+if [ "$role" = pre ] || [ "$role" = post ]; then
+  # 활동 기록(pre·post): 아래 파이썬이 data/state/app/<session_id>.act.jsonl 에 한 줄을 덧붙인다
+  # 표준 라이브러리만 쓰므로 python 은 -I -S 로 띄운다(site 를 읽지 않아 시작이 빠르다). 입력은 python 이 직접 1048577바이트까지 읽는다.
+  ACT=""
+  read -r -d '' ACT <<'EOF_ACT'
+import json, os, re, stat, sys, time, unicodedata, fcntl
+kind, dirpath = sys.argv[1], sys.argv[2]
+SID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
+ID_RE = re.compile(r"[A-Za-z0-9_-]{1,80}")
+TOOL_RE = re.compile(r"[A-Za-z0-9_.:-]{1,80}")
+SID_FIND = re.compile(r'"session_id"\s*:\s*"([A-Za-z0-9-]{8,64})"')
+TID_FIND = re.compile(r'"tool_use_id"\s*:\s*"([A-Za-z0-9_-]{1,80})"')
+TOOL_FIND = re.compile(r'"tool_name"\s*:\s*"([A-Za-z0-9_.:-]{1,80})"')
+ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+WORD_RE = re.compile(r"[A-Za-z0-9_.+-]{1,32}")
+SECRET_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
+MAXIN, MAXREAD, HIGH, KEEP, BIG, KEEPBYTES = 1048576, 64 * 1024 * 1024, 300, 250, 256 * 1024, 200 * 1024
+# 이 크기 이하면 파일을 읽지 않고 덧붙이기만 한다. 이 스크립트가 쓰는 한 줄은 가장 짧아도 59바이트(post)라
+# 300줄이면 17700바이트를 넘는다. 그래서 16KB 를 넘을 때만 읽어도 300줄 제한이 늦게 걸리지 않는다.
+SMALL = 16 * 1024
+raw = sys.stdin.buffer.read(MAXIN + 1)
+hit = len(raw) >= MAXIN
+if hit:
+    try:
+        while sys.stdin.buffer.read(65536):
+            pass   # 나머지는 버린다(쓰는 쪽이 끊기지 않게)
+    except Exception:
+        pass
+trunc = False
+try:
+    o = json.loads(raw)
+except Exception:
+    if not hit:
+        sys.exit(0)   # 상한에 닿지 않았는데 깨진 JSON: 아무것도 쓰지 않는다
+    trunc = True
+if trunc:
+    # 잘린 입력: 앞쪽에서 세 값을 정규식으로 찾는다. 하나라도 못 찾으면 쓰지 않는다.
+    txt = raw.decode("utf-8", "replace")
+    ms_, mt_, mo_ = SID_FIND.search(txt), TID_FIND.search(txt), TOOL_FIND.search(txt)
+    if not (ms_ and mt_ and mo_):
+        sys.exit(0)
+    sid, tid, tool = ms_.group(1), mt_.group(1), mo_.group(1)
+    o = {}
+else:
+    if not isinstance(o, dict):
+        sys.exit(0)
+    sid, tid, tool = o.get("session_id"), o.get("tool_use_id"), o.get("tool_name")
+    if not (isinstance(sid, str) and SID_RE.fullmatch(sid)):
+        sys.exit(0)
+    if not (isinstance(tid, str) and ID_RE.fullmatch(tid)):
+        sys.exit(0)
+    if not (isinstance(tool, str) and TOOL_RE.fullmatch(tool)):
+        sys.exit(0)
+path = os.path.join(dirpath, sid + ".act.jsonl")
+
+def clean(s):
+    out = []
+    for c in s:
+        cat = unicodedata.category(c)
+        if cat == "Cf":
+            continue   # 방향 제어·보이지 않는 글자는 지운다
+        out.append(" " if cat in ("Cc", "Zl", "Zp") else c)   # 제어 문자·줄바꿈은 공백
+    return "".join(out).strip()
+
+def last2(p):
+    parts = [x for x in p.split("/") if x]
+    return "/".join(parts[-2:])
+
+def secretish(t):
+    # 비밀값처럼 보이는 글: 공백 없는 영숫자·_·- 가 24자 이상 이어진 덩어리에 숫자와 글자가 모두 있다.
+    for m in SECRET_RE.finditer(t):
+        g = m.group(0)
+        if any(c.isdigit() for c in g) and any(c.isalpha() for c in g):
+            return True
+    return False
+
+def safe(text, limit):
+    # 제어 문자를 정리한 글이 비밀값처럼 보이면 빈 글, 아니면 limit 자까지. (정리 비용을 막으려고 앞 1000자만 본다)
+    t = clean(text[:1000])
+    return "" if secretish(t) else t[:limit]
+
+def bash_word(c):
+    # 명령의 첫 낱말: shlex 로 나눠 앞의 NAME=값 낱말을 건너뛴 첫 낱말의 마지막 경로 마디.
+    # [A-Za-z0-9_.+-]{1,32} 에 전부 맞지 않거나 비밀값처럼 보이면 빈 글. (긴 명령은 앞 4096자만 나눈다)
+    import shlex
+    try:
+        words = shlex.split(c[:4096], posix=True)
+    except Exception:
+        return ""
+    for w in words:
+        if ASSIGN_RE.match(w):
+            continue   # 앞에 붙은 NAME=값 은 비밀값일 수 있어 건너뛴다
+        base = w.rstrip("/").rsplit("/", 1)[-1]
+        if not WORD_RE.fullmatch(base) or secretish(base):
+            return ""
+        return base
+    return ""
+
+def summary(inp):
+    # 14.3 표의 칸만 쓴다. 명령 전체·파일 내용·도구 결과는 쓰지 않는다.
+    if not isinstance(inp, dict):
+        return ""
+    def s(k):
+        v = inp.get(k)
+        return v if isinstance(v, str) else None
+    if tool == "Bash":
+        d = s("description")
+        if d is not None and clean(d[:1000]):
+            return safe(d, 160)
+        c = s("command")
+        return bash_word(c) if c is not None else ""
+    if tool in ("Read", "Edit", "Write", "NotebookEdit"):
+        p = s("file_path")
+        if p is None:
+            p = s("notebook_path")
+        return last2(p) if p else ""
+    if tool in ("Grep", "Glob"):
+        return safe(s("pattern") or "", 80)
+    if tool == "WebFetch":
+        u = s("url")
+        if not u:
+            return ""
+        try:
+            from urllib.parse import urlparse
+            return urlparse(u).hostname or ""
+        except Exception:
+            return ""
+    if tool == "WebSearch":
+        return safe(s("query") or "", 80)
+    if tool in ("Agent", "Task"):
+        return safe(s("description") or "", 160)
+    if tool == "Skill":
+        return s("skill") or ""
+    return ""
+
+at = "%.3f" % time.time()
+parts = ['"v":1', '"at":' + at, '"k":' + json.dumps(kind), '"id":' + json.dumps(tid), '"tool":' + json.dumps(tool)]
+if kind == "pre":
+    sm = clean(summary(o.get("tool_input")).encode("utf-8", "replace").decode("utf-8"))[:160].strip()
+    parts.append('"sum":' + json.dumps(sm, ensure_ascii=False))
+else:
+    ms = o.get("duration_ms")
+    if type(ms) is int and 0 <= ms <= 86400000:
+        parts.append('"ms":%d' % ms)
+    r = o.get("tool_response")
+    if isinstance(r, dict) and (r.get("is_error") is True or r.get("interrupted") is True):
+        parts.append('"err":true')
+data = ("{" + ",".join(parts) + "}\n").encode("utf-8")
+
+def write_all(fd, b):
+    mv = memoryview(b)
+    while len(mv):
+        n = os.write(fd, mv)
+        mv = mv[n:]
+
+def replace_with(content):
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            write_all(fd, content)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def lock_act():
+    # <세션 id>.act.lock 에 배타 잠금을 건다(LOCK_NB 로 0.5초까지 다시 시도). 못 잡으면 None. 잠금 파일은 모드 600, 링크는 거부한다.
+    try:
+        fd = os.open(os.path.join(dirpath, sid + ".act.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not regular")
+        os.fchmod(fd, 0o600)
+        end = time.time() + 0.5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except OSError:
+                if time.time() >= end:
+                    raise
+                time.sleep(0.01)
+    except Exception:
+        os.close(fd)
+        return None
+
+def shrink():
+    # 잠금을 쥔 채로 부른다. 줄이면 True(새 줄까지 담김), 줄일 필요가 없거나 못 줄이면 False(호출한 쪽이 덧붙인다).
+    for attempt in range(3):
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            sys.exit(0)
+        if st.st_size > MAXREAD:
+            try:
+                replace_with(data)   # 비정상으로 큰 파일: 읽지 않고 새 줄 하나만 든 파일로 바꾼다
+            except Exception:
+                pass
+            return True
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            chunks = []
+            while True:
+                b = os.read(fd, 1048576)
+                if not b:
+                    break
+                chunks.append(b)
+            old = b"".join(chunks)
+        finally:
+            os.close(fd)
+        lines = [x for x in old.split(b"\n") if x]
+        if len(lines) + 1 <= HIGH and len(old) + len(data) <= BIG:
+            return False
+        # 새 줄부터 거꾸로 모은다: 250줄 이하, 합계 200KB 이하(가장 최근 줄 하나는 크기와 무관하게 남김)
+        kept, total = [data], len(data)
+        for ln in reversed(lines):
+            if len(kept) >= KEEP or total + len(ln) + 1 > KEEPBYTES:
+                break
+            kept.append(ln + b"\n")
+            total += len(ln) + 1
+        kept.reverse()
+        try:
+            now = os.lstat(path).st_size
+        except OSError:
+            now = -1
+        if now != len(old) and attempt < 2:
+            continue   # 읽는 사이에 다른 훅이 덧붙였다: 다시 읽는다
+        try:
+            replace_with(b"".join(kept))
+            return True
+        except Exception:
+            return False
+    return False
+
+try:
+    st = os.lstat(path)
+except FileNotFoundError:
+    st = None
+if st is not None:
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(0)
+    if st.st_size > SMALL:
+        # 줄이기는 잠금 안에서만 한다. 못 잡으면(0.5초) 줄이기를 건너뛰고 덧붙이기만 한다.
+        lfd = lock_act()
+        if lfd is not None:
+            try:
+                if shrink():
+                    sys.exit(0)
+            finally:
+                os.close(lfd)   # 닫으면 잠금도 풀린다
+# 평소: 파일을 읽지 않고 O_APPEND 로 한 줄만 덧붙인다
+fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    os.fchmod(fd, 0o600)
+    size = os.fstat(fd).st_size
+    if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+        data = b"\n" + data   # 끊긴 마지막 줄 뒤에서 줄을 바꾼다
+    os.write(fd, data)
+finally:
+    os.close(fd)
+EOF_ACT
+  "$py" -I -S -c "$ACT" "$role" "$dir" >/dev/null 2>&1
+  exit 0
+fi
+
+# user·assistant: 입력을 1048576바이트까지 읽는다(끝에 x 를 붙여 마지막 줄바꿈이 깎이지 않게 하고, 바이트 수로 상한에 닿았는지 본다)
+input=""; hitlimit=0
+{ input=$(head -c 1048576 2>/dev/null; printf x); cat >/dev/null 2>&1; } 2>/dev/null
+input=${input%x}
+[ "$(printf '%s' "$input" | LC_ALL=C wc -c | tr -d ' ')" -ge 1048576 ] 2>/dev/null && hitlimit=1
+[ -n "$input" ] || exit 0
+printf '%s' "$input" | "$py" -I -c '
+import json, os, re, stat, sys, time, fcntl
 role, dirpath, hit = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 SID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
 SID_FIND = re.compile(r"\"session_id\"\s*:\s*\"([A-Za-z0-9-]{8,64})\"")
@@ -101,6 +457,39 @@ else:
     if cut:
         rec["cut"] = True
 data = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+if role == "user":
+    # 새 질문이 오면 그 세션의 활동 기록(.act.jsonl)을 비운다(한 턴의 활동만 담는다). 없으면 만들지 않고, 링크·일반 파일이 아니면 건드리지 않는다.
+    # 줄이기(pre·post)와 겹치지 않게 <세션 id>.act.lock 에 잠금을 건다(0.5초까지 다시 시도, 못 잡아도 비운다). 잠금 파일은 지우지 않고 둔다(크기 0).
+    apath = os.path.join(dirpath, sid + ".act.jsonl")
+    lfd = None
+    try:
+        if stat.S_ISREG(os.lstat(apath).st_mode):
+            try:
+                lfd = os.open(os.path.join(dirpath, sid + ".act.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                if not stat.S_ISREG(os.fstat(lfd).st_mode):
+                    raise OSError("not regular")
+                os.fchmod(lfd, 0o600)
+                end = time.time() + 0.5
+                while True:
+                    try:
+                        fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError:
+                        if time.time() >= end:
+                            break
+                        time.sleep(0.01)
+            except Exception:
+                pass
+            os.close(os.open(apath, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW))
+    except Exception:
+        pass
+    finally:
+        if lfd is not None:
+            try:
+                os.close(lfd)
+            except Exception:
+                pass
 
 def write_all(fd, b):
     mv = memoryview(b)

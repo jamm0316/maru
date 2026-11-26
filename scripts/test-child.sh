@@ -85,11 +85,10 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 cmds = [h["command"] for g in d["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
 sys.exit(0 if cmds == ["\"$CLAUDE_PROJECT_DIR\"/scripts/agent-state.sh busy", "\"$CLAUDE_PROJECT_DIR\"/scripts/child-reports.sh", "\"$CLAUDE_PROJECT_DIR\"/scripts/talk-log.sh user"] else 1)' "$REPO/.claude/settings.json"
-check "settings.json: PreToolUse 훅 1개(agent-state.sh busy)와 PostToolUse busy 유지" "$REAL_PY" -I -c '
+check "settings.json: PreToolUse·PostToolUse 는 agent-state.sh busy 가 먼저, 뒤에 talk-log.sh pre/post" "$REAL_PY" -I -c '
 import json, sys
 h = json.load(open(sys.argv[1]))["hooks"]
-want = ["\"$CLAUDE_PROJECT_DIR\"/scripts/agent-state.sh busy"]
-ok = all([x["command"] for g in h[k] for x in g["hooks"]] == want and len(h[k]) == 1 for k in ("PreToolUse", "PostToolUse"))
+ok = all([x["command"] for g in h[k] for x in g["hooks"]] == ["\"$CLAUDE_PROJECT_DIR\"/scripts/agent-state.sh busy", "\"$CLAUDE_PROJECT_DIR\"/scripts/talk-log.sh " + a] and len(h[k]) == 1 for k, a in (("PreToolUse", "pre"), ("PostToolUse", "post")))
 sys.exit(0 if ok else 1)' "$REPO/.claude/settings.json"
 check "추적 파일에 개인 절대 경로가 없음(신규 파일)" sh -c '! grep -l "/Users[/]" "$1"/scripts/child.py "$1"/scripts/designdoc.py "$1"/scripts/child-reports.sh "$1"/scripts/test-child.sh >/dev/null 2>&1' _ "$REPO"
 
@@ -378,10 +377,15 @@ a = [x.decode() for x in raw]
 assert a[0] == "--settings", a[:1]
 h = json.loads(a[1])["hooks"]
 want = {"UserPromptSubmit": "busy", "PreToolUse": "busy", "PostToolUse": "busy", "Stop": "idle", "StopFailure": "idle", "Notification": "waiting", "SubagentStart": "sub-start", "SubagentStop": "sub-stop"}
-assert set(h) == set(want), sorted(h)
+# SessionStart·PreCompact 에는 상태 훅 없이 talk-log.sh start/compact(timeout 5) 하나만 든다
+for k, act in (("SessionStart", "start"), ("PreCompact", "compact")):
+    assert len(h[k]) == 1 and len(h[k][0]["hooks"]) == 1, h[k]
+    t = h[k][0]["hooks"][0]
+    assert shlex.split(t["command"]) == [sys.argv[2].replace("agent-state.sh", "talk-log.sh"), act] and t["timeout"] == 5 and t["type"] == "command", t
+assert set(h) - {"SessionStart", "PreCompact"} == set(want), sorted(h)
 for k, v in want.items():
-    # UserPromptSubmit·Stop 에는 상태 훅 뒤에 읽기 화면 기록 훅(talk-log.sh, timeout 5)이 하나 더 붙는다
-    extra = {"UserPromptSubmit": "user", "Stop": "assistant"}.get(k)
+    # UserPromptSubmit·Stop·PreToolUse·PostToolUse 에는 상태 훅 뒤에 기록 훅(talk-log.sh, timeout 5)이 하나 더 붙는다
+    extra = {"UserPromptSubmit": "user", "Stop": "assistant", "PreToolUse": "pre", "PostToolUse": "post"}.get(k)
     assert len(h[k]) == 1 and len(h[k][0]["hooks"]) == (2 if extra else 1)
     c = shlex.split(h[k][0]["hooks"][0]["command"])
     assert c == [sys.argv[2], v], c
@@ -1472,7 +1476,7 @@ rec=$(as_rc "$T/good" "ok-1" idle '{"cwd":"/tmp/z","background_tasks":[{"status"
 rec=$(as_rc "$T/good" "ok-1" busy "$(jq -nc --arg c "/$("$REAL_PY" -c 'print("가"*1100)')" '{cwd:$c}')"); check "cwd 가 크면 cwd 만 빠지고 rc 는 유지" [ "$("$REAL_PY" -I -c 'import json,sys;d=json.loads(sys.argv[1]);print("cwd" in d, d.get("rc"))' "$rec")" = "False True" ]
 
 echo "== 부작용·비밀 점검"
-check "실제 data/ 에 쓰지 않음(이 시험이 만든 파일 없음)" [ -z "$(find "$REPO/data" -type f ! -name usage.json ! -name '*.talk.jsonl' -newer "$T/good/python3" \( -path '*/state/app/*' -o -path '*/projects/*' -o -name 'design-history.git' \) 2>/dev/null | head -1)" ]
+check "실제 data/ 에 쓰지 않음(이 시험이 만든 파일 없음)" [ -z "$(find "$REPO/data" -type f ! -name usage.json ! -name '*.talk.jsonl' ! -name '*.act.jsonl' ! -name '*.act.lock' ! -name '*.sess' ! -name '*.ctx' -newer "$T/good/python3" \( -path '*/state/app/*' -o -path '*/projects/*' -o -name 'design-history.git' \) 2>/dev/null | head -1)" ]
 check "실제 ~/.claude 에 쓰지 않음(임시 HOME 만 사용)" [ -d "$FAKE_HOME/.claude/projects" ]
 
 echo

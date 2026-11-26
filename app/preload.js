@@ -76,8 +76,16 @@ contextBridge.exposeInMainWorld('maru', {
   getReports: (id) => ipcRenderer.invoke('reports:get', String(id)),
   // 읽기 화면의 대화 기록: 작업 공간 id 와 마지막으로 받은 판 표시(key)만 싣는다. 경로는 main 이 정한다
   talkGet: (id, key) => ipcRenderer.invoke('talk:get', { id: String(id).slice(0, 64), key: typeof key === 'string' ? key.slice(0, 64) : '' }),
+  // 읽기 화면의 활동 기록(턴 도중의 도구 호출): talkGet 과 같은 모양의 인자. 경로는 main 이 정한다
+  actGet: (id, key) => ipcRenderer.invoke('act:get', { id: String(id).slice(0, 64), key: typeof key === 'string' ? key.slice(0, 64) : '' }),
   // 읽기 화면 입력창: 글을 터미널에 보낸다. 검사·정리는 main 이 다시 한다
-  readSend: (id, text) => ipcRenderer.invoke('read:send', { id: String(id).slice(0, 64), text }),
+  readSend: (id, text, tokens, now) => ipcRenderer.invoke('read:send', Array.isArray(tokens) && tokens.length > 0
+    ? { id: String(id).slice(0, 64), text, tokens: tokens.slice(0, 4).map((t) => String(t).slice(0, 64)) }
+    : now === true ? { id: String(id).slice(0, 64), text, now: true } : { id: String(id).slice(0, 64), text }), // 이미지 표(token)는 4개까지·각 64자까지. now: 지금 보내기(작업 중이면 대기열에 넣은 뒤 지금 보낸다). 없으면 예전 모양 그대로
+  readCommands: (id) => ipcRenderer.invoke('read:commands', String(id).slice(0, 64)), // 입력창의 명령 목록(기본 명령·스킬·사용자 명령). main 이 읽고 거른다
+  readPasteImage: (id) => ipcRenderer.invoke('read:paste-image', String(id).slice(0, 64)), // main 이 클립보드의 이미지를 읽어 파일로 쓴다. 돌려받는 것은 표(token)와 크기뿐(경로 없음)
+  readPasteBytes: (id, bytes) => (bytes instanceof Uint8Array ? (bytes.length > 10 * 1024 * 1024 ? Promise.resolve({ ok: false, reason: 'toobig' }) : ipcRenderer.invoke('read:paste-bytes', String(id).slice(0, 64), bytes)) : Promise.resolve({ ok: false, reason: 'invalid' })), // paste 이벤트의 이미지 파일 바이트(10MB 이하). main 이 풀어 PNG 로 다시 인코딩해 쓴다
+  readPasteDrop: (id, token) => ipcRenderer.invoke('read:paste-drop', String(id).slice(0, 64), String(token).slice(0, 64)),
   onReadSnapReq: (cb) => { ipcRenderer.on('read:snap-req', (_e, id, nonce) => cb(String(id), String(nonce))); }, // 첫 메시지 길: main 이 그 작업 공간 터미널의 보이는 화면을 요청한다
   readSnap: (id, nonce, snap) => ipcRenderer.send('read:snap', String(id).slice(0, 64), String(nonce).slice(0, 64), snap),
   readMark: (kind) => ipcRenderer.send('read:mark', kind === 'on' || kind === 'surf' || kind === 'fill' ? kind : ''), // 읽기 화면을 단추로 켰다·화면 블록을 그렸다·단추로 입력창을 채웠다는 표지(횟수만 센다)

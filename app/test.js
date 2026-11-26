@@ -4550,7 +4550,7 @@ t('원격 토글 연결: main 은 고정 문장만 쓰고, 렌더러·메뉴·i1
   assert.ok(/ipcMain\.handle\('rc:toggle', \(e, id\) => \{\n  const w = wsFrom\(e, id\);/.test(main), '발신자·작업 공간 검사');
   assert.ok(/rc: rcViewOf\(w, rec, now\)/.test(main) && /L\.rcScan\(w\.rcTail, d\)/.test(main) && /L\.draftStep\(w\.draft, data\)/.test(main));
   assert.strictEqual((main.match(/rcReset\(w\)/g) || []).length >= 6, true, 'pty 가 새로 뜨거나 끝나는 모든 자리에서 초기화');
-  assert.strictEqual((main.match(/w\.draft = true/g) || []).length, 5, '프로그램이 입력줄에 채우는 다섯 자리(writePrompt·files:drop·prefillChild·첫 만남·입력창 첫 메시지 길 readSendFirst)');
+  assert.strictEqual((main.match(/w\.draft = true/g) || []).length, 6, '프로그램이 입력줄에 채우는 여섯 자리(writePrompt·files:drop·prefillChild·첫 만남·입력창 첫 메시지 길 readSendFirst·슬래시 명령 길 readSendChecked)');
   const mi = main.slice(main.indexOf("label: tr('menu.rc')"), main.indexOf("label: tr('menu.rc')") + 260);
   assert.ok(/label: tr\('menu\.rc'\)/.test(main) && !/accelerator/.test(mi.split('click')[0]), '메뉴에 단축키 없음');
   assert.ok(/sendToRenderer\('ui:rc-toggle'\)/.test(mi) && !/rcToggle\(/.test(mi), '메뉴는 렌더러의 같은 처리를 거친다(main 이 직접 부르지 않는다)');
@@ -5081,7 +5081,7 @@ t('surfaceParse next: 3개, 120자, 블록 어디에 있든 모은다', () => {
   const r = sp('next: a\nkv: x | y\nnext: ' + 'b'.repeat(120) + '\nnote: n\nnext: c\nnext: d');
   assert.strictEqual(r.next.length, 3); assert.strictEqual(r.next[1].length, 120); assert.strictEqual(r.truncated, true);
   assert.deepStrictEqual(r.parts.map((p) => p.t), ['kv', 'note']);
-  assert.deepStrictEqual(sp('next: 하나'), { ok: true, title: '', parts: [], next: ['하나'], truncated: false });
+  assert.deepStrictEqual(sp('next: 하나'), { ok: true, title: '', sub: '', parts: [], next: ['하나'], truncated: false });
 });
 t('surfaceParse 모르는 줄은 글, 키워드는 줄 맨 앞 소문자 영어 + 콜론', () => {
   const r = sp('그냥 글\n     stat: a | b\nSTAT: a | b\nstat a | b\nfoo: bar\nkv: a | b\n\n\n뒤 글');
@@ -5090,16 +5090,17 @@ t('surfaceParse 모르는 줄은 글, 키워드는 줄 맨 앞 소문자 영어 
 });
 t('surfaceParse 부품 없음은 ok false', () => {
   for (const v of ['', '   \n  ', '그냥 글\n둘째 줄', 'stat: 칸부족', 'title:']) assert.strictEqual(sp(v).ok, false);
-  for (const v of [null, undefined, 5, {}, []]) assert.deepStrictEqual(sp(v), { ok: false, title: '', parts: [], next: [], truncated: false });
-  assert.deepStrictEqual(sp(''), { ok: false, title: '', parts: [], next: [], truncated: false });
+  for (const v of [null, undefined, 5, {}, []]) assert.deepStrictEqual(sp(v), { ok: false, title: '', sub: '', parts: [], next: [], truncated: false });
+  assert.deepStrictEqual(sp(''), { ok: false, title: '', sub: '', parts: [], next: [], truncated: false });
 });
-t('surfaceParse 40줄·4000자 제한', () => {
-  let r = sp(Array.from({ length: 50 }, (_, k) => 'note: ' + k).join('\n'));
+t('surfaceParse 60줄·6000자 제한', () => {
+  assert.strictEqual(L.SURF_LINES_MAX, 60); assert.strictEqual(L.SURF_CHARS_MAX, 6000);
+  let r = sp(Array.from({ length: 70 }, (_, k) => 'note: ' + k).join('\n'));
   assert.strictEqual(r.truncated, true); assert.strictEqual(r.parts.length, 4); // 4개 제한도 걸린다
-  r = sp(Array.from({ length: 41 }, () => '그냥').join('\n')); assert.strictEqual(r.parts.length, 40); assert.strictEqual(r.truncated, true);
-  r = sp(Array.from({ length: 40 }, () => '그냥').join('\n')); assert.strictEqual(r.parts.length, 40); assert.strictEqual(r.truncated, false);
-  r = sp('kv: a | ' + 'x'.repeat(5000)); assert.strictEqual(r.truncated, true); assert.strictEqual(r.ok, false); assert.strictEqual(r.parts.length, 0); // 줄 중간에서 잘리면 그 줄은 버린다
-  r = sp('kv: a | b\nkv: c | ' + 'x'.repeat(5000)); assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.parts[0].items, [{ k: 'a', v: 'b' }]);
+  r = sp(Array.from({ length: 61 }, () => '그냥').join('\n')); assert.strictEqual(r.parts.length, 60); assert.strictEqual(r.truncated, true);
+  r = sp(Array.from({ length: 60 }, () => '그냥').join('\n')); assert.strictEqual(r.parts.length, 60); assert.strictEqual(r.truncated, false);
+  r = sp('kv: a | ' + 'x'.repeat(7000)); assert.strictEqual(r.truncated, true); assert.strictEqual(r.ok, false); assert.strictEqual(r.parts.length, 0); // 줄 중간에서 잘리면 그 줄은 버린다
+  r = sp('kv: a | b\nkv: c | ' + 'x'.repeat(7000)); assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.parts[0].items, [{ k: 'a', v: 'b' }]);
   r = sp('title: t\n' + ' '.repeat(10) + '\n'.repeat(3) + 'kv: a | b\n'); assert.strictEqual(r.truncated, false);
 });
 t('surfaceParse 아주 긴 입력·이상한 입력에서 예외 없음', () => {
@@ -5117,27 +5118,27 @@ const surfFill = (n) => { // 줄 구분 글자까지 합쳐 정확히 n 글자�
   return out.join('\n') + '\n';
 };
 t('surfaceParse 4000자 경계: 줄 중간에서 잘리면 그 줄을 버린다("하지 마" 가 잘린 next 는 단추가 되지 않는다)', () => {
-  const fill = surfFill(3992); assert.strictEqual(fill.length, 3992);
-  const line = 'next: 푸시하지 마'; // 3992 + 8 = 4000 에서 '푸시' 뒤가 아니라 '하지 마' 앞이 아닌 곳이 잘린다
-  const cutAt = (fill + line).slice(0, 4000); assert.ok(cutAt.endsWith('푸시'));
+  const fill = surfFill(5992); assert.strictEqual(fill.length, 5992);
+  const line = 'next: 푸시하지 마'; // 5992 + 8 = 6000 에서 '푸시' 뒤가 아니라 '하지 마' 앞이 아닌 곳이 잘린다
+  const cutAt = (fill + line).slice(0, 6000); assert.ok(cutAt.endsWith('푸시'));
   const r = sp(fill + line);
   assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.next, []); assert.ok(!JSON.stringify(r).includes('푸시'));
   assert.deepStrictEqual(sp(fill + 'next: 푸시하지 마\nnext: 둘').next, []);
 });
 t('surfaceParse 4000자 경계: 줄이 끝난 곳에서 잘리면 그 앞 줄은 남는다', () => {
-  const fill = surfFill(3990); const r = sp(fill + 'next: 하나\nnext: 둘');
+  const fill = surfFill(5990); const r = sp(fill + 'next: 하나\nnext: 둘');
   assert.strictEqual(r.truncated, true); assert.ok(r.parts.length >= 1);
-  const r2 = sp('kv: a | b\n' + surfFill(3985) + 'next: 잘림'); assert.deepStrictEqual(r2.next, []); assert.strictEqual(r2.parts[0].t, 'kv');
+  const r2 = sp('kv: a | b\n' + surfFill(5985) + 'next: 잘림'); assert.deepStrictEqual(r2.next, []); assert.strictEqual(r2.parts[0].t, 'kv');
 });
 t('surfaceParse 4000자 경계: 선택지 줄이 잘리면 묶음 전체가 글(일부 선택지가 단추가 되지 않는다)', () => {
-  const fill = surfFill(3990);
+  const fill = surfFill(5990);
   for (const tail of ['choice: 질문\n- 가\n- 나\n- 다다다다다다다다다다', 'choice: 질문\n- 가\n- 나']) {
     const r = sp(fill + tail);
     assert.strictEqual(r.truncated, true); assert.ok(r.parts.every((p) => p.t !== 'choice'), tail);
   }
 });
-t('surfaceParse 40줄: choice 의 선택지 줄 중간·바로 뒤에서 잘리면 단추가 되지 않는다', () => {
-  const pad = (n) => Array.from({ length: n }, (_, k) => '줄' + k).join('\n') + '\n';
+t('surfaceParse 60줄: choice 의 선택지 줄 중간·바로 뒤에서 잘리면 단추가 되지 않는다', () => {
+  const pad = (n) => Array.from({ length: n + (L.SURF_LINES_MAX - 40) }, (_, k) => '줄' + k).join('\n') + '\n';
   const kinds = (s) => sp(s).parts.map((p) => p.t);
   // 37줄 뒤의 choice: 38 질문, 39·40 선택지, 41 선택지(잘림)
   let r = sp(pad(37) + 'choice: 질문\n- 가\n- 나\n- 다'); assert.ok(!kinds(pad(37) + 'choice: 질문\n- 가\n- 나\n- 다').includes('choice')); assert.strictEqual(r.truncated, true);
@@ -5184,6 +5185,42 @@ t('surfaceParse 선택지 6개 이상: 일부만 단추로 만들지 않고 묶�
   assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text', 'text', 'text', 'text', 'text', 'text', 'text']);
   assert.strictEqual(sp('choice: q\n' + Array.from({ length: 5 }, (_, k) => '- o' + k).join('\n')).parts[0].options.length, 5);
 });
+t('surfaceParse sub: 1개, 120자, 빈 글, title 없이도 그린다', () => {
+  let r = sp('title: 제목\nsub: 부제 한 줄'); assert.strictEqual(r.sub, '부제 한 줄'); assert.strictEqual(r.ok, true); assert.strictEqual(r.truncated, false);
+  r = sp('sub: 부제만'); assert.strictEqual(r.ok, true); assert.strictEqual(r.title, ''); assert.strictEqual(r.sub, '부제만');
+  r = sp('sub: 첫째\nsub: 둘째\ntitle: t'); assert.strictEqual(r.sub, '첫째'); assert.strictEqual(r.truncated, true);
+  r = sp('sub: ' + 'ㄱ'.repeat(121)); assert.strictEqual(r.sub.length, 120); assert.strictEqual(r.truncated, true);
+  r = sp('title: t\nsub:'); assert.strictEqual(r.sub, ''); assert.deepStrictEqual(r.parts.map((p) => p.text), ['sub:']);
+  r = sp('title: t\nsub: a \\| b'); assert.strictEqual(r.sub, 'a \\| b'); // 한 칸짜리 글: 칸을 나누지 않는다
+});
+t('surfaceParse section: 제목·설명, 빈 설명, \\|, 제한, 빈 칸', () => {
+  let r = sp('section: 원인 | 왜 느린가'); assert.deepStrictEqual(r.parts, [{ t: 'section', title: '원인', desc: '왜 느린가' }]); assert.strictEqual(r.ok, true);
+  r = sp('section: 제목만'); assert.deepStrictEqual(r.parts, [{ t: 'section', title: '제목만', desc: '' }]);
+  r = sp('section: a \\| b | c \\| d'); assert.deepStrictEqual(r.parts[0], { t: 'section', title: 'a | b', desc: 'c | d' });
+  r = sp('section: | 설명만'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text']); // 제목이 비면 글
+  r = sp('section:'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text']);
+  r = sp('section: ' + 'ㄱ'.repeat(61) + ' | ' + 'ㄴ'.repeat(121)); assert.strictEqual(r.parts[0].title.length, 60); assert.strictEqual(r.parts[0].desc.length, 120); assert.strictEqual(r.truncated, true);
+  r = sp(Array.from({ length: 8 }, (_, k) => 'section: s' + k).join('\n')); assert.strictEqual(r.parts.length, 6); assert.strictEqual(r.truncated, true);
+});
+t('surfaceParse card: 정상, 빈 칸, \\|, 상한, 연달은 card 는 한 묶음', () => {
+  let r = sp('card: 이름 | 설명 | 꼬리'); assert.deepStrictEqual(r.parts, [{ t: 'cards', items: [{ title: '이름', desc: '설명', tag: '꼬리' }] }]); assert.strictEqual(r.ok, true);
+  r = sp('card: 이름만'); assert.deepStrictEqual(r.parts[0].items[0], { title: '이름만', desc: '', tag: '' });
+  r = sp('card: 이름 | | 꼬리'); assert.deepStrictEqual(r.parts[0].items[0], { title: '이름', desc: '', tag: '꼬리' });
+  r = sp('card: a \\| b | c \\| d | e \\| f'); assert.deepStrictEqual(r.parts[0].items[0], { title: 'a | b', desc: 'c | d', tag: 'e | f' });
+  r = sp('card: | 설명만'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text']); // 제목이 비면 글
+  r = sp('card:'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text']);
+  r = sp('card: ' + 'ㄱ'.repeat(41) + ' | ' + 'ㄴ'.repeat(161) + ' | ' + 'ㄷ'.repeat(25));
+  assert.deepStrictEqual(r.parts[0].items[0].title.length + ',' + r.parts[0].items[0].desc.length + ',' + r.parts[0].items[0].tag.length, '40,160,24'); assert.strictEqual(r.truncated, true);
+  r = sp(Array.from({ length: 11 }, (_, k) => 'card: c' + k).join('\n')); assert.strictEqual(r.parts.length, 1); assert.strictEqual(r.parts[0].items.length, 9); assert.strictEqual(r.truncated, true);
+  r = sp('card: a\ncard: b\ncard: c'); assert.deepStrictEqual(r.parts.map((p) => p.t + p.items.length), ['cards3']);
+  r = sp('card: a\ncard: b\nnote: 사이\ncard: c'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['cards', 'note', 'cards']); assert.strictEqual(r.parts[0].items.length, 2); assert.strictEqual(r.parts[2].items.length, 1);
+  r = sp('card: a\nsection: 구역\ncard: b'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['cards', 'section', 'cards']); // section 은 감싸지 않고 그 자리의 머리
+});
+t('지시문의 키 줄과 SURF_KEYS 가 같다', () => {
+  const pr = fs.readFileSync(path.join(__dirname, '..', 'prompts', 'read-surface.md'), 'utf8');
+  const keys = new Set(); for (const ln of pr.split('\n')) { const m = /^([a-z]+): /.exec(ln); if (m) keys.add(m[1]); }
+  assert.deepStrictEqual([...keys].sort(), [...L.SURF_KEYS].sort());
+});
 t('surfaceParse 둘째 title 은 버리고 truncated', () => {
   const r = sp('title: 하나\ntitle: 둘\nkv: a | b'); assert.strictEqual(r.title, '하나'); assert.strictEqual(r.truncated, true); assert.strictEqual(r.parts.length, 1);
   assert.strictEqual(sp('title: 하나\nkv: a | b').truncated, false);
@@ -5214,7 +5251,7 @@ t('talkParse: 답변의 maru-surface 블록은 surface 블록으로', () => {
   const r = L.talkParse(tl('assistant', SURF_ANS('title: 점검\nkv: a | b\nnext: 다음')));
   const bl = r.items[0].blocks;
   assert.deepStrictEqual(bl.map((b) => b.t), ['p', 'surface']);
-  assert.deepStrictEqual(bl[1], { t: 'surface', title: '점검', parts: [{ t: 'kv', items: [{ k: 'a', v: 'b' }] }], next: ['다음'], truncated: false });
+  assert.deepStrictEqual(bl[1], { t: 'surface', title: '점검', sub: '', parts: [{ t: 'kv', items: [{ k: 'a', v: 'b' }] }], next: ['다음'], truncated: false });
 });
 t('talkParse: surface 블록 둘이면 마지막만 화면, 앞의 것은 코드', () => {
   const r = L.talkParse(tl('assistant', SURF_ANS('kv: a | 1') + '\n중간\n\n```maru-surface\nkv: b | 2\n```'));
@@ -5590,6 +5627,134 @@ t('firstSendVerdict: Enter 를 보낼지 가리는 판단', () => {
   assert.strictEqual(v({ ctx: { ...ctx, hasTerm: false } }).act, 'fail'); assert.strictEqual(v({ ctx: null }).act, 'fail');
   for (const x of [null, undefined, 5, 'x']) assert.strictEqual(L.firstSendVerdict(x).act, 'fail');
 });
+t('actOpenPreAge: 짝 없는 pre 가운데 가장 새 것의 나이', () => {
+  const it = (at, done) => ({ id: 'x' + at, tool: 'Bash', at, done });
+  assert.strictEqual(L.actOpenPreAge([], 10000), Infinity); // 빈 목록
+  assert.strictEqual(L.actOpenPreAge([it(9000, true), it(9500, true)], 10000), Infinity); // 짝 있는 pre 만
+  assert.strictEqual(L.actOpenPreAge([it(9000, true), it(9800, false)], 10000), 200); // 짝 없는 pre 의 나이
+  assert.strictEqual(L.actOpenPreAge([it(5000, false), it(8000, false), it(2000, false)], 10000), 2000); // 여럿이면 가장 새 것
+  assert.strictEqual(L.actOpenPreAge([it(5000, false), it(9900, true)], 10000), 5000); // 새 것이 짝 있으면 그것은 뺀다
+  for (const bad of [null, undefined, 'x', {}]) assert.ok(Number.isNaN(L.actOpenPreAge(bad, 10000)));
+  assert.ok(Number.isNaN(L.actOpenPreAge([], NaN))); assert.ok(Number.isNaN(L.actOpenPreAge([{ done: false }], 10000))); // 시각을 모르는 열린 호출
+  const r = L.actParse([JSON.stringify({ v: 1, at: 100, k: 'pre', id: 'a1', tool: 'Read' }), JSON.stringify({ v: 1, at: 101, k: 'post', id: 'a1', tool: 'Read' }), JSON.stringify({ v: 1, at: 102, k: 'pre', id: 'a2', tool: 'Bash' })].join('\n'));
+  assert.strictEqual(L.actOpenPreAge(r.items, 104000), 2000); // actParse 와 같이 쓴다
+});
+t('readCanSendBusy: 각 조건을 하나씩 깨뜨린다', () => {
+  const T0 = 1000000;
+  const base = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'busy', rawState: 'busy', bg: 0, bracketed: true, recAt: T0, startAt: T0 - 5000, dirty: false, openPreAge: Infinity, precompact: false };
+  assert.deepStrictEqual(L.readCanSendBusy(base), { ok: true });
+  assert.deepStrictEqual(L.readCanSendBusy({ ...base, openPreAge: 3000 }), { ok: true }); // 3초 이상이면 통과
+  const no = (p, reason, o) => { const r = L.readCanSendBusy({ ...base, ...p }, o); assert.strictEqual(r.ok, false, JSON.stringify(p)); assert.strictEqual(r.reason, reason, JSON.stringify(p)); };
+  no({ hasTerm: false }, 'nosession'); no({ cc: false }, 'nosession');
+  no({ procName: 'zsh' }, 'notclaude'); no({ knownName: '' }, 'notclaude');
+  no({ claudeUp: false }, 'nosession'); no({ hooked: false }, 'nosession'); no({ bracketed: false }, 'nosession');
+  no({ ux: 'idle' }, 'busy'); no({ rawState: 'idle' }, 'busy'); no({ rawState: null }, 'busy'); no({ ux: 'none' }, 'busy');
+  no({ ux: 'idle', rawState: 'busy', bg: 2 }, 'busy'); // 백그라운드 작업만 남은 경우(표시는 idle)
+  no({ ux: 'busy', rawState: 'idle', bg: 2 }, 'busy');
+  no({ bg: -1 }, 'nosession'); no({ bg: undefined }, 'nosession');
+  no({ precompact: true }, 'busy');
+  no({ recAt: T0 - 9000 }, 'first'); no({ recAt: NaN }, 'first'); no({ startAt: NaN }, 'first');
+  no({ dirty: true }, 'draft'); no({ dirty: undefined }, 'draft');
+  no({ openPreAge: 2999 }, 'busy-tool'); no({ openPreAge: 0 }, 'busy-tool'); no({ openPreAge: -50 }, 'busy-tool');
+  no({ openPreAge: NaN }, 'busy-noact'); no({ openPreAge: undefined }, 'busy-noact'); no({ openPreAge: null }, 'busy-noact');
+  assert.deepStrictEqual(L.readCanSendBusy({ ...base, dirty: true }, { afterPaste: true }), { ok: true }); // 붙여넣은 뒤에는 dirty 를 보지 않는다
+  no({ dirty: true, openPreAge: 10 }, 'busy-tool', { afterPaste: true }); // 그래도 다른 조건은 본다
+  // waiting 은 어떤 조합에서도 통과하지 못한다
+  for (const p of [{ ux: 'waiting' }, { rawState: 'waiting' }, { ux: 'waiting', rawState: 'waiting' }, { ux: 'waiting', bg: 3 }, { ux: 'busy', rawState: 'waiting' }, { ux: 'waiting', dirty: true }, { rawState: 'waiting', precompact: true }]) {
+    for (const o of [undefined, { afterPaste: true }]) { const r = L.readCanSendBusy({ ...base, ...p }, o); assert.deepStrictEqual(r, { ok: false, reason: 'waiting' }, JSON.stringify(p)); }
+  }
+  for (const x of [null, undefined, 5, 'x', []]) assert.strictEqual(L.readCanSendBusy(x).ok, false);
+  assert.strictEqual(L.readCanSend({ ...base, ux: 'busy' }).reason, 'busy'); // 이 판정은 readCanSend 가 busy 로 막은 경우에만 쓴다
+});
+t('busySendVerdict: 붙여넣은 뒤 Enter 를 보낼지 가리는 판단', () => {
+  const ctx = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'busy', rawState: 'busy', bg: 0, bracketed: true, recAt: 2000, startAt: 1000, dirty: true, openPreAge: Infinity, precompact: false };
+  const base = { elapsedMs: 200, boxOk: true, ctx, sameWs: true, sameTerm: true, ptyInN: 4, pasteInN: 4 };
+  const v = (p) => L.busySendVerdict({ ...base, ...p });
+  assert.deepStrictEqual(v({}), { act: 'send' }); // dirty 는 보지 않는다(우리가 붙여넣었다). 조용함도 요구하지 않는다
+  assert.deepStrictEqual(v({ boxOk: false }), { act: 'wait' });
+  assert.deepStrictEqual(v({ boxOk: undefined }), { act: 'wait' });
+  assert.deepStrictEqual(v({ boxOk: false, elapsedMs: 1499 }), { act: 'wait' });
+  assert.deepStrictEqual(v({ boxOk: false, elapsedMs: 1500 }), { act: 'stop', why: 'timeout' });
+  assert.deepStrictEqual(v({ boxOk: false, elapsedMs: NaN }), { act: 'stop', why: 'timeout' });
+  assert.deepStrictEqual(v({ sameWs: false }), { act: 'stop', why: 'workspace' }); assert.deepStrictEqual(v({ sameWs: undefined }), { act: 'stop', why: 'workspace' });
+  assert.deepStrictEqual(v({ sameTerm: false }), { act: 'stop', why: 'pty' });
+  assert.deepStrictEqual(v({ ptyInN: 5 }), { act: 'stop', why: 'input' }); assert.deepStrictEqual(v({ ptyInN: NaN }), { act: 'stop', why: 'input' }); assert.deepStrictEqual(v({ pasteInN: undefined }), { act: 'stop', why: 'input' });
+  assert.deepStrictEqual(v({ ctx: { ...ctx, ux: 'waiting' } }), { act: 'stop', why: 'waiting' }); // 확인 창이 떴다
+  assert.deepStrictEqual(v({ ctx: { ...ctx, rawState: 'waiting' } }), { act: 'stop', why: 'waiting' });
+  assert.deepStrictEqual(v({ ctx: { ...ctx, ux: 'idle', rawState: 'idle' } }), { act: 'stop', why: 'busy' }); // 턴이 끝났다
+  assert.deepStrictEqual(v({ ctx: { ...ctx, openPreAge: 100 } }), { act: 'stop', why: 'busy-tool' });
+  assert.deepStrictEqual(v({ ctx: { ...ctx, openPreAge: NaN } }), { act: 'stop', why: 'busy-noact' });
+  assert.deepStrictEqual(v({ ctx: { ...ctx, hooked: false } }), { act: 'stop', why: 'nosession' });
+  assert.deepStrictEqual(v({ ctx: null }), { act: 'stop', why: 'nosession' });
+  assert.deepStrictEqual(v({ boxOk: false, ctx: { ...ctx, ux: 'waiting' } }), { act: 'stop', why: 'waiting' }); // 조건이 깨지면 기다리지 않고 멈춘다
+  for (const x of [null, undefined, 5, 'x']) assert.strictEqual(L.busySendVerdict(x).act, 'stop');
+});
+t('nowSendVerdict·queueKeyShown: 지금 보내기 키를 쓸지 가리는 판단', () => {
+  const ctx = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'busy', rawState: 'busy', bg: 0, bracketed: true, recAt: 2000, startAt: 1000, dirty: false, openPreAge: Infinity, precompact: false };
+  const base = { elapsedMs: 100, boxOk: true, keyShown: true, ctx, sameWs: true, sameTerm: true, ptyInN: 7, queuedInN: 7 };
+  const v = (p) => L.nowSendVerdict({ ...base, ...p });
+  assert.deepStrictEqual(v({}), { act: 'send' });
+  assert.deepStrictEqual(v({ boxOk: false }), { act: 'wait' }); assert.deepStrictEqual(v({ keyShown: false }), { act: 'wait' });
+  assert.deepStrictEqual(v({ keyShown: false, elapsedMs: 1500 }), { act: 'stop', why: 'timeout' });
+  assert.deepStrictEqual(v({ sameWs: false }), { act: 'stop', why: 'workspace' }); assert.deepStrictEqual(v({ sameTerm: false }), { act: 'stop', why: 'pty' });
+  assert.deepStrictEqual(v({ ptyInN: 8 }), { act: 'stop', why: 'input' });
+  assert.deepStrictEqual(v({ ctx: { ...ctx, ux: 'waiting' } }), { act: 'stop', why: 'waiting' });
+  assert.deepStrictEqual(v({ ctx: { ...ctx, ux: 'idle', rawState: 'idle' } }), { act: 'stop', why: 'busy' }); // 턴이 끝났다: 대기열의 글은 저절로 간다
+  assert.deepStrictEqual(v({ ctx: { ...ctx, openPreAge: 10 } }), { act: 'stop', why: 'busy-tool' });
+  assert.strictEqual(L.READ_NOW_KEY, '\x18\x13');
+  assert.strictEqual(L.queueKeyShown(['❯ 글', '  ⎿  Queued · ctrl+x ctrl+s to send now']), true);
+  assert.strictEqual(L.queueKeyShown(['CTRL+X  CTRL+S']), false);
+  assert.strictEqual(L.queueKeyShown(['문서에 ctrl+x ctrl+s to send now 라고 적혀 있다']), false);
+  for (const x of ['1', ' 2 ', 'y', 'n', 'ok', '12 3', 'yes']) assert.strictEqual(L.busyTextRisky(x), true, x);
+  for (const x of ['계속해 줘', 'stop', '1번으로 해 줘']) assert.strictEqual(L.busyTextRisky(x), false, x);
+  assert.strictEqual(L.queueKeyShown(['Press up to edit queued messages']), false);
+  for (const x of [null, undefined, 'ctrl+x ctrl+s', [5], []]) assert.strictEqual(L.queueKeyShown(x), false);
+  for (const x of [null, undefined, 5, 'x']) assert.strictEqual(L.nowSendVerdict(x).act, 'stop');
+});
+t('작업 중 보내기 연결: Enter·지금 보내기 키 앞의 확인, 기존 판정 본문 그대로', () => {
+  const crypto = require('crypto');
+  const lib = fs.readFileSync(path.join(__dirname, 'lib.js'), 'utf8'); const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const a = lib.indexOf('function readCanSend(c) {'); const sig = lib.slice(a, lib.indexOf('\n}\n', a) + 3);
+  assert.strictEqual(crypto.createHash('sha1').update(sig).digest('hex'), '1e28a952668b78d5d6235b20e68b2b328518ee07', 'readCanSend 본문이 바뀌었다'); // 기존 판정은 고치지 않는다
+  const s0 = main.indexOf('async function readSendBusy('); assert.ok(s0 > 0);
+  const body = main.slice(s0, main.indexOf('\n}\n', s0));
+  const pbc = body.indexOf('L.promptBoxCheck(snap)'); const can = body.indexOf('L.readCanSendBusy('); const paste = body.indexOf('term.write(paste)');
+  assert.ok(can > 0 && can < pbc && pbc > 0 && paste > pbc && body.indexOf('term.write(') === paste, '사전 판정·사전 화면 확인이 붙여넣기보다 앞이다');
+  const p1 = body.indexOf('L.readCanSendBusy(', can + 5); assert.ok(p1 > pbc && p1 < paste, '쓰기 직전 재판정');
+  const cr = [...body.matchAll(/term\.write\('\\r'\)/g)].map((m) => m.index); assert.strictEqual(cr.length, 1);
+  const vd = body.indexOf('L.busySendVerdict('); const gate = body.indexOf("v.act !== 'send'");
+  assert.ok(vd > paste && gate > vd && cr[0] > gate, '\\r 은 send 판정 뒤에만');
+  assert.ok(body.indexOf('L.promptBoxCheck(sn, text)') > paste && body.indexOf('L.promptBoxCheck(sn, text)') < vd && body.indexOf('readCtxBusy(w, n)') > body.indexOf('L.promptBoxCheck(sn, text)'));
+  assert.ok(/ptyInN: w\.ptyInN, pasteInN/.test(body));
+  const loop = body.slice(body.indexOf('const sn = live ?'), cr[0]); assert.ok(!/await /.test(loop.slice(loop.indexOf('\n') + 1)), '화면을 받은 뒤 \\r 까지 await 가 없다');
+  const kw = body.indexOf('term.write(L.READ_NOW_KEY)'); assert.ok(kw > cr[0]); assert.strictEqual((body.match(/READ_NOW_KEY/g) || []).length, 1);
+  const nv = body.indexOf('L.nowSendVerdict('); assert.ok(nv > cr[0] && nv < kw && body.indexOf('L.queueKeyShown(sn.lines)') > 0 && body.indexOf('L.queueKeyShown(sn.lines)') < nv && body.indexOf('L.promptBoxCheck(sn).ok', cr[0]) > 0);
+  const loop2 = body.slice(body.lastIndexOf('const sn = live ?'), kw); assert.ok(!/await /.test(loop2.slice(loop2.indexOf('\n') + 1)), '화면을 받은 뒤 키까지 await 가 없다');
+  assert.ok(body.includes("'busy-screen'") && body.includes("'busy-unsent'") && body.includes('if (w.readFirstBusy)') && body.includes('READ_SEND_GAP_MS'));
+  assert.ok(/SMOKE \|\| TEST_UI[^\n]*FAKE_TALK\) return \{ ok: false, reason: 'busy' \}/.test(body.slice(0, 300)), '개발용 화면에서는 쓰지 않는다');
+  const send = main.slice(main.indexOf("ipcMain.handle('read:send'"), main.indexOf('// ---- 읽기 화면 입력창: 이미지 붙이기'));
+  assert.ok(send.includes("can.reason === 'busy') return readSendBusy(w, c.text, { now: arg.now === true })"));
+  assert.ok(send.indexOf('readSendWithImages(w, arg)') < send.indexOf('readSendBusy(') && send.indexOf('L.slashCmdOf(c.text)') < send.indexOf('readSendBusy('), '이미지·슬래시는 작업 중 길로 가지 않는다');
+  assert.ok(main.includes('const sleepMs =') && main.includes('bs: w.id === activeId && w.term ?'));
+});
+t('작업 중 보내기 화면: 문구 짝·Cmd+Enter 처리·개발용 화면', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8'); const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  for (const k of ['read.send.queue', 'read.input.busysend', 'read.input.busysendc', 'read.input.queued', 'read.input.sentnow', 'read.input.queuednow', 'read.input.busy-screen', 'read.input.busy-unsent', 'read.input.busy-tool']) assert.ok(I.STR.ko[k] && I.STR.en[k], k);
+  assert.strictEqual(I.STR.ko['read.input.busysend'], '작업 중입니다. Enter 는 대기열에 넣고, ⌘Enter 는 지금 보냅니다.');
+  assert.strictEqual(I.STR.ko['read.input.busysendc'], '작업 중입니다. Enter 는 대기열에 넣고, Ctrl+Enter 는 지금 보냅니다.');
+  assert.strictEqual(I.STR.ko['read.input.queued'], '대기열에 넣었습니다. 지금 작업이 끝나면 보내집니다.');
+  assert.strictEqual(I.STR.ko['read.input.sentnow'], '작업을 멈추고 지금 보냈습니다.');
+  assert.strictEqual(I.STR.ko['read.input.queuednow'], '대기열에 넣었습니다. 지금 보내기는 하지 못했습니다. 터미널에서 할 수 있습니다.');
+  assert.strictEqual(I.STR.ko['read.send.queue'], '대기열에 넣기');
+  const kd = src.indexOf("readTa.addEventListener('keydown'"); const kb = src.slice(kd, src.indexOf("readTa.addEventListener('beforeinput'"));
+  assert.ok(kb.includes("(e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey") && kb.includes('readSendNow({ now: true })') && /e\.isComposing[^\n]*readComposing[^\n]*e\.repeat\) return/.test(kb));
+  assert.ok(kb.indexOf('readSendNow({ now: true })') < kb.indexOf("if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;"));
+  assert.ok(src.includes('readEnterNote(') && src.includes('readEnterDone') && src.includes("const v = Lib.enterLineBreakVerdict(")); // 기존 Enter 처리는 그대로
+  assert.ok(src.includes("async function readSendNow(opts)") && src.includes('window.maru.readSend(id, raw, undefined, true)') && pre.includes('now === true ? {'));
+  assert.ok(src.includes("(w.ux || w.state) === 'busy' && w.bs === true") && src.includes("if (ux === 'waiting') return 'wait';\n    if (ux === 'busy') return readBusySend()"));
+  assert.ok(main.includes("'readbusy'") && src.includes("m === 'readbusy'"));
+  assert.ok(!/innerHTML/.test(src.slice(src.indexOf('function renderReadInput('), src.indexOf('function renderReadAtt(')))); // 글은 textContent 로만
+});
 t('첫 메시지 길 연결: 사전 확인 → 붙여넣기 → 판정 → Enter 순서, 새 길로 가는 조건, 초기화', () => {
   const src = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   const s0 = src.indexOf('async function readSendFirst('); assert.ok(s0 > 0);
@@ -5607,8 +5772,59 @@ t('첫 메시지 길 연결: 사전 확인 → 붙여넣기 → 판정 → Enter
 });
 t('isTermReply: 터미널의 자동 응답만 true, 조금이라도 다르면 입력', () => {
   for (const s of ['\x1b[I', '\x1b[O', '\x1b[24;80R', '\x1b[1;1R', '\x1b[?1;2c', '\x1b[?62;4c', '\x1b[>0;276;0c', '\x1b[>1;10;0c', '\x1b[0n', '\x1b[3n', '\x1b[1;9R', '\x1b[1;10R', '\x1b[1;20R', '\x1b[2;2R', '\x1b[11;2R', '\x1b[I\x1b[O', '\x1b[24;80R\x1b[?1;2c\x1b[I']) assert.strictEqual(L.isTermReply(s), true, JSON.stringify(s));
-  for (const s of ['', '\x1b[A', '\x1b[B', '\x1b[1;2R', '\x1b[1;3R', '\x1b[1;5R', '\x1b[1;8R', '\x1b[24;80R\x1b[1;2R', '\x1b[1;2R\x1b[I', '\x1b[I a', '\x1b[Ia', 'a\x1b[I', '\x1b[I\r', '\r', ' ', 'x', '\x1b[24;80', '\x1b[;R', '\x1b[R', '\x1b[24;80Rx', '\x1b[?1;2cx', '\x1b[?1;2;a c', '\x1b[4n', '\x1b[0n\n', '\x1b[200~x\x1b[201~', '\x1b]11;rgb:0/0/0\x07', '\x1b[1~', '\x1b[<0;1;1M', '\x1b']) assert.strictEqual(L.isTermReply(s), false, JSON.stringify(s));
+  for (const s of ['', '\x1b[A', '\x1b[B', '\x1b[1;2R', '\x1b[1;3R', '\x1b[1;5R', '\x1b[1;8R', '\x1b[24;80R\x1b[1;2R', '\x1b[1;2R\x1b[I', '\x1b[I a', '\x1b[Ia', 'a\x1b[I', '\x1b[I\r', '\r', ' ', 'x', '\x1b[24;80', '\x1b[;R', '\x1b[R', '\x1b[24;80Rx', '\x1b[?1;2cx', '\x1b[?1;2;a c', '\x1b[4n', '\x1b[0n\n', '\x1b[200~x\x1b[201~', '\x1b]11;x\x07', '\x1b[1~', '\x1b[<0;1;1M', '\x1b']) assert.strictEqual(L.isTermReply(s), false, JSON.stringify(s));
+  for (const s of ['\x1bP>|xterm.js(5.5.0)\x1b\\', '\x1bP>|\x1b\\', '\x1b[?2026;2$y', '\x1b[?2026;0$y', '\x1b[?1004;4$y', '\x1b]11;rgb:0/0/0\x07', '\x1b]10;rgb:ffff/ffff/ffff\x1b\\', '\x1b]12;rgb:00/00/00\x07', '\x1b]4;1;rgb:cc/00/00\x07', '\x1b[?u', '\x1b[?0u', '\x1b[?31u', '\x1bP>|xterm.js(5.5.0)\x1b\\\x1b[?2026;2$y\x1b[I']) assert.strictEqual(L.isTermReply(s), true, JSON.stringify(s));
+  for (const s of ['\x1bP>|abc\x1b\\a', '\x1b[?2026;5$y', '\x1b[?2026;2$', '\x1b]11;rgb:0/0/0\x07x', '\x1b]13;rgb:0/0/0\x07', '\x1b]11;rgb:zz\x07', '\x1b[?1234u', '\x1bP>|' + 'a'.repeat(65) + '\x1b\\', '\x1b[?2026;2$y\r']) assert.strictEqual(L.isTermReply(s), false, JSON.stringify(s));
   for (const v of [undefined, null, 5, {}, [], '\x1b[I'.repeat(2000)]) assert.strictEqual(L.isTermReply(v), false);
+});
+t('isPassiveTermInput: 자동 응답과 단추 없는 움직임 보고만 true', () => {
+  const mv = (b) => '\x1b[<' + b + ';10;20M';
+  for (const s of ['\x1b[I', '\x1b[?2026;2$y', '\x1bP>|xterm.js(5.5.0)\x1b\\', mv(35), mv(39), mv(51), mv(35) + mv(35), mv(35) + '\x1b[I' + mv(43), '\x1b[?2026;2$y' + mv(35)]) assert.strictEqual(L.isPassiveTermInput(s), true, JSON.stringify(s));
+  for (const s of [mv(0), mv(1), mv(2), mv(32), mv(33), mv(34), mv(64), mv(65), mv(66), mv(67), mv(99), mv(3), '\x1b[<0;10;20m', '\x1b[<35;10;20m', 'a', '\r', '\x1b[A', '\x1b[200~x\x1b[201~', '\x1b[I' + 'a', mv(35) + 'a', 'a' + mv(35), mv(35) + '\r', mv(35) + mv(0), '\x1b[?2026;2$y\x1b[A', '', '\x1b[<35;10;20', '\x1b[<35;1000;20M'.replace('1000', '123456')]) assert.strictEqual(L.isPassiveTermInput(s), false, JSON.stringify(s));
+  for (const v of [undefined, null, 5, {}, []]) assert.strictEqual(L.isPassiveTermInput(v), false);
+  assert.strictEqual(L.isPassiveTermInput(mv(35).repeat(290)), true); assert.strictEqual(L.isPassiveTermInput(mv(35).repeat(400)), false); // 4096자 초과
+  assert.strictEqual(L.isPassiveTermInput('\x1b[<35;10;20M\x1b[<'), false);
+  assert.strictEqual(L.isPassiveTermInput('\x1b[\x1b[<35;1;1MI'), false); // 보고를 빼고 남은 조각이 이어 붙어 응답이 되면 안 된다
+  const src = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(/if \(!L\.isPassiveTermInput\(data\)\) markIn\(w\)/.test(src));
+  assert.ok(/firstReasonOf\(L\.readCanSendFirst\(cx\)\)/.test(src) && /reason: 'first-touched'/.test(src) && /talkUserAt:/.test(src) && /L\.talkLastTwo/.test(src)); // sr 연결
+  assert.strictEqual(L.draftStep(false, mv(35)), false); assert.strictEqual(L.draftStep(true, mv(35)), true); // 움직임 보고는 쓰던 글 판정을 바꾸지 않는다
+  const R = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  assert.ok(R.includes("sr === 'first-touched'") && R.includes("r === 'first-touched'"));
+  assert.ok(I.STR.ko['read.input.first-touched'] && I.STR.en['read.input.first-touched']);
+});
+t('talkLastTwo: 마지막 두 줄의 role 과 시각', () => {
+  const u = '{"v":1,"at":1700000000,"role":"user","text":"q"}'; const a = '{"v":1,"at":1700000001,"role":"assistant","text":"a"}';
+  assert.deepStrictEqual(L.talkLastTwo(u + '\n' + a + '\n', true), { role: 'assistant', at: 1700000001000, prevRole: 'user', prevAt: 1700000000000 });
+  assert.deepStrictEqual(L.talkLastTwo(a + '\n\n' + a, true), { role: 'assistant', at: 1700000001000, prevRole: 'assistant', prevAt: 1700000001000 });
+  assert.deepStrictEqual(L.talkLastTwo(a + '\n', true), { role: 'assistant', at: 1700000001000, prevRole: null, prevAt: null });
+  assert.deepStrictEqual(L.talkLastTwo(a + '\n' + a, false), { role: 'assistant', at: 1700000001000, prevRole: null, prevAt: null }); // 앞 줄이 잘렸을 수 있다
+  assert.deepStrictEqual(L.talkLastTwo('토막\n' + u + '\n' + a, false), { role: 'assistant', at: 1700000001000, prevRole: 'user', prevAt: 1700000000000 });
+  assert.deepStrictEqual(L.talkLastTwo('깨짐\n' + a, true), { role: 'assistant', at: 1700000001000, prevRole: null, prevAt: null });
+  assert.strictEqual(L.talkLastTwo('', true), null); assert.strictEqual(L.talkLastTwo(undefined, true), null);
+});
+t('readCanSend: 이번 턴을 시작한 입력은 touched 가 아니다(짧은 턴)', () => {
+  const T = 1700000000000;
+  const base = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', hooked: true, ux: 'idle', bg: 0, bracketed: true, quietMs: 1000, dirty: false,
+    rawState: 'idle', recAt: T, talkRole: 'assistant', talkAt: T, inAt: T - 5000, startAt: T - 60000 };
+  const r = (p) => L.readCanSend({ ...base, ...p });
+  const touched = { ok: false, reason: 'touched' };
+  const Q = T - 1000; // 질문을 받은 때(초 단위 정수 * 1000), 턴이 1초
+  assert.deepStrictEqual(r({ talkUserAt: Q, inAt: Q - 100 }), { ok: true }); // 그 턴을 시작한 Enter
+  assert.deepStrictEqual(r({ talkUserAt: Q, inAt: Q + 999 }), { ok: true });
+  assert.deepStrictEqual(r({ talkUserAt: Q, inAt: Q + 1000 }), touched); // 질문을 받은 그 초가 끝났다
+  assert.deepStrictEqual(r({ talkUserAt: null, inAt: Q - 100 }), touched); // talkUserAt 없음: 지금 규칙 그대로
+  assert.deepStrictEqual(r({ inAt: Q - 100 }), touched);
+  const Q2 = T - 2500;
+  assert.deepStrictEqual(r({ talkUserAt: Q2, inAt: Q2 + 1500 }), touched); // 질문을 받은 뒤 1.5초의 입력
+  assert.deepStrictEqual(r({ talkUserAt: Q, inAt: T + 1 }), touched); // 답변 뒤 입력
+  assert.deepStrictEqual(r({ talkUserAt: T + 5000, inAt: T - 100 }), touched); // 질문이 답변보다 뒤
+  assert.deepStrictEqual(r({ startAt: T - 100, talkUserAt: T - 2000, inAt: T - 1900 }), touched); // 이 pty 가 뜨기 한참 전의 질문
+  assert.deepStrictEqual(r({ startAt: T - 100, talkUserAt: T - 1000, inAt: T - 1100 }), { ok: true }); // pty 가 뜬 뒤의 질문
+  assert.deepStrictEqual(r({ talkUserAt: NaN, inAt: Q - 100 }), touched);
+  assert.deepStrictEqual(r({ talkUserAt: Q, inAt: NaN }), touched);
+  assert.deepStrictEqual(r({ talkUserAt: Q, inAt: Q - 100, ux: 'busy' }), { ok: false, reason: 'busy' }); // 다른 조건은 그대로
+  assert.deepStrictEqual(r({ talkUserAt: Q, inAt: Q - 100, dirty: true }), { ok: false, reason: 'draft' });
 });
 t('talkLast: 마지막 줄의 role 과 시각(밀리초)', () => {
   const a = '{"v":1,"at":1700000000,"role":"user","text":"질문"}'; const b = '{"v":1,"at":1700000005.5,"role":"assistant","text":"답"}';
@@ -5630,7 +5846,7 @@ t('읽기 입력창: pty 에 쓰는 모든 자리가 markIn 을 부른다', () =
   assert.ok(writes.length >= 10, 'pty 쓰기 줄 수 ' + writes.length);
   for (const l of writes) assert.ok(/markIn\(w\)/.test(l) || /write\(cmd\)/.test(l), l.trim().slice(0, 80)); // 시작 명령(write(cmd))은 바로 앞 줄에서 markIn
   assert.ok(/markIn\(w\); w\.watchProc = true|w\.watchProc = true; w\.sawUp = false; markIn\(w\);/.test(src));
-  assert.ok(/if \(!L\.isTermReply\(data\)\) markIn\(w\)/.test(src)); // pty:write 는 자동 응답만 뺀다
+  assert.ok(/if \(!L\.isPassiveTermInput\(data\)\) markIn\(w\)/.test(src)); // pty:write 는 자동 응답·움직임 보고만 뺀다
 });
 t('읽기 입력창 연결: IPC·preload·i18n 키 짝', () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
@@ -5682,7 +5898,7 @@ t('읽기 화면 배치·단추 안전: 접힘 때 카드 열, Enter 반복, 보
   const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.ok(src.includes('Lib.readSideShown(') && src.includes("classList.toggle('read-side'"));
   assert.ok(css.includes('.cols.read-on:not(.read-side) .right-col'));
-  const kd = src.indexOf("readTa.addEventListener('keydown'"); const kb = src.slice(kd, kd + 1200);
+  const kd = src.indexOf("readTa.addEventListener('keydown'"); const kb = src.slice(kd, kd + 1800); // 추천 글 Tab 처리가 앞에 들어와 창을 넓혔다
   assert.ok(kb.includes('e.repeat') && kb.includes('readFillHeld') && kb.includes('< 500'));
   assert.ok(src.includes("readSurfHold = true") && src.includes('!readSurfHold'));
   assert.ok(src.includes('ctx.last && ctx.key && !readSurfSeen.has'));
@@ -5730,8 +5946,593 @@ t('읽기 사용 횟수: readDayKey·Parse·Bump·저장', () => {
   assert.deepStrictEqual(L.readStatsLoad(lnk), empty);
 });
 
+t('actDur: 0.3초 / 12초 / 1분 5초 / 1시간 2분, 잘못된 값은 0초', () => {
+  const F = (ms) => I.t('ko', L.actDur(ms).key, L.actDur(ms).params);
+  assert.strictEqual(F(300), '0.3초'); assert.strictEqual(F(40), '0.1초'); assert.strictEqual(F(0), '0초'); assert.strictEqual(F(999), '1.0초');
+  assert.strictEqual(F(1000), '1초'); assert.strictEqual(F(12900), '12초'); assert.strictEqual(F(59999), '59초');
+  assert.strictEqual(F(65000), '1분 5초'); assert.strictEqual(F(3720000), '1시간 2분');
+  for (const v of [null, undefined, -5, NaN, 'x', Infinity]) assert.strictEqual(F(v), '0초');
+  assert.strictEqual(I.t('en', 'read.d.ms', L.actDur(82000).params), '1m 22s');
+});
+t('actWindow: 최근 8줄만, 앞의 것은 접고 more 를 더한다, 펼치면 전부', () => {
+  const mk = (n) => Array.from({ length: n }, (_, i) => ({ id: 'i' + i }));
+  assert.deepStrictEqual([L.actWindow(mk(6), 0, false).shown.length, L.actWindow(mk(6), 0, false).folded], [6, 0]);
+  const a = L.actWindow(mk(12), 5, false); assert.deepStrictEqual([a.shown.length, a.folded, a.shown[0].id], [8, 9, 'i4']);
+  const b = L.actWindow(mk(12), 5, true); assert.deepStrictEqual([b.shown.length, b.folded], [12, 5]);
+  assert.deepStrictEqual(L.actWindow(null, 0, false), { shown: [], folded: 0 });
+});
+t('actSummary: 답변이 마지막이고 질문보다 뒤의 활동이 있을 때만', () => {
+  const conv = [{ role: 'user', at: 1000 }, { role: 'assistant', at: 1010 }, { role: 'user', at: 2000 }, { role: 'assistant', at: 2082 }];
+  const acts = [{ at: 1500000 }, { at: 2005000 }, { at: 2010000 }];
+  assert.deepStrictEqual(L.actSummary(acts, conv), { count: 2, ms: 82000 });
+  assert.strictEqual(L.actSummary([{ at: 1500000 }], conv), null); // 지난 턴의 활동뿐
+  assert.strictEqual(L.actSummary(acts, conv.slice(0, 3)), null); // 마지막이 질문
+  assert.strictEqual(L.actSummary([], conv), null); assert.strictEqual(L.actSummary(acts, null), null); assert.strictEqual(L.actSummary(null, conv), null);
+  assert.strictEqual(L.actSummary(acts, [{ role: 'assistant', at: 5 }]), null);
+});
+t('actTurnItems: 이 턴의 활동만(질문 - 1초 < at <= 답변 + 2초). 답변 뒤의 활동은 세지 않는다', () => {
+  const conv = [{ role: 'user', at: 1000 }, { role: 'assistant', at: 1010 }, { role: 'user', at: 2000 }, { role: 'assistant', at: 2082 }];
+  const acts = [{ id: 'a', at: 1500000 }, { id: 'b', at: 1999500 }, { id: 'c', at: 2005000 }, { id: 'd', at: 2084000 }, { id: 'e', at: 2084001 }, { id: 'f', at: 1999000 }];
+  assert.deepStrictEqual(L.actTurnItems(acts, conv).map((x) => x.id), ['b', 'c', 'd']); // 경계: 1999000 은 제외(초과여야 함), 2084000 은 포함, 2084001 은 제외
+  assert.deepStrictEqual(L.actSummary(acts, conv), { count: 3, ms: 82000 }); // 요약 개수와 목록이 같은 거름 결과
+  assert.strictEqual(L.actSummary([{ at: 2090000 }], conv), null); // 답변 뒤의 활동뿐
+  assert.strictEqual(L.actTurnItems(acts, conv.slice(0, 3)), null);
+  assert.deepStrictEqual(L.actSinceQuestion(acts, conv.slice(0, 3)).map((x) => x.id), ['b', 'c', 'd', 'e']);
+  assert.strictEqual(L.actSinceQuestion(acts, conv), null);
+});
+t('actParse: 시각이 상한(1e11 초)을 넘는 줄은 버린다', () => {
+  const mk = (at) => JSON.stringify({ v: 1, at, k: 'pre', id: 'x1', tool: 'Bash' });
+  assert.strictEqual(L.actParse(mk(1e11)).items.length, 1);
+  assert.strictEqual(L.actParse(mk(1e11 + 1)).items.length, 0);
+  assert.strictEqual(L.actParse(mk(1700000000000)).items.length, 0 + (1700000000000 <= 1e11 ? 1 : 0)); // 밀리초 값
+});
+t('imgGateVerdict: 통과해도 Enter 직전 공통 조건을 못 넘으면 img-nosession', () => {
+  const ctx = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'idle', bg: 0, bracketed: true };
+  assert.deepStrictEqual(L.imgGateVerdict({ ok: true }, ctx), { ok: true });
+  assert.strictEqual(L.imgGateVerdict({ ok: true }, { ...ctx, claudeUp: false }).reason, 'img-nosession');
+  assert.strictEqual(L.imgGateVerdict({ ok: true }, { ...ctx, bracketed: false }).reason, 'img-nosession');
+  assert.strictEqual(L.imgGateVerdict({ ok: true }, { ...ctx, knownName: '' }).reason, 'img-nosession');
+  assert.strictEqual(L.imgGateVerdict({ ok: true }, null).reason, 'img-nosession');
+  assert.strictEqual(L.imgGateVerdict({ ok: false, reason: 'busy' }, ctx).reason, 'busy'); // 기존 거부 이유는 그대로
+  assert.strictEqual(L.imgGateVerdict(null, ctx).reason, 'img-nosession');
+});
+t('promptBoxImages: 표시 개수와 글을 화면으로 확인', () => {
+  const B = '─'.repeat(40); const NB = ' ';
+  const box = (row, extra, plainRow) => { const lines = ['앞선 출력', '', B, row, B, '  [model] | [folder]', '  ⏵⏵ auto mode on']; const plain = lines.slice(); plain[3] = plainRow === undefined ? row : plainRow; return { lines, plain, cursorX: 8, cursorY: 3, rows: lines.length, cols: 80, ...extra }; };
+  const yes = (row, count, text, why) => { const r = L.promptBoxImages(box(row), count, text); assert.strictEqual(r.ok, true, row + ' ' + JSON.stringify(r)); if (why) assert.strictEqual(r.why, why); };
+  const no = (s, count, text, why) => { const r = L.promptBoxImages(s, count, text); assert.strictEqual(r.ok, false, JSON.stringify(r)); if (why) assert.strictEqual(r.why, why); };
+  yes('❯ [Image #1]', 1); yes('❯' + NB + '[Image #1]', 1); yes('❯ [Image #1] [Image #2]', 2); yes('❯ [Image #7]', 1); yes('❯ [Image #7] [Image #8] [Image #9]', 3);
+  yes('❯ [Image #1] 이 그림 설명해 줘', 1, '이 그림 설명해 줘', 'same');
+  yes('❯ [Image #1] 첫 줄입니다 그리고 이어서', 1, '첫 줄입니다 그리고 이어서\n둘째 줄', 'prefix');
+  yes('❯ [Image #3] [Image #4] 글', 2, '글');
+  yes('❯ [Image #1] [Pasted text #1 +20 lines]', 1, '여러 줄\n글\n입니다', 'folded');
+  yes('❯ [Image #1]', 1, ''); yes('❯ [Image #1]', 1, undefined); yes('❯ [Image #1]', 1, null);
+  no(box('❯ [Image #1]'), 2, undefined, 'count'); no(box('❯ [Image #1] [Image #2]'), 1, undefined, 'count'); no(box('❯'), 1, undefined, 'count');
+  no(box('❯ [Image #1] 다른 글'), 1, undefined, 'extra'); no(box('❯ [Image #1]글'), 1, undefined, 'extra');
+  no(box('❯ [Image #1] 이 그림'), 1, '다른 설명', 'mismatch'); no(box('❯ [Image #1] 이 그림 뒤에 더'), 1, '이 그림', 'mismatch');
+  no(box('❯ [Image #1]'), 1, '글', 'mismatch');
+  no(box('❯ [Image #1] [Image #2]'), 1, '글', 'count');
+  no(box('❯ 글 [Image #1]'), 1, undefined, 'count'); // 표시가 앞에 있어야 한다
+  const base = box('❯ [Image #1]');
+  no({ ...base, lines: ['앞', '', B, '❯ [Image #1]', B, '❯ 1. 예', '  2. 아니오'], plain: ['앞', '', B, '❯ [Image #1]', B, '❯ 1. 예', '  2. 아니오'] }, 1, undefined, 'choice'); // 상자 밖 선택 창 흔적
+  no({ ...base, cursorY: 5 }, 1, undefined, 'border'); no({ ...base, cursorY: 2 }, 1, undefined, 'cursor'); no({ ...base, cursorY: 1 }, 1, undefined, 'border'); // 커서가 상자 밖
+  no({ ...base, plain: undefined }, 1, undefined, 'plain'); no({ ...base, plain: ['a'] }, 1, undefined, 'plain');
+  no(box('❯ [Image #1]', {}, '❯'), 1, undefined, 'count'); no(box('❯ [Image #1]', {}, '❯ '), 1, undefined, 'count'); // 표시가 흐린 글자뿐(plain 에서 공백)
+  no(box('❯ 안내', {}, '❯'), 1, undefined, 'count');
+  no({ ...base, lines: ['❯ [Image #1]'], plain: ['❯ [Image #1]'], cursorY: 0 }, 1, undefined, 'border');
+  for (const v of [null, undefined, 5, 'x', [], {}]) no(v, 1);
+  for (const c of [0, -1, 1.5, NaN, undefined, '1']) no(base, c, undefined, 'count');
+  no(base, 1, 5, 'shape'); no(box('❯ [Image #1]'), 1, '\n', 'text');
+  assert.doesNotThrow(() => L.promptBoxImages({ get lines() { throw new Error('x'); } }, 1));
+  assert.strictEqual(L.promptBoxCheck(box('❯ [Image #1]')).ok, false); // promptBoxCheck 의 사전 확인은 여전히 비어 있지 않은 상자를 거부한다
+});
+t('이미지 붙이기 연결(소스 검사)', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const ren = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  const fn = (name, nextMark) => { const i = main.indexOf(name); assert.ok(i >= 0, name); const j = main.indexOf(nextMark, i + name.length); assert.ok(j > i, nextMark); return main.slice(i, j); };
+  // read:send: tokens 가 없으면(없거나 빈 배열) 기존 경로. 분기는 기존 첫 줄(readCleanSend) 앞에 한 줄로만 있다
+  const send = fn("ipcMain.handle('read:send'", '// ---- 읽기 화면 입력창: 이미지 붙이기');
+  assert.ok(send.includes('Array.isArray(arg.tokens) && arg.tokens.length > 0) return readSendWithImages(w, arg)'));
+  assert.ok(send.indexOf('readSendWithImages') < send.indexOf('L.readCleanSend(arg.text)'));
+  assert.ok(send.includes('readSendFirst(w, c.text)') && send.includes("const data = '\\x1b[200~' + c.text + '\\x1b[201~\\r';")); // 기존 경로 그대로
+  // readSendImages: Enter 는 한 번, 마지막 확인(firstSendVerdict) 뒤에
+  const imgs = fn('async function readSendImages(', '\n}\n');
+  assert.strictEqual(imgs.split("term.write('\\r')").length - 1, 1);
+  assert.ok(imgs.indexOf("term.write('\\r')") > imgs.indexOf('L.firstSendVerdict(') && imgs.indexOf("term.write('\\r')") > imgs.indexOf("v.act !== 'send'") && imgs.indexOf("term.write('\\r')") > imgs.indexOf('w.lastOutputAt < snapAt'));
+  assert.ok(imgs.includes('L.promptBoxCheck(snap)') && imgs.includes('L.promptBoxImages(') && imgs.includes('readSendGate(w)') && imgs.includes('w.readFirstBusy = true') && imgs.includes('finally { w.readFirstBusy = false; }'));
+  assert.ok(imgs.indexOf('readSendGate(w)') < imgs.indexOf('L.promptBoxCheck(snap)') && imgs.lastIndexOf('readSendGate(w)') > imgs.indexOf('L.promptBoxCheck(snap)'));
+  assert.ok(imgs.includes("'\\x1b[200~' + p + '\\x1b[201~'") && imgs.includes('pastePathOk(p)'));
+  // 경로는 Map 에서만: 렌더러가 준 문자열은 표 조회에만 쓰고 경로로 쓰지 않는다
+  const wi = fn('async function readSendWithImages(', '\n}\n');
+  assert.ok(wi.includes('pasteTokens.get(t)') && wi.includes('ents.map((v) => v.path)') && wi.includes('v.wsId === w.id') && wi.includes('tk.length > 4'));
+  assert.ok(!/path\.join\([^)]*arg\./.test(main.slice(main.indexOf("ipcMain.handle('read:paste-image'"), main.indexOf('async function readSendImages('))));
+  // 발신 창 확인
+  for (const ch of ["ipcMain.handle('read:paste-image', async (e, id) => {\n  const w = wsFrom(e, id);", "ipcMain.handle('read:paste-drop', (e, id, token) => {\n  const w = wsFrom(e, id);"]) assert.ok(main.includes(ch), ch);
+  const pi = fn("ipcMain.handle('read:paste-image'", "ipcMain.handle('read:paste-drop'");
+  assert.ok(pi.includes('clipboard.readImage()') && pi.includes('toPNG()') && pi.includes("flag: 'wx'") && pi.includes('mode: 0o600') && pi.includes('PASTE_PER_WS') && pi.includes("'noimage'") && pi.includes("'toobig'") && !/path:\s*file[^}]*\}\s*\);\s*return \{[^}]*path/.test(pi)); // 돌려주는 값에 경로가 없다
+  assert.ok(!/return \{ ok: true, token[^}]*\b(path|file)\b/.test(pi));
+  assert.ok(main.includes('pasteForgetWs(id)') && main.includes('PASTE_NAME_RE.test(name)') && main.includes('mode: 0o700'));
+  // B2: 진행 중 요청 1개·표 상한·픽셀 수 먼저·B5 6시간 정리·B6 넓은 가짜 조건
+  assert.ok(pi.includes("reason: 'busy'") && pi.includes("reason: 'full'") && main.includes('PASTE_PIXELS_MAX') && main.indexOf('size.width * size.height > PASTE_PIXELS_MAX') < main.indexOf('buf = img.toPNG()'));
+  assert.ok(main.includes('setInterval(cleanOldPastes, 6 * 3600 * 1000).unref()') && main.includes('const FAKE_IMG = !!(SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK)') && pi.includes('if (FAKE_IMG)') && wi.includes('if (FAKE_IMG)'));
+  assert.ok(imgs.includes("'img-screen'") && imgs.includes("'img-unsent'") && !imgs.includes("'first-unsent'") && !imgs.includes("'first-screen'") && imgs.includes('L.isClaudeFront(termProc(w), w.claudeProc)') && imgs.includes('L.readFirstBase('));
+  assert.ok(ren.includes('if (readPasting) return;') && ren.includes("readAtts.length > 0) { readNoteKey = 'fillatt'") && ren.includes('Lib.actSinceQuestion(readActItems, readItems)') && ren.includes('readBody.scrollHeight !== h0') && ren.includes('readActGen++'));
+  assert.ok(pre.includes("'read:paste-image'") && pre.includes("'read:paste-drop'") && pre.includes('tokens.slice(0, 4)') && pre.includes('slice(0, 64)'));
+  assert.ok(ren.includes('window.maru.readPasteImage(id)') && ren.includes("it.type.startsWith('image/')") && ren.includes('readAttSaved'));
+});
+
+// ---- 컨텍스트 사용량 ----
+t('ctxParse: 정상·틀린 v·범위 밖 pct·문자열 숫자·size 없음·긴 글·깨진 JSON', () => {
+  const j = (o) => JSON.stringify(o);
+  assert.deepStrictEqual(L.ctxParse(j({ v: 1, at: 1800000000000, pct: 42.5, size: 1000000, extra: 'x' })), { at: 1800000000000, pct: 42.5, size: 1000000 });
+  assert.deepStrictEqual(L.ctxParse(j({ v: 1, at: 5, pct: 0 })), { at: 5, pct: 0, size: null });
+  assert.deepStrictEqual(L.ctxParse(j({ v: 1, at: 5, pct: 100, size: 200000 }) + '\n'), { at: 5, pct: 100, size: 200000 });
+  for (const bad of [{ v: 2, at: 5, pct: 1 }, { v: '1', at: 5, pct: 1 }, { at: 5, pct: 1 }, { v: 1, at: 0, pct: 1 }, { v: 1, at: -1, pct: 1 }, { v: 1, pct: 1 }, { v: 1, at: 5, pct: -0.1 }, { v: 1, at: 5, pct: 100.1 }, { v: 1, at: 5, pct: '42' }, { v: 1, at: '5', pct: 1 }, { v: 1, at: 5 }]) assert.strictEqual(L.ctxParse(j(bad)), null, j(bad));
+  for (const s of ['0', '1e999', '"1e9"']) assert.strictEqual(L.ctxParse(s), null);
+  for (const sz of [0, -1, 1.5, '200000', 100000001, null]) assert.strictEqual(L.ctxParse(j({ v: 1, at: 5, pct: 1, size: sz })).size, null);
+  assert.strictEqual(L.ctxParse(j({ v: 1, at: 5, pct: 1, size: 100000000 })).size, 100000000);
+  assert.strictEqual(L.ctxParse(j({ v: 1, at: 5, pct: 1, pad: 'x'.repeat(5000) })), null);
+  for (const bad of ['', '{', 'null', '[]', '5', undefined, null, 5]) assert.strictEqual(L.ctxParse(bad), null);
+});
+t('ctxView: 미래 시각·pty 시작 전 파일·경계 69.5·70·89.4·90', () => {
+  const N = 1800000000000; const mk = (pct, at = N - 1000, size = 200000) => ({ at, pct, size });
+  assert.strictEqual(L.ctxView(null, { now: N }), null);
+  assert.strictEqual(L.ctxView(mk(10, N + 5001), { now: N }), null);
+  assert.deepStrictEqual(L.ctxView(mk(10, N + 5000), { now: N }), { pct: 10, level: 'low', size: 200000 });
+  assert.strictEqual(L.ctxView(mk(10, N - 5000), { now: N, startAt: N - 3000 }), null);
+  assert.ok(L.ctxView(mk(10, N - 3500), { now: N, startAt: N - 3000 }));
+  assert.ok(L.ctxView(mk(10, N - 5000), { now: N, startAt: NaN }));
+  assert.ok(L.ctxView(mk(10, N - 5000), { now: N }));
+  const lv = (p) => L.ctxView(mk(p), { now: N });
+  assert.deepStrictEqual([lv(69.4).pct, lv(69.4).level], [69, 'low']);
+  assert.deepStrictEqual([lv(69.5).pct, lv(69.5).level], [70, 'mid']);
+  assert.deepStrictEqual([lv(70).pct, lv(70).level], [70, 'mid']);
+  assert.deepStrictEqual([lv(89.4).pct, lv(89.4).level], [89, 'mid']);
+  assert.deepStrictEqual([lv(89.5).pct, lv(89.5).level], [90, 'high']);
+  assert.deepStrictEqual([lv(90).pct, lv(90).level], [90, 'high']);
+  assert.deepStrictEqual([lv(100).pct, lv(100).level], [100, 'high']);
+  assert.strictEqual(L.ctxView({ at: N, pct: 5 }, { now: N }).size, null);
+});
+t('ctxSizeLabel: 1M·200K·천 단위 반올림·1000 미만', () => {
+  assert.strictEqual(L.ctxSizeLabel(1000000), '1M');
+  assert.strictEqual(L.ctxSizeLabel(200000), '200K');
+  assert.strictEqual(L.ctxSizeLabel(123456), '123K');
+  assert.strictEqual(L.ctxSizeLabel(1000), '1K');
+  for (const v of [999, 0, null, undefined, NaN, '200000']) assert.strictEqual(L.ctxSizeLabel(v), '');
+});
+t('main: ctxOf 는 스모크·개발 모드에서 디스크를 읽지 않고, 청소·삭제·응답에 .ctx 가 있다', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, 'main.js'), 'utf8');
+  const i = main.indexOf('function ctxOf(w)'); const body = main.slice(i, main.indexOf('// 살아 있는 표지(없으면 null)', i));
+  assert.ok(i > 0 && body.indexOf('SMOKE || TEST_UI || TEST_FX || FAKE_PROJ || FAKE_TALK') > 0 && body.indexOf('SMOKE || TEST_UI') < body.indexOf('readRegular(') && body.indexOf('SMOKE || TEST_UI') < body.indexOf('ctxFile(w)'));
+  assert.ok(body.includes('isSymbolicLink()') && body.includes('ls.isFile()') && body.includes('SESS_MAX_BYTES') && body.includes('mtimeMs') && body.includes('!app.isPackaged'));
+  assert.ok(main.includes("name.endsWith('.sess') || name.endsWith('.ctx')") && main.includes("replace(/\\.json$/, '.ctx')"));
+  assert.ok(main.includes('ctx = L.ctxView(c0, { now: Date.now(), startAt: w.ptyStartAt })') && main.includes("sl.source === 'clear' && Number.isFinite(sl.at) && sl.at > c0.at") && main.includes('...(await readTalk(w, key)), ctx'));
+});
+// ---- 세션 시작 표지·슬래시 명령 ----
+t('sessParse: 다섯 source·잘못된 값·깨진 JSON', () => {
+  for (const s of ['startup', 'resume', 'clear', 'compact', 'precompact']) assert.deepStrictEqual(L.sessParse(JSON.stringify({ v: 1, at: 1800000000.5, sid: 'abcdef12-3456-7890-abcd-ef1234567890', source: s })), { at: 1800000000500, sid: 'abcdef12-3456-7890-abcd-ef1234567890', source: s }, s);
+  const ok = { v: 1, at: 1800000000, sid: 'abcdef12-3456', source: 'clear' };
+  assert.ok(L.sessParse(JSON.stringify(ok)));
+  for (const bad of [{ v: 2 }, { v: '1' }, { at: 0 }, { at: -5 }, { at: '17' }, { at: 1e11 + 1 }, { at: null }, { sid: 'x' }, { sid: 'a b c d e f g h' }, { sid: '../../etc/passwd' }, { sid: 12345678 }, { source: 'other' }, { source: 'CLEAR' }, { source: 5 }]) assert.strictEqual(L.sessParse(JSON.stringify({ ...ok, ...bad })), null, JSON.stringify(bad));
+  for (const bad of ['', '{', 'null', '[]', '5', '"x"', undefined, null, 5, '{"v":1}', 'x'.repeat(5000)]) assert.strictEqual(L.sessParse(bad), null);
+  assert.ok(L.sessParse(JSON.stringify({ ...ok, at: 1e11 })));
+});
+t('sessCtx: 표지 없음·옛 표지는 문맥 그대로, 살아 있는 표지는 훅 기록 없는 세션으로', () => {
+  const T = 1800000000000;
+  const ctx = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'idle', bg: 0, bracketed: true, quietMs: 5000, dirty: false, rawState: 'idle', recAt: T, inAt: T + 10, inN: 7, launchInN: 2, launchInAt: T - 9000, claudeUpAt: T - 8000, startAt: T - 60000, now: T + 30000 };
+  const snap = JSON.parse(JSON.stringify(ctx));
+  const S = (source, at) => ({ source, at, sid: 'abcdef12-3456' });
+  const o = (p) => ({ startAt: T - 60000, sessInN: 7, now: T + 30000, ...p });
+  assert.strictEqual(L.sessCtx(ctx, null, o()), ctx); assert.strictEqual(L.sessCtx(ctx, undefined, o()), ctx);
+  assert.deepStrictEqual(L.sessCtx(ctx, S('clear', T - 1000), o()), snap); // 표지가 상태 기록보다 옛것
+  assert.deepStrictEqual(L.sessCtx(ctx, S('clear', T), o()), snap); // 같은 시각도 새것이 아니다
+  assert.deepStrictEqual(L.sessCtx(ctx, S('clear', T + 5000), o({ startAt: T + 20000 })), snap); // pty 시작보다 1초 넘게 앞선 표지는 무시
+  assert.deepStrictEqual(L.sessCtx({ ...ctx, rawState: null, recAt: NaN, ux: 'none' }, S('startup', T - 90000), o()), { ...snap, rawState: null, recAt: NaN, ux: 'none' }); // pty 시작(T-60000)보다 앞서 낡음
+  for (const src of ['startup', 'resume', 'clear', 'compact']) {
+    const r = L.sessCtx(ctx, S(src, T + 5000), o());
+    assert.deepStrictEqual(r, { ...snap, rawState: null, ux: 'none', launchInN: 7 }, src);
+    assert.deepStrictEqual(ctx, snap); // 원본은 바뀌지 않는다
+    assert.deepStrictEqual(L.readCanSendFirst(r), { ok: true }, src);
+    assert.strictEqual(L.readCanSend(r).reason, 'first');
+  }
+  const touched = L.sessCtx(ctx, S('clear', T + 5000), o({ sessInN: -1 })); // 표지 뒤 입력 있음
+  assert.deepStrictEqual(L.readCanSendFirst(touched), { ok: false, reason: 'touched' });
+  const later = L.sessCtx({ ...ctx, inN: 8 }, S('clear', T + 5000), o({ sessInN: 7 })); // 기준 뒤의 입력
+  assert.deepStrictEqual(L.readCanSendFirst(later), { ok: false, reason: 'touched' });
+  assert.deepStrictEqual(L.readCanSendFirst(L.sessCtx(ctx, S('clear', T + 5000), o({ sessInN: null }))), { ok: false, reason: 'first' }); // 기준을 모르면 거부
+  const pc = L.sessCtx(ctx, S('precompact', T + 5000), o());
+  assert.deepStrictEqual(pc, { ...snap, ux: 'busy' }); assert.deepStrictEqual(L.readCanSend(pc), { ok: false, reason: 'busy' });
+  assert.strictEqual(L.sessCtx(ctx, S('precompact', T + 5000), o({ now: T + 5000 + 120001 })), ctx); // 120초 넘으면 무시
+  assert.deepStrictEqual(L.readCanSend(L.sessCtx(ctx, S('precompact', T + 5000), o({ now: T + 5000 + 119000 }))), { ok: false, reason: 'busy' });
+  assert.strictEqual(L.sessCtx(ctx, S('weird', T + 5000), o()), ctx);
+  assert.strictEqual(L.sessCtx(null, S('clear', T), o()), null);
+  assert.deepStrictEqual(L.sessBaseInN(S('clear', T), T + 50, 4), 4); assert.deepStrictEqual(L.sessBaseInN(S('clear', T), T + 51, 4), -1); assert.deepStrictEqual(L.sessBaseInN(S('clear', T), 0, 0), 0);
+  // 기준 시각 = min(표지 시각, 처음 본 시각)
+  assert.deepStrictEqual(L.sessBaseInN(S('clear', T), T + 40, 4, T + 1000), 4);
+  assert.deepStrictEqual(L.sessBaseInN(S('clear', T + 5000), T + 1100, 4, T + 1000), -1); // 표지 시각이 처음 본 시각보다 뒤: 처음 본 시각이 기준
+  assert.deepStrictEqual(L.sessBaseInN(S('clear', T + 5000), T + 1040, 4, T + 1000), 4);
+});
+t('sessCtx: 원래의 busy·waiting 은 지우지 않는다(M1)', () => {
+  const T = 1800000000000;
+  const ctx = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'idle', bg: 0, bracketed: true, quietMs: 5000, dirty: false, rawState: 'idle', recAt: T, inAt: T + 10, inN: 7, launchInN: 2, claudeUpAt: T - 8000, startAt: T - 60000, now: T + 30000 };
+  const o = { startAt: T - 60000, sessInN: 7, now: T + 30000 };
+  for (const src of ['startup', 'resume', 'clear', 'compact', 'precompact']) {
+    for (const p of [{ rawState: 'busy' }, { rawState: 'waiting' }, { ux: 'busy' }, { ux: 'waiting' }]) {
+      const c = { ...ctx, ...p };
+      assert.strictEqual(L.sessCtx(c, { source: src, at: T + 5000, sid: 'abcdef12-3456' }, o), c, src + JSON.stringify(p));
+    }
+  }
+});
+t('sessAlive: 미래·pty 시작 앞·mtime 어긋난 표지는 버린다(M2)', () => {
+  const T = 1800000000000; const S = (at, extra) => ({ source: 'clear', at, sid: 'abcdef12-3456', ...extra });
+  assert.strictEqual(L.sessAlive(S(T + 5000), NaN, T, { now: T }), true); // 지금 + 5초 까지
+  assert.strictEqual(L.sessAlive(S(T + 5001), NaN, T, { now: T }), false); // 미래 시각
+  assert.strictEqual(L.sessAlive(S(T), NaN, T, { now: T + 10 }), true); // pty 시작과 같은 시각
+  assert.strictEqual(L.sessAlive(S(T - 1), NaN, T, { now: T + 10 }), false); // pty 시작 앞(여유 없음)
+  assert.strictEqual(L.sessAlive(S(T, { mtimeMs: T + 5000 }), NaN, T - 1, { now: T + 6000 }), true);
+  assert.strictEqual(L.sessAlive(S(T, { mtimeMs: T + 5001 }), NaN, T - 1, { now: T + 6000 }), false); // mtime 과 어긋남
+  assert.strictEqual(L.sessAlive(S(T), NaN, T - 1, { now: T + 6000, mtimeMs: T - 6000 }), false);
+  assert.strictEqual(L.sessAlive(S(T + 10), T, T - 1, { now: T + 100 }), true); assert.strictEqual(L.sessAlive(S(T), T, T - 1, { now: T + 100 }), false);
+  assert.strictEqual(L.sessCtx({ hasTerm: true, rawState: null, recAt: NaN, ux: 'none', inN: 3 }, S(T + 9000), { startAt: T - 1, sessInN: 3, now: T }).ux, 'none'); // 미래 표지는 합성하지 않는다
+  const c = { hasTerm: true, rawState: 'idle', recAt: T - 5, ux: 'idle', inN: 3 };
+  assert.strictEqual(L.sessCtx(c, S(T + 9000), { startAt: T - 1, sessInN: 3, now: T }), c);
+  assert.strictEqual(L.sessCtx(c, S(T - 10), { startAt: T, sessInN: 3, now: T + 10 }), c); // pty 시작 앞
+  assert.strictEqual(L.sessCtx(c, S(T + 1, { mtimeMs: T + 20000 }), { startAt: T, sessInN: 3, now: T + 10 }), c); // mtime 어긋남
+});
+t('slashAllowed·slashFilter·slashEnterAction: 허용 목록', () => {
+  const items = [{ name: 'clear', desc: '', kind: 'builtin' }, { name: 'compact', desc: '', kind: 'builtin' }, { name: 'review-notes', desc: '', kind: 'skill' }, { name: 'daily:standup', desc: '', kind: 'command' }, { name: 'model', desc: '', kind: 'skill' }, { name: 'clear-cache', desc: '', kind: 'skill' }];
+  assert.strictEqual(L.slashAllowed('clear', items), true); assert.strictEqual(L.slashAllowed('review-notes', items), true); assert.strictEqual(L.slashAllowed('daily:standup', items), true);
+  assert.strictEqual(L.slashAllowed('mod', items), false); // 앞머리만
+  assert.strictEqual(L.slashAllowed('nothing', items), false); // 목록에 없음
+  assert.strictEqual(L.slashAllowed('model', items), false); // 내장 이름은 목록에 섞여 와도 거짓
+  assert.strictEqual(L.slashAllowed('clear', [{ name: 'clear', kind: 'skill' }]), false); // clear 는 기본 명령 항목만
+  assert.strictEqual(L.slashAllowed('clear', null), false); assert.strictEqual(L.slashAllowed(5, items), false); assert.strictEqual(L.slashAllowed('Clear', items), false);
+  // 내장 이름과 겹치는 디스크 항목은 목록에서 빠진다
+  for (const n of ['model', 'clear', 'compact', 'init', 'review', 'plan', 'loop', 'schedule', 'btw']) assert.strictEqual(L.slashDiskOk(n), false, n);
+  assert.strictEqual(L.slashDiskOk('review-notes'), true); assert.strictEqual(L.slashDiskOk('Bad Name'), false);
+  // 정렬: 정확히 같은 이름 -> 앞머리 -> 포함, 같은 급 안에서는 기본 명령 먼저
+  assert.deepStrictEqual(L.slashFilter(items, 'clear').map((x) => x.name), ['clear', 'clear-cache']);
+  assert.deepStrictEqual(L.slashFilter(items, 'c').map((x) => x.name), ['clear', 'compact', 'clear-cache']);
+  assert.deepStrictEqual(L.slashFilter(items, 'omp').map((x) => x.name), ['compact']); assert.deepStrictEqual(L.slashFilter(items, 'zzz'), []);
+  const base = [{ name: 'xcompact', kind: 'skill' }, { name: 'compact', kind: 'builtin' }, { name: 'compactor', kind: 'skill' }];
+  assert.deepStrictEqual(L.slashFilter(base, 'compact').map((x) => x.name), ['compact', 'compactor', 'xcompact']);
+  // Enter 규칙
+  assert.strictEqual(L.slashEnterAction('/clear', items, true), 'send'); assert.strictEqual(L.slashEnterAction('/clear', items, false), 'send'); assert.strictEqual(L.slashEnterAction('/clear 요약', items, false), 'send');
+  assert.strictEqual(L.slashEnterAction('/cle', items, true), 'fill'); assert.strictEqual(L.slashEnterAction('/', items, true), 'fill'); assert.strictEqual(L.slashEnterAction('/omp', items, true), 'fill');
+  assert.strictEqual(L.slashEnterAction('/cle', items, false), 'none'); // Esc 로 닫음
+  assert.strictEqual(L.slashEnterAction('/zzz', items, true), 'none'); assert.strictEqual(L.slashEnterAction('/zzz 더', items, false), 'none');
+  assert.strictEqual(L.slashEnterAction('/model', items, true), 'none'); // 내장 이름은 보내지 않는다
+  assert.strictEqual(L.slashEnterAction('/mod', items.filter((x) => x.name !== 'model'), true), 'none'); // 맞는 항목이 없다 -> 보내지 않는다(main 이 목록에서 model 을 뺀다)
+  assert.strictEqual(L.slashEnterAction('/clear', null, false), 'wait'); assert.strictEqual(L.slashEnterAction('/c', undefined, true), 'wait');
+  assert.strictEqual(L.slashEnterAction('안녕', items, false), 'send'); assert.strictEqual(L.slashEnterAction('안녕', null, false), 'send'); // 슬래시가 아니면 이 규칙 밖
+  assert.strictEqual(L.slashEnterAction('/clear\n더', items, false), 'send'); // 여러 줄은 main 이 거른다
+  assert.strictEqual(L.slashEnterAction('/usr/bin', items, true), 'none');
+});
+t('slashCmdOf: 이름 읽기', () => {
+  assert.strictEqual(L.slashCmdOf('/clear'), 'clear'); assert.strictEqual(L.slashCmdOf('/compact 요약은 짧게'), 'compact'); assert.strictEqual(L.slashCmdOf('/Model'), 'model');
+  assert.strictEqual(L.slashCmdOf(' /x'), 'x'); assert.strictEqual(L.slashCmdOf('\n  /clear \n'), 'clear'); assert.strictEqual(L.slashCmdOf('//'), null); assert.strictEqual(L.slashCmdOf('/'), null);
+  assert.strictEqual(L.slashCmdOf('안녕 /clear'), null); assert.strictEqual(L.slashCmdOf('hello'), null); assert.strictEqual(L.slashCmdOf('/usr/bin'), 'usr');
+  assert.strictEqual(L.slashCmdOf('/daily:standup now'), 'daily:standup'); assert.strictEqual(L.slashCmdOf(5), null); assert.strictEqual(L.slashCmdOf(''), null); assert.strictEqual(L.slashCmdOf('/-x'), null);
+  assert.strictEqual(L.slashCmdOf('/model\nmore'), 'model'); // 여러 줄 여부는 보내는 쪽이 따로 본다
+  for (const n of ['model', 'config', 'settings', 'resume', 'permissions', 'allowed-tools', 'login', 'logout', 'mcp', 'agents', 'hooks', 'memory', 'plugin', 'status', 'help', 'doctor', 'vim', 'theme', 'terminal-setup', 'ide', 'exit', 'quit', 'export', 'rewind', 'add-dir', 'bashes', 'tasks', 'output-style', 'privacy-settings', 'install-github-app', 'feedback', 'bug', 'upgrade', 'usage', 'sandbox', 'statusline', 'keybindings', 'color', 'rename', 'copy', 'stats', 'mobile', 'desktop', 'release-notes', 'remote-env', 'migrate-installer', 'plan', 'fast', 'effort', 'reset', 'new', 'context', 'cost', 'init', 'review', 'pr-comments', 'security-review', 'todos', 'skills', 'btw', 'loop', 'schedule']) assert.ok(L.SLASH_BLOCK.has(n), n);
+  assert.strictEqual(L.SLASH_BLOCK.size, 62); assert.ok(!L.SLASH_BLOCK.has('clear') && !L.SLASH_BLOCK.has('compact'));
+});
+t('slashEntryParse: 앞머리 읽기', () => {
+  assert.deepStrictEqual(L.slashEntryParse('---\nname: Review-It\ndescription: "한 줄 설명"\n---\n본문', 'x'), { name: 'review-it', desc: '한 줄 설명' });
+  assert.deepStrictEqual(L.slashEntryParse('본문만', 'my-cmd'), { name: 'my-cmd', desc: '' });
+  assert.deepStrictEqual(L.slashEntryParse('---\ndescription: >\n  첫째 줄\n  둘째 줄\nother: 1\n---\n', 'f'), { name: 'f', desc: '첫째 줄 둘째 줄' });
+  assert.strictEqual(L.slashEntryParse('---\nuser-invocable: false\n---\n', 'f'), null);
+  assert.strictEqual(L.slashEntryParse('---\nname: bad name!\n---\n', 'f'), null); assert.strictEqual(L.slashEntryParse('x', '../x'), null);
+  assert.strictEqual(L.slashEntryParse('---\ndescription: ' + 'a'.repeat(300) + '\n---\n', 'f').desc.length, 120);
+  assert.ok(!/[\u0000-\u001f‮]/.test(L.slashEntryParse('---\ndescription: a‮b\u0007c\n---\n', 'f').desc));
+  // L6: 사용자 명령은 파일 이름, 스킬은 폴더 이름(frontmatter name 이 같을 때만 그것)
+  assert.deepStrictEqual(L.slashEntryParse('---\nname: other\ndescription: d\n---\n', 'beta', 'command'), { name: 'beta', desc: 'd' });
+  assert.deepStrictEqual(L.slashEntryParse('---\nname: other\n---\n', 'alpha', 'skill'), { name: 'alpha', desc: '' });
+  assert.deepStrictEqual(L.slashEntryParse('---\nname: Alpha\n---\n', 'alpha', 'skill'), { name: 'alpha', desc: '' });
+  assert.deepStrictEqual(L.slashEntryParse('본문', 'alpha', 'skill'), { name: 'alpha', desc: '' });
+});
+t('slash 화면 판정: 명령 안내 줄이 있어도 사후 확인 통과, 확인 창 모양은 거부', () => {
+  const B = '─'.repeat(40);
+  const mk = (lines, cursorY, cx) => ({ lines, plain: lines.map((s) => s.replace(/Start a new session.*$|Clear conversation history.*$/, '')), cursorX: cx, cursorY, rows: lines.length, cols: 80 });
+  const g1 = '  ❯ /clear      Start a new session with empty context'; const g2 = '    /compact    Clear conversation history but keep a summary in context';
+  const above = mk(['앞선 출력', g1, g2, B, '❯ /clear', B, '  ? for shortcuts'], 4, 9);
+  assert.strictEqual(L.promptBoxCheck(above, '/clear').ok, true);
+  assert.strictEqual(L.promptBoxSlash(above, '/clear').ok, true);
+  const below = mk(['앞선 출력', B, '❯ /clear', B, g1, g2], 2, 9);
+  assert.strictEqual(L.promptBoxSlash(below, '/clear').ok, true); assert.strictEqual(L.promptBoxCheck(below, '/clear').ok, true);
+  assert.strictEqual(L.promptBoxSlash(below, '/compact').ok, false); // 글이 다르면 거부
+  // 상자 밖의 번호 선택지는 여전히 거부(안내 줄 허용은 `❯ /` 로 시작하는 줄만)
+  const perm = mk(['╭' + B, '│ Bash command', '│  ls -la', '│ Do you want to proceed?', '│ ❯ 1. Yes', '│   2. No', '╰' + B], 4, 6);
+  assert.strictEqual(L.promptBoxSlash(perm, '/clear').ok, false);
+  const choice = mk([B, '❯ /clear', B, '❯ 1. Yes', '  2. No'], 1, 9);
+  assert.strictEqual(L.promptBoxSlash(choice, '/clear').ok, false); assert.strictEqual(L.promptBoxCheck(choice, '/clear').ok, false);
+  const bad = mk([B, '❯ /clear', B, '  ❯ /clear   x', '❯ 1. Yes'], 1, 9); assert.strictEqual(L.promptBoxSlash(bad, '/clear').ok, false);
+  assert.strictEqual(L.promptBoxSlash(null, '/clear').ok, false);
+  // H1: 앞머리만 친 글 + 고른 후보가 다른 명령이면 거부
+  const mod = mk(['앞선 출력', '  ❯ /model      Set the AI model', '    /memory     Edit memory', B, '❯ /mod', B], 4, 6);
+  assert.strictEqual(L.promptBoxCheck(mod, '/mod').ok, true); // 기존 판정은 통과시킨다
+  const rm = L.promptBoxSlash(mod, '/mod'); assert.strictEqual(rm.ok, false); assert.strictEqual(rm.why, 'slash-other');
+  const modBelow = mk([B, '❯ /mod', B, '  ❯ /model   Set the AI model'], 1, 6); assert.strictEqual(L.promptBoxSlash(modBelow, '/mod').ok, false);
+  // 같은 이름의 후보와 ❯ 없는 다른 후보 줄은 통과
+  assert.strictEqual(L.promptBoxSlash(above, '/clear').ok, true); assert.strictEqual(L.promptBoxSlash(below, '/clear').ok, true);
+  assert.strictEqual(L.promptBoxSlash(above, '/clear 인수').ok, false); // 상자에 보인 글이 다르다
+  // 안내 줄이 없으면 통과
+  assert.strictEqual(L.promptBoxSlash(mk(['앞선 출력', B, '❯ /clear', B, '  ? for shortcuts'], 2, 9), '/clear').ok, true);
+  // 번호 선택지·다른 모양의 `❯ /경로` 는 거부
+  assert.strictEqual(L.promptBoxSlash(mk([B, '❯ /clear', B, '❯ 1. Yes', '  2. No'], 1, 9), '/clear').ok, false);
+  assert.strictEqual(L.promptBoxSlash(mk([B, '❯ /clear', B, '  ❯ /usr/bin/x'], 1, 9), '/clear').ok, false);
+  assert.strictEqual(L.promptBoxSlash(mk([B, '❯ /clear', B, '  ❯ /clear-cache  x'], 1, 9), '/clear').ok, false);
+  assert.strictEqual(L.promptBoxSlash(mk([B, '❯ /clear', B, '  ❯ /Clear   x'], 1, 9), '/clear').ok, true); // 이름 비교는 대소문자를 가리지 않는다(보낼 이름은 slashCmdOf 가 소문자로 읽는다)
+});
+t('슬래시 연결: 쓰기 전 거부·기존 경로 보존·발신 창 확인', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const i0 = main.indexOf("ipcMain.handle('read:send'"); const h = main.slice(i0, main.indexOf('// ---- 읽기 화면 입력창: 이미지 붙이기', i0));
+  const iBlock = h.indexOf('L.slashAllowed(slash, cmdItemsOf(w))'); const iWrite = h.indexOf('readSendChecked(w');
+  assert.ok(iBlock > 0 && iWrite > iBlock && h.indexOf("reason: 'slash-term'") > 0 && h.indexOf("reason: 'slash-term'") < h.indexOf('markIn(w)') && !h.includes('L.SLASH_BLOCK'));
+  assert.ok(h.indexOf('cmdItemsOf(w)') < h.indexOf('if (SMOKE || FAKE_READ_SEND) return { ok: true };')); // 허용 목록 판정이 가짜 성공보다 앞이다
+  const rsc = main.slice(main.indexOf('async function readSendChecked'), main.indexOf('// ---- 입력창의 명령 목록'));
+  assert.ok(!rsc.includes("'slash-term'") && (rsc.match(/'slash-nosession'/g) || []).length === 2 && rsc.includes('L.promptBoxSlash(await readSnapOf(w), text)') && !rsc.includes('L.promptBoxCheck(await readSnapOf(w), text)'));
+  assert.ok(main.includes("cmdItemsOf(w) { // 작업 공간의 명령 목록") && main.includes("return { items: cmdItemsOf(w) };"));
+  assert.ok(h.includes("c.text.includes('\\n')) return { ok: false, reason: 'invalid' }"));
+  // 슬래시가 아닌 글의 경로: 기존 줄들이 그대로 있고 순서도 같다
+  const tail = h.slice(h.indexOf('  if (SMOKE || FAKE_READ_SEND) return { ok: true };\n  if (w.id !== activeId'));
+  assert.ok(tail.startsWith('  if (SMOKE || FAKE_READ_SEND) return { ok: true };\n  if (w.id !== activeId || picking || closing || quitAsking || restarting) return { ok: false, reason: \'invalid\' };\n  const now = Date.now();\n  const can = L.readCanSend(readCtxOf(w, now));'));
+  assert.ok(tail.includes("return readSendFirst(w, c.text);") && tail.includes("const data = '\\x1b[200~' + c.text + '\\x1b[201~\\r';"));
+  assert.ok(h.includes('if (Array.isArray(arg.tokens) && arg.tokens.length > 0) return readSendWithImages(w, arg);')); // 이미지 길 입구는 그대로
+  assert.ok(main.includes("ipcMain.handle('read:commands'") && main.slice(main.indexOf("ipcMain.handle('read:commands'")).startsWith("ipcMain.handle('read:commands', (e, id) => {\n  const w = wsFrom(e, id);"));
+  const cm = main.slice(main.indexOf('function readDirLimited'), main.indexOf("ipcMain.handle('read:commands'"));
+  assert.ok(cm.includes('isSymbolicLink()') && cm.includes('lstatSync') && cm.includes('CMD_FILE_BYTES') && cm.includes('!L.slashDiskOk(e.name)') && cm.includes('CMD_DIR_SCAN') && !cm.includes('realpath') && !/[^l]statSync\(/.test(cm));
+  assert.ok(cm.includes('fs.opendirSync(p)') && cm.includes('dir.closeSync()') && !cm.includes('readdirSync') && cm.includes("d.name, 'skill')") && cm.includes("d.name.slice(0, -3), 'command')"));
+  assert.ok(h.includes("if (Array.isArray(arg.tokens) && arg.tokens.length > 0 && L.slashCmdOf(arg.text)) return { ok: false, reason: 'invalid' };"));
+  assert.ok(pre.includes("'read:commands'"));
+  // readSendFirst·readCanSend 계열은 고치지 않는다: 새 함수가 따로 있다
+  assert.ok(main.includes('async function readSendChecked(w, text, gate)') && main.includes('L.promptBoxSlash(await readSnapOf(w), text)'));
+  // 표지: 상태 파일을 지우는 곳에서 지우고 24시간 정리에 든다
+  assert.ok(main.includes("replace(/\\.json$/, '.sess')") && main.includes("name.endsWith('.sess')") && main.includes('const sl = sessLive(w);') && main.includes('L.sessCtx(cx, sl,'));
+  assert.ok(main.includes("sess: w.id === activeId && w.term ? sessView(w, now) : null"));
+});
+t('slash 연결: 표지 없는 문맥은 readCtxBase 그대로', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(main.includes('return sl ? L.sessCtx(cx, sl, { startAt: w.ptyStartAt, sessInN: w.sessInN, now }) : cx;'));
+});
+t('명령 목록 읽기: 임시 폴더의 스킬·명령·링크·나쁜 이름', () => {
+  const root = fs.mkdtempSync(path.join(tmp, 'cmds-')); const cl = path.join(root, '.claude');
+  fs.mkdirSync(path.join(cl, 'skills', 'alpha'), { recursive: true }); fs.writeFileSync(path.join(cl, 'skills', 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: Alpha skill\n---\n');
+  fs.mkdirSync(path.join(cl, 'commands'), { recursive: true }); fs.writeFileSync(path.join(cl, 'commands', 'beta.md'), 'no front matter');
+  // 이 시험은 main 의 읽기 규칙을 따라 lib 의 해석만 확인한다(main 은 electron 이라 불러오지 않는다)
+  const r = L.slashEntryParse(fs.readFileSync(path.join(cl, 'skills', 'alpha', 'SKILL.md'), 'utf8'), 'alpha'); assert.deepStrictEqual(r, { name: 'alpha', desc: 'Alpha skill' });
+  assert.deepStrictEqual(L.slashEntryParse(fs.readFileSync(path.join(cl, 'commands', 'beta.md'), 'utf8'), 'beta'), { name: 'beta', desc: '' });
+});
+
+t('enterLineBreakVerdict: 갈래·경계값 400·500', () => {
+  const base = { now: 10000, enterAt: 9900, enterPlain: true, enterRepeat: false, fillHeld: false, fillAt: 0 };
+  const v = (o) => L.enterLineBreakVerdict({ ...base, ...o });
+  assert.strictEqual(v({}), 'send');
+  assert.strictEqual(v({ enterAt: 9600 }), 'send'); // 정확히 400ms
+  assert.strictEqual(v({ enterAt: 9599 }), 'newline'); // 400ms 초과
+  assert.strictEqual(v({ enterAt: NaN }), 'newline'); assert.strictEqual(v({ enterAt: undefined }), 'newline'); assert.strictEqual(v({ enterAt: Infinity }), 'newline');
+  assert.strictEqual(v({ enterPlain: false }), 'newline');
+  assert.strictEqual(v({ enterPlain: false, enterRepeat: true }), 'newline'); // 보통 Enter 가 아니면 반복·채움보다 먼저 줄바꿈
+  assert.strictEqual(v({ enterRepeat: true }), 'block');
+  assert.strictEqual(v({ fillHeld: true }), 'block');
+  assert.strictEqual(v({ fillAt: 9501 }), 'block'); // 499ms
+  assert.strictEqual(v({ fillAt: 9500 }), 'send'); // 정확히 500ms
+  assert.strictEqual(v({ enterAt: 9599, enterRepeat: true }), 'newline');
+  assert.strictEqual(L.enterLineBreakVerdict(null), 'newline');
+});
+t('imgHeaderPixels: PNG 는 IHDR, JPEG 는 SOF 에서 가로×세로를 읽고 모르는 형식은 null', () => {
+  const png = Buffer.alloc(40); Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]).copy(png); png.writeUInt32BE(50000, 16); png.writeUInt32BE(50000, 20);
+  assert.strictEqual(L.imgHeaderPixels(png), 2500000000);
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 4, 1, 2, 0xff, 0xc0, 0, 17, 8, 0x01, 0x00, 0x02, 0x00, 3]), Buffer.alloc(20)]);
+  assert.strictEqual(L.imgHeaderPixels(jpg), 256 * 512);
+  assert.strictEqual(L.imgHeaderPixels(Buffer.from('hello world hello world hello')), null);
+  assert.strictEqual(L.imgHeaderPixels(null), null);
+  assert.strictEqual(L.imgHeaderPixels(png.subarray(0, 20)), null);
+  assert.ok(/imgHeaderPixels\(buf0\)[\s\S]{0,400}createFromBuffer\(buf0\)/.test(fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8')), '풀기 전에 머리로 먼저 거른다');
+});
+t('readStoreStart: 앱을 켤 때는 폭만 잇고 읽기 화면 켜짐·터미널 접힘으로 시작한다', () => {
+  const s = L.readStoreStart(L.readParseStore(JSON.stringify({ a: { on: false, w: 500, rail: false }, b: { on: true, w: 300, rail: false } })));
+  assert.deepStrictEqual(s.a, { on: true, w: 500, rail: true });
+  assert.deepStrictEqual(s.b, { on: true, w: 300, rail: true });
+  assert.deepStrictEqual(L.readStoreStart(null), {});
+  assert.ok(fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8').includes('Lib.readStoreStart(Lib.readParseStore('));
+});
+t('ctxSizeLabel: 백만 이상은 M 으로 쓴다', () => { assert.strictEqual(L.ctxSizeLabel(1000000), '1M'); assert.strictEqual(L.ctxSizeLabel(2000000), '2M'); assert.strictEqual(L.ctxSizeLabel(1500000), '1.5M'); assert.strictEqual(L.ctxSizeLabel(200000), '200K'); });
+t('pasteIsImage: 이미지만·이미지+html·이미지+plain·이미지+plain+html·글만·빈 목록', () => {
+  const f = { kind: 'file', type: 'image/png' }; const s = (type) => ({ kind: 'string', type });
+  assert.strictEqual(L.pasteIsImage([f]), true);
+  assert.strictEqual(L.pasteIsImage([s('text/html'), f]), true);
+  assert.strictEqual(L.pasteIsImage([s('text/plain'), f]), true); // 파일 관리자에서 복사한 이미지 파일
+  assert.strictEqual(L.pasteIsImage([s('text/plain'), s('text/html'), f]), false);
+  assert.strictEqual(L.pasteIsImage([s('text/plain'), s('text/rtf'), f]), false);
+  assert.strictEqual(L.pasteIsImage([s('text/plain'), s('text/html')]), false);
+  assert.strictEqual(L.pasteIsImage([s('text/plain')]), false);
+  assert.strictEqual(L.pasteIsImage([]), false); assert.strictEqual(L.pasteIsImage(null), false);
+  assert.strictEqual(L.pasteIsImage([{ kind: 'file', type: 'application/pdf' }]), false);
+});
+t('입력창: Enter 줄바꿈 잡기(beforeinput)와 이미지 붙이기 바이트 길의 소스 검사', () => {
+  const ren = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8');
+  const kd = ren.indexOf("readTa.addEventListener('keydown'"); const kb = ren.slice(kd, ren.indexOf("readTa.addEventListener('beforeinput'"));
+  assert.ok(kd > 0 && kb.length > 0 && !kb.includes('readComposeEnd')); // keydown 의 돌려보내기 조건에서 50ms 조건이 빠졌다
+  assert.ok(ren.includes("readTa.addEventListener('beforeinput'") && ren.includes('Lib.enterLineBreakVerdict(') && ren.includes("'insertLineBreak'") && ren.includes("'insertParagraph'") && ren.includes('e.cancelable'));
+  assert.ok(ren.includes('Date.now() - readComposeEnd < 50')); // 명령 목록 키 처리기의 조건은 그대로다
+  assert.ok(ren.includes('Lib.pasteIsImage(') && !ren.includes('createObjectURL') && !ren.includes('readBlobOk') && !ren.includes('readAttFree'));
+  assert.ok(ren.includes('window.maru.readPasteBytes(') && ren.includes("res.reason === 'noimage'") && ren.includes('data:image\\/png;base64'));
+  const pb = main.slice(main.indexOf("ipcMain.handle('read:paste-bytes'"), main.indexOf('const FAKE_THUMB'));
+  assert.ok(pb.includes('nativeImage.createFromBuffer(') && pb.includes('isEmpty()') && pb.includes('PASTE_MAX_BYTES') && pb.includes("reason: 'busy'") && pb.includes("reason: 'full'") && pb.includes('PASTE_PER_WS') && pb.includes('if (FAKE_IMG)') && pb.includes('pasteImageSave(w, img)'));
+  assert.ok(!/writeFileSync\([^)]*bytes/.test(pb) && !pb.includes('writeFileSync'));
+  const sv = main.slice(main.indexOf('function pasteImageSave('), main.indexOf("ipcMain.handle('read:paste-drop'"));
+  assert.ok(sv.includes('img.toPNG()') && sv.includes('writeFileSync(file, buf,') && sv.includes("flag: 'wx'") && sv.includes('mode: 0o600') && sv.includes('resize({ height: 144 })') && sv.includes('400000') && sv.includes('PASTE_PIXELS_MAX'));
+  assert.ok(pre.includes('readPasteBytes') && pre.includes("ipcRenderer.invoke('read:paste-bytes'") && pre.includes('instanceof Uint8Array'));
+  const meta = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8').match(/Content-Security-Policy"[^>]*/)[0];
+  assert.ok(/img-src 'self' data:/.test(meta) && !meta.includes('blob:')); // CSP 는 그대로다
+  assert.ok(css.includes('.read-att-th img') && css.includes('height:72px') && css.includes('max-width:128px'));
+  assert.ok(main.includes("'readatt'") && ren.includes("m === 'readatt'"));
+});
+t('promptGhost: 터미널 입력 상자의 흐린 추천 글만 돌려준다', () => {
+  const B = '─'.repeat(40);
+  const NB = ' ';
+  // 입력줄: lines 에는 글이 있고 plain 에서는 그 자리가 비어 있다(전부 흐린 글자)
+  const snap = (text, extra) => {
+    const l = '❯' + NB + text;
+    return { lines: ['앞선 출력', '', B, l, B, '  ? for shortcuts'], plain: ['앞선 출력', '', B, '❯', B, '  ? for shortcuts'], cursorX: 2, cursorY: 3, rows: 6, cols: 80, ...extra };
+  };
+  assert.strictEqual(L.promptGhost(snap('다음 단계로 넘어가 줘')), '다음 단계로 넘어가 줘');
+  assert.strictEqual(L.promptGhost(snap('run the tests')), 'run the tests');
+  assert.strictEqual(L.promptGhost(snap('x'.repeat(200))), 'x'.repeat(200));
+  assert.strictEqual(L.promptGhost(snap('x'.repeat(201))), ''); // 200자 초과
+  // 상자가 비어 있지 않다(plain 에 글이 있다) / 흐리지 않은 글이 섞였다
+  assert.strictEqual(L.promptGhost(snap('쓰던 글', { plain: ['앞선 출력', '', B, '❯ 쓰던 글', B, ''] })), '');
+  assert.strictEqual(L.promptGhost(snap('abc', { plain: ['앞선 출력', '', B, '❯ a', B, ''] })), '');
+  // 안내 글은 추천이 아니다
+  for (const g of ['Try "fix the failing test"', 'Press up to edit queued messages', '/clear', '!ls', '#x']) assert.strictEqual(L.promptGhost(snap(g)), '', g);
+  // 제어 문자는 지운다
+  assert.strictEqual(L.promptGhost(snap('다음\x07 단계\x1b[31m')), '다음 단계[31m'); // ESC 는 지워지고 남은 글자는 그냥 글이다
+  assert.strictEqual(L.promptGhost(snap('\x07\x07')), '');
+  // 상자가 없는 화면(선택 창)
+  assert.strictEqual(L.promptGhost({ lines: ['Do you trust the files in this folder?', '', '❯ 1. Yes, proceed', '  2. No, exit'], plain: ['Do you trust the files in this folder?', '', '❯ 1. Yes, proceed', '  2. No, exit'], cursorX: 2, cursorY: 2, rows: 4, cols: 80 }), '');
+  // 커서가 입력줄 표시 줄에 없다
+  assert.strictEqual(L.promptGhost(snap('abc', { cursorY: 5 })), '');
+  // 표시만 있고 글이 없다
+  assert.strictEqual(L.promptGhost(snap('')), '');
+  // 틀린 입력
+  for (const v of [null, undefined, 5, 'x', [], {}, { lines: 1 }, { lines: [], plain: [] }]) assert.strictEqual(L.promptGhost(v), '');
+  assert.doesNotThrow(() => L.promptGhost({ get lines() { throw new Error('x'); } }));
+});
+t('추천 글 채우기: renderer 소스 검사(pty 에 쓰지 않는다)', () => {
+  const ren = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const a = ren.indexOf('function readGhostFill('); const fill = ren.slice(a, ren.indexOf('// ---- 첨부한 이미지'));
+  assert.ok(a > 0 && fill.includes('Lib.readCleanSend(') && !/ptyWrite|readSend\b|readSendNow|window\.maru\./.test(fill));
+  const g = ren.slice(ren.indexOf('function readGhostWant('), a);
+  assert.ok(g.includes('Lib.promptGhost(') && g.includes('termSnapNow(') && !/ptyWrite|readSend\b|readSendNow|window\.maru\./.test(g));
+  const k = ren.indexOf("e.key === 'Tab' || e.key === 'ArrowRight'"); const kb = ren.slice(k, k + 700);
+  assert.ok(k > 0 && kb.includes('readGhostFill()') && kb.includes('e.preventDefault()') && !/ptyWrite|readSend/.test(kb));
+  assert.ok(ren.includes('readTa.placeholder') && ren.includes("'aria-description'") && !/aria-live/.test(g));
+  assert.ok(!/innerHTML[^\n]*readGhost/.test(ren));
+  assert.ok(main.includes("'readghost'") && ren.includes("m === 'readghost'"));
+});
+
 (async () => {
   for (const f of pending) await f();
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(`\n${n} 통과` + (process.exitCode ? ', 실패 있음' : ''));
 })();
+
+t('readCanSend: 짧은 턴 예외는 답변 기록 뒤의 입력에 쓰이지 않는다 / 보조 단추 움직임 보고는 입력이다', () => {
+  const T = 1800000000000;
+  const base = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', hooked: true, ux: 'idle', bg: 0, bracketed: true, quietMs: 5000, dirty: false, rawState: 'idle', startAt: T - 60000 };
+  // 질문·답변·답변 뒤 입력이 모두 같은 초: 입력이 답변 기록(recAt) 뒤이므로 막는다
+  assert.strictEqual(L.readCanSend({ ...base, recAt: T + 300, talkRole: 'assistant', talkAt: T, talkUserAt: T, inAt: T + 700 }).reason, 'touched');
+  // 턴을 시작한 Enter(답변 기록보다 앞)는 허용한다
+  assert.strictEqual(L.readCanSend({ ...base, recAt: T + 900, talkRole: 'assistant', talkAt: T, talkUserAt: T, inAt: T + 100 }).ok, true);
+  assert.strictEqual(L.isPassiveTermInput('\x1b[<163;1;1M'), false);
+  assert.strictEqual(L.isPassiveTermInput('\x1b[<35;1;1M'), true);
+});
+
+// ---- actParse (활동 기록) ----
+const al = (k, id, tool, extra) => JSON.stringify(Object.assign({ v: 1, at: 1700000000.5, k, id, tool }, extra || {}));
+t('actParse 정상: pre 와 post 를 합친다(순서는 pre 순서, at 은 밀리초)', () => {
+  const r = L.actParse([al('pre', 'a', 'Bash', { sum: '가상 실행' }), al('pre', 'b', 'Read', { sum: 'x/y.txt' }), al('post', 'a', 'Bash', { ms: 1200 }), al('post', 'b', 'Read', { ms: 3, err: true })].join('\n') + '\n');
+  assert.strictEqual(r.more, 0); assert.strictEqual(r.items.length, 2);
+  assert.deepStrictEqual(r.items[0], { id: 'a', tool: 'Bash', kind: 'cmd', sum: '가상 실행', at: 1700000000500, done: true, ms: 1200, err: false });
+  assert.strictEqual(r.items[1].kind, 'read'); assert.strictEqual(r.items[1].err, true);
+});
+t('actParse post 만 있으면 버리고, pre 만 있으면 진행 중', () => {
+  const r = L.actParse([al('post', 'z', 'Bash', { ms: 1 }), al('pre', 'p', 'Grep', { sum: '구역' })].join('\n'));
+  assert.strictEqual(r.items.length, 1); assert.strictEqual(r.items[0].id, 'p');
+  assert.strictEqual(r.items[0].done, false); assert.strictEqual(r.items[0].ms, null); assert.strictEqual(r.items[0].err, false); assert.strictEqual(r.items[0].kind, 'find');
+});
+t('actParse 같은 id 의 pre 가 둘이면 첫 것만', () => {
+  const r = L.actParse([al('pre', 'a', 'Bash', { sum: '첫째' }), al('pre', 'a', 'Read', { sum: '둘째' })].join('\n'));
+  assert.strictEqual(r.items.length, 1); assert.strictEqual(r.items[0].sum, '첫째'); assert.strictEqual(r.items[0].tool, 'Bash');
+});
+t('actParse 잘못된 id·tool·k·v·at 은 그 줄을 버린다', () => {
+  const bad = [
+    al('pre', 'a b', 'Bash'), al('pre', '', 'Bash'), al('pre', 'x'.repeat(81), 'Bash'), al('pre', 'ok1', 'Ba sh'), al('pre', 'ok2', ''), al('pre', 'ok3', 'T'.repeat(81)),
+    al('mid', 'ok4', 'Bash'), JSON.stringify({ v: 2, at: 1, k: 'pre', id: 'ok5', tool: 'Bash' }), JSON.stringify({ at: 1, k: 'pre', id: 'ok6', tool: 'Bash' }),
+    JSON.stringify({ v: 1, at: 0, k: 'pre', id: 'ok7', tool: 'Bash' }), JSON.stringify({ v: 1, at: -3, k: 'pre', id: 'ok8', tool: 'Bash' }), JSON.stringify({ v: 1, at: '5', k: 'pre', id: 'ok9', tool: 'Bash' }),
+    JSON.stringify({ v: 1, at: 1e999, k: 'pre', id: 'oka', tool: 'Bash' }), JSON.stringify({ v: 1, at: 1, k: 'pre', id: 5, tool: 'Bash' }), '[1]', 'null',
+  ];
+  assert.strictEqual(L.actParse(bad.join('\n')).items.length, 0);
+  assert.strictEqual(L.actParse(al('pre', 'a_B-1', 'mcp__x.y:z-1')).items.length, 1);
+});
+t('actParse kind 매핑', () => {
+  const k = (tool) => L.actParse(al('pre', 'a', tool)).items[0].kind;
+  for (const [tool, kind] of [['Bash', 'cmd'], ['Read', 'read'], ['NotebookRead', 'read'], ['Edit', 'edit'], ['Write', 'edit'], ['NotebookEdit', 'edit'], ['MultiEdit', 'edit'], ['Grep', 'find'], ['Glob', 'find'], ['WebFetch', 'web'], ['WebSearch', 'web'], ['Agent', 'agent'], ['Task', 'agent'], ['Skill', 'other'], ['toString', 'other'], ['__proto__', 'other']]) assert.strictEqual(k(tool), kind, tool);
+});
+t('actParse sum: 나쁜 글자 제거·줄바꿈은 공백·160자·문자열이 아니면 빈 글', () => {
+  const s = (v) => L.actParse(al('pre', 'a', 'Bash', { sum: v })).items[0].sum;
+  assert.strictEqual(s('가‮나​다\u0000'), '가나다');
+  assert.strictEqual(s('위\n아래\r\n끝\t탭'), '위 아래 끝 탭');
+  assert.strictEqual([...s('가'.repeat(500))].length, 160);
+  assert.strictEqual(s(5), ''); assert.strictEqual(s(null), ''); assert.strictEqual(s({ a: 1 }), '');
+  assert.strictEqual(L.actParse(al('pre', 'a', 'Bash')).items[0].sum, '');
+});
+t('actParse ms 범위와 err', () => {
+  const m = (ms, err) => { const r = L.actParse([al('pre', 'a', 'Bash'), al('post', 'a', 'Bash', { ms, err })].join('\n')).items[0]; return [r.ms, r.err]; };
+  assert.deepStrictEqual(m(0, true), [0, true]); assert.deepStrictEqual(m(86400000, undefined), [86400000, false]);
+  assert.deepStrictEqual(m(86400001, 'true'), [null, false]); assert.deepStrictEqual(m(-1, 1), [null, false]);
+  assert.deepStrictEqual(m(1.5, false), [null, false]); assert.deepStrictEqual(m('9', null), [null, false]);
+});
+t('actParse 200개 초과는 마지막 200개와 more', () => {
+  const lines = []; for (let i = 0; i < 230; i++) lines.push(al('pre', 'i' + i, 'Read', { sum: String(i) }));
+  const r = L.actParse(lines.join('\n'));
+  assert.strictEqual(r.items.length, 200); assert.strictEqual(r.more, 30); assert.strictEqual(r.items[0].id, 'i30'); assert.strictEqual(r.items[199].id, 'i229');
+});
+t('actParse 깨진 줄·빈 입력·문자열 아닌 입력', () => {
+  const r = L.actParse(['{깨짐', '', al('pre', 'a', 'Bash'), '{"v":1'].join('\n'));
+  assert.strictEqual(r.items.length, 1);
+  for (const v of [null, undefined, 5, {}, [], '']) assert.deepStrictEqual(L.actParse(v), { items: [], more: 0 });
+});
+t('actParse 512KB 초과는 뒤쪽만 읽고 첫 줄은 버린다', () => {
+  const pad = al('pre', 'old', 'Bash', { sum: 'x'.repeat(100) }); const lines = []; let len = 0;
+  while (len < L.ACT_TEXT_MAX + 5000) { const l = pad.replace('old', 'o' + lines.length); lines.push(l); len += l.length + 1; }
+  lines.push(al('pre', 'newest', 'Read'));
+  const r = L.actParse(lines.join('\n'));
+  assert.ok(r.items.length > 0 && r.items.length <= 200); assert.strictEqual(r.items[r.items.length - 1].id, 'newest');
+  assert.ok(!r.items.some((x) => x.id === 'o0'));
+});
+
+// ---- termPeek (터미널 미리보기) ----
+const PEEK_BORDER = '─'.repeat(40);
+const peek = (lines, n) => L.termPeek({ lines, cursorY: 0, rows: lines.length }, n).lines;
+t('termPeek 입력줄 상자가 있으면 그 위 줄들만 고른다', () => {
+  assert.deepStrictEqual(peek(['첫 줄', '둘째 줄   ', '', '셋째 줄', PEEK_BORDER, '> ', PEEK_BORDER, '  가상 상태 줄']), ['첫 줄', '둘째 줄', '', '셋째 줄']);
+});
+t('termPeek 상자가 없으면 화면 마지막 줄에서 올라간다(맨 아래 빈 줄은 건너뜀)', () => {
+  assert.deepStrictEqual(peek(['가', '나', '', '', '']), ['가', '나']);
+  assert.deepStrictEqual(peek(['가', PEEK_BORDER, '나']), ['가', PEEK_BORDER, '나']); // 경계선이 하나뿐이면 상자가 아니다
+});
+t('termPeek 경계선 사이가 0줄이거나 30줄 초과면 상자가 아니다', () => {
+  assert.deepStrictEqual(peek(['가', PEEK_BORDER, PEEK_BORDER, '나']), ['가', PEEK_BORDER, PEEK_BORDER, '나']);
+  const big = ['위', PEEK_BORDER].concat(Array(31).fill('칸'), [PEEK_BORDER]);
+  assert.strictEqual(peek(big, 20).length, 20);
+  const ok = ['위', PEEK_BORDER].concat(Array(30).fill('칸'), [PEEK_BORDER]);
+  assert.deepStrictEqual(peek(ok), ['위']);
+});
+t('termPeek 빈 화면·빈 줄 줄이기·maxLines', () => {
+  assert.deepStrictEqual(peek(['', '  ', '']), []);
+  assert.deepStrictEqual(peek(['', '', '가', '', '', '', '나', '']), ['가', '', '나']);
+  const many = Array.from({ length: 30 }, (_, i) => '줄' + i);
+  assert.deepStrictEqual(peek(many, 3), ['줄27', '줄28', '줄29']);
+  assert.strictEqual(peek(many).length, 8); assert.strictEqual(peek(many, 99).length, 20); assert.strictEqual(peek(many, 0).length, 8); assert.strictEqual(peek(many, 2.5).length, 8);
+});
+t('termPeek 200자 자름과 나쁜 글자 제거', () => {
+  const r = peek(['가'.repeat(300), 'a‮b​c\t d']);
+  assert.strictEqual([...r[0]].length, 200); assert.strictEqual(r[1], 'abc  d');
+});
+t('termPeek 잘못된 모양은 빈 줄 목록', () => {
+  for (const v of [null, undefined, 5, 'x', {}, { lines: 'x' }, { lines: [] }, { lines: ['가', 5] }, { lines: Array(1001).fill('a') }]) assert.deepStrictEqual(L.termPeek(v), { lines: [] });
+});
+t('main: act:get 은 talk:get 과 같은 폴더·보통 파일·크기 검사를 거치고 작업 공간 정리에 act 파일이 들어 있다', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, 'main.js'), 'utf8');
+  const a = main.slice(main.indexOf('async function readAct'), main.indexOf("ipcMain.handle('act:get'"));
+  assert.ok(a.includes('STATE_DIR()') && a.includes('actFileOf(sid)') && a.includes('isFile()') && a.includes('O_NONBLOCK') && a.includes('O_NOFOLLOW') && a.includes('L.ACT_FILE_MAX') && a.includes('talkKey(sid'));
+  assert.ok(main.includes("ipcMain.handle('act:get'") && main.includes('wsFrom(e, arg.id)'));
+  assert.ok(main.includes('[talkFileOf(sid), actFileOf(sid), ') && main.includes("name.endsWith('.act.lock') ? TALK_MAX_AGE_MS") && main.includes("name.endsWith('.act.jsonl') || name.endsWith('.act.lock') || name.endsWith('.subs')"));
+  assert.ok(require('fs').readFileSync(require('path').join(__dirname, 'preload.js'), 'utf8').includes("ipcRenderer.invoke('act:get'"));
+});

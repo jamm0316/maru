@@ -138,9 +138,9 @@ d = json.loads(a[1])
 sl = d["statusLine"]
 assert sl["type"] == "command" and shlex.split(sl["command"]) == [sys.argv[2]], sl
 assert (sys.argv[3] == "hooks") == ("hooks" in d), sorted(d)
-if "hooks" in d: assert len(d["hooks"]) == 8
+if "hooks" in d: assert len(d["hooks"]) == 10
 ' "$SO" "$R/scripts/usage-status.sh" "$1"; }
-wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "저장소 밖(공백 폴더): 유효한 JSON, statusLine + 훅 8종" settings_check hooks
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "저장소 밖(공백 폴더): 유효한 JSON, statusLine + 훅 10종" settings_check hooks
 wrap_in "$R" MARU_APP_SESSION=inroot-12345; check "저장소 루트: 유효한 JSON, statusLine 만(훅 없음)" settings_check none
 mkdir -p "$R/sub"; wrap_in "$R/sub" MARU_APP_SESSION=insub-12345; check "저장소 하위 폴더: statusLine + 훅" settings_check hooks
 wrap_in "$R" ; check "MARU_APP_SESSION 없음: 인자 없음" [ ! -s "$SO" ]
@@ -165,5 +165,25 @@ printf '%s\n' '{"statusLine":{"type":"command","command":"echo x","padding":0}}'
 wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 CLAUDE_CONFIG_DIR="$T/cfg"; check "padding: 사용자 설정에서도 복사(0 포함)" pad_is 0
 wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_TOOL_DIRS="$T/badpy" PATH="$T/badpy:$BASEPATH"; check "고장난 python3: statusLine 도 훅도 붙이지 않음" [ ! -s "$SO" ]
 rm -f "$R/data/state/app/"*.hooked
+
+# ---- 컨텍스트 사용량(.ctx): 앱 세션만, 숫자만, 앱이 만든 폴더에만 ----
+CD=$R/data/state/app; rm -rf "$R/data/state"; mkdir -p "$CD"
+us '{"context_window":{"used_percentage":42.56,"context_window_size":1000000,"total_input_tokens":5}}' MARU_APP_SESSION=ctxsess-0001 >/dev/null
+check "ctx: 사용 비율과 창 크기를 한 줄로 씀" "$REAL_PY" -I -c 'import json,sys; d=json.load(open(sys.argv[1])); assert set(d)=={"v","at","pct","size"} and d["pct"]==42.6 and d["size"]==1000000 and d["at"]>1e12, d' "$CD/ctxsess-0001.ctx"
+us '{"context_window":{"used_percentage":null,"total_input_tokens":0,"context_window_size":200000}}' MARU_APP_SESSION=ctxsess-0001 >/dev/null
+check "ctx: 새 세션(값 없음·토큰 0)은 0으로 바꿔 씀" "$REAL_PY" -I -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["pct"]==0 and d["size"]==200000, d' "$CD/ctxsess-0001.ctx"
+cp "$CD/ctxsess-0001.ctx" "$T/ctx.before"
+us '{"context_window":{"used_percentage":"9"}}' MARU_APP_SESSION=ctxsess-0001 >/dev/null; us '{"x":1}' MARU_APP_SESSION=ctxsess-0001 >/dev/null
+check "ctx: 숫자가 아니거나 항목이 없으면 기존 파일 유지" cmp -s "$CD/ctxsess-0001.ctx" "$T/ctx.before"
+us '{"context_window":{"used_percentage":250}}' MARU_APP_SESSION=ctxsess-0002 >/dev/null
+check "ctx: 범위를 넘는 값은 100으로 자르고 창 크기가 없으면 뺌" "$REAL_PY" -I -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["pct"]==100 and "size" not in d, d' "$CD/ctxsess-0002.ctx"
+n0=$(ls -A "$CD" | wc -l)
+us '{"context_window":{"used_percentage":50}}' >/dev/null; us '{"context_window":{"used_percentage":50}}' MARU_APP_SESSION=../evil123 >/dev/null; us '{"context_window":{"used_percentage":50}}' MARU_APP_SESSION=short >/dev/null
+check "ctx: 앱 세션 값이 없거나 형식이 틀리면 쓰지 않음" [ "$(ls -A "$CD" | wc -l)" = "$n0" ]
+rm -rf "$R/data/state"; us '{"context_window":{"used_percentage":50}}' MARU_APP_SESSION=ctxsess-0003 >/dev/null
+check "ctx: 폴더가 없으면 만들지 않음" [ ! -e "$R/data/state" ]
+mkdir -p "$R/data/state/app"; ln -s "$T/ctx.before" "$CD/ctxsess-0004.ctx"; us '{"context_window":{"used_percentage":77}}' MARU_APP_SESSION=ctxsess-0004 >/dev/null
+check "ctx: 대상이 링크면 쓰지 않음" sh -c '[ -L "$1" ] && ! grep -q 77 "$2"' _ "$CD/ctxsess-0004.ctx" "$T/ctx.before"
+rm -rf "$R/data/state"
 
 echo; if [ $FAIL = 0 ]; then echo "test-usage: OK ($N 항목)"; exit 0; else echo "test-usage: 실패 $FAIL / $N"; exit 1; fi

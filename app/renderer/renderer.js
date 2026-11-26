@@ -221,27 +221,33 @@
   }
   window.maru.onPtyData((id, d) => { const e = terms.get(id); if (e) e.term.write(d); });
   // 첫 메시지 길: main 이 요청하면 앞서 받은 출력이 모두 해석된 뒤(write 의 콜백) 보이는 화면을 읽어 돌려준다. 판정은 main 이 한다
+  function termScreenLines(term) { // 터미널에 보이는 화면의 줄들(끝 공백 없음). 첫 메시지 길(onReadSnapReq)과 읽기 화면의 터미널 미리보기가 같이 쓴다
+    const b = term.buffer.active; const lines = [];
+    for (let i = 0; i < term.rows; i++) { const ln = b.getLine(b.baseY + i); lines.push(ln ? ln.translateToString(true) : ''); }
+    return lines;
+  }
+  function termSnapNow(term) { // 화면 사진({ lines, plain, cursorX, cursorY, rows, cols }). 첫 메시지 길(onReadSnapReq)과 읽기 화면의 추천 글 읽기(readGhostTick)가 같이 쓴다. 예외는 부른 쪽이 잡는다
+    const b = term.buffer.active; const lines = termScreenLines(term); const plain = []; let cell;
+    for (let i = 0; i < term.rows; i++) {
+      const ln = b.getLine(b.baseY + i); const s = lines[i];
+      if (!ln || Math.abs(i - b.cursorY) > 40) { plain.push(s); continue; } // 커서 줄 위아래 40줄만 칸마다 본다. 나머지는 lines 와 같은 글
+      // plain: 흐린 글자(SGR 2) 칸을 공백으로 바꾼 같은 줄. 넓은 글자는 뒤 칸(폭 0)을 건너뛴다. 줄 끝 공백은 지운다
+      let out = '';
+      for (let x = 0; x < ln.length; x++) {
+        cell = ln.getCell(x, cell); if (!cell) break;
+        const w = cell.getWidth(); if (w === 0) continue;
+        out += cell.isDim() ? ' '.repeat(w) : (cell.getChars() || ' ');
+      }
+      plain.push(out.replace(/ +$/, ''));
+    }
+    return { lines, plain, cursorX: b.cursorX, cursorY: b.cursorY, rows: term.rows, cols: term.cols };
+  }
   window.maru.onReadSnapReq((id, nonce) => {
     const e = terms.get(id);
     if (!e || !e.term) { window.maru.readSnap(id, nonce, { lines: [], plain: [], cursorX: 0, cursorY: 0, rows: 0, cols: 0 }); return; }
     const term = e.term;
     term.write('', () => {
-      try {
-        const b = term.buffer.active; const lines = []; const plain = []; let cell;
-        for (let i = 0; i < term.rows; i++) {
-          const ln = b.getLine(b.baseY + i); const s = ln ? ln.translateToString(true) : ''; lines.push(s);
-          if (!ln || Math.abs(i - b.cursorY) > 40) { plain.push(s); continue; } // 커서 줄 위아래 40줄만 칸마다 본다. 나머지는 lines 와 같은 글
-          // plain: 흐린 글자(SGR 2) 칸을 공백으로 바꾼 같은 줄. 넓은 글자는 뒤 칸(폭 0)을 건너뛴다. 줄 끝 공백은 지운다
-          let out = '';
-          for (let x = 0; x < ln.length; x++) {
-            cell = ln.getCell(x, cell); if (!cell) break;
-            const w = cell.getWidth(); if (w === 0) continue;
-            out += cell.isDim() ? ' '.repeat(w) : (cell.getChars() || ' ');
-          }
-          plain.push(out.replace(/ +$/, ''));
-        }
-        window.maru.readSnap(id, nonce, { lines, plain, cursorX: b.cursorX, cursorY: b.cursorY, rows: term.rows, cols: term.cols });
-      } catch (x) { window.maru.readSnap(id, nonce, null); }
+      try { window.maru.readSnap(id, nonce, termSnapNow(term)); } catch (x) { window.maru.readSnap(id, nonce, null); }
     });
   });
   window.maru.onPtyExit((id, code) => {
@@ -368,6 +374,16 @@
   let readSide = false; // 터미널이 접혀 오른쪽 카드 열이 같이 보이는 중
   let readSurfHold = false; // 입력창으로 보내기에 성공한 뒤 다음 기록 갱신(readRender)이 올 때까지 화면 블록 단추를 끈다
   let readLastFill = ''; let readFillAt = 0; let readFillHeld = false; let readEnterDown = false; // 단추로 채운 글·시각·채울 때 Enter 가 눌려 있었나·지금 Enter 가 눌려 있나
+  let readDevBusy = false; // 시험 전용(MARU_APP_UI=readbusy): readlive 처럼 작업 중으로 보이고, 입력창이 열려 있다(작업 중 보내기 안내)
+  let readDevLive = false; // 시험 전용(MARU_APP_UI=readlive): 세션이 작업 중으로 보인다(readUx 가 'busy'). 대화·활동은 main 의 가짜 데이터
+  let readDevAtt = false; // 시험 전용(MARU_APP_UI=readatt): 입력창에 가짜 첨부 2개가 붙어 있다
+  let readDevGhost = false; // 시험 전용(MARU_APP_UI=readghost): 입력창에 가짜 추천 글과 Tab 표지가 보인다(터미널 화면은 읽지 않는다)
+  const readGhostTab = $('read-ghost-tab');
+  let readGhost = ''; let readGhostTimer = null; // 터미널 입력 상자에 흐리게 뜬 추천 글(신뢰할 수 없는 글: textContent·placeholder·aria 속성으로만 넣는다)·읽기 타이머
+  let readDevCmd = false; // 시험 전용(MARU_APP_UI=readcmd): 입력창에 /c 가 들어 있고 명령 목록이 열려 있다
+  const readCmdEl = $('read-cmds'); const readCompactedEl = $('read-compacted');
+  const readCmdCache = new Map(); // 작업 공간 id -> { at, items }(main 도 30초 캐시한다)
+  let readCmdFetching = ''; let readCmdSel = 0; let readCmdEsc = false; let readCmdSig = ''; let readCmdShown = []; // 받는 중인 작업 공간 id·고른 줄·Esc 로 닫았나(글이 바뀌면 풀린다)·그린 내용의 표지·지금 보이는 항목
   let readDevTop = false; // 시험 전용(MARU_APP_UI=readsurftop): 마지막 화면 블록의 위쪽이 보이게 스크롤한다
   const readHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }; // 질문 글의 짧은 해시(펼침 상태 키용)
   const termWrap = document.querySelector('.term-wrap');
@@ -388,20 +404,159 @@
     readStore = Lib.readStoreSet(readStore, activeId, { ...readSt(activeId), ...patch });
     applyReadLayout(); if (persist) readSave();
   }
-  function readReset() { readSeq++; readKey = ''; readItems = []; readMore = false; readLoaded = false; readExpanded.clear(); readForceBottom = true; readSaved = null; readSurfHold = false; readList.replaceChildren(); }
+  const readCtxEl = $('read-ctx'); const readCtxFill = $('read-ctx-fill'); const readCtxT = $('read-ctx-t'); let readCtxSig = '';
+  function renderReadCtx(c) { // 컨텍스트 사용량: 값이 없으면 숨긴다. 같은 값이면 DOM 을 건드리지 않는다
+    const ok = c && typeof c === 'object' && Number.isFinite(c.pct) && (c.level === 'low' || c.level === 'mid' || c.level === 'high');
+    const sz = ok && Number.isFinite(c.size) ? Lib.ctxSizeLabel(c.size) : '';
+    const sig = ok ? lang + '|' + c.pct + '|' + c.level + '|' + sz : '';
+    if (sig === readCtxSig) return;
+    readCtxSig = sig;
+    if (!ok) { readCtxEl.hidden = true; return; }
+    const pct = Math.min(100, Math.max(0, Math.round(c.pct)));
+    readCtxT.textContent = T('read.ctx.label', { pct }) + (sz ? ' · ' + sz : '');
+    readCtxFill.style.width = pct + '%';
+    readCtxEl.className = 'read-ctx ' + c.level;
+    readCtxEl.setAttribute('aria-label', T('read.ctx.aria', { pct }));
+    readCtxEl.hidden = false;
+  }
+  function readReset() { renderReadCtx(null); readSeq++; readKey = ''; readItems = []; readMore = false; readLoaded = false; readExpanded.clear(); readForceBottom = true; readSaved = null; readSurfHold = false; readList.replaceChildren(); readActClear(); }
   const readNearBottom = () => readBody.scrollHeight - readBody.scrollTop - readBody.clientHeight <= 80;
-  const readUx = () => { if (readDevWait) return 'waiting'; const w = wsList.find((x) => x.id === activeId); return w ? (w.ux || w.state) : ''; };
+  // ---- 턴 도중의 실시간 표시(3부): 활동 상자(.read-act)·터미널 미리보기(.read-peek)·턴이 끝난 뒤의 한 줄 요약(.read-act-sum). 글은 모두 el()·textContent 로만 넣는다 ----
+  const READ_ACT_KINDS = ['cmd', 'read', 'edit', 'find', 'web', 'agent'];
+  let readActKey = ''; let readActItems = []; let readActMore = 0; let readActFetching = false; let readActSumKey = null; // 받아 둔 활동 기록 / 요약용으로 한 번 받은 대화 key
+  let readActOpen = false; let readSumOpen = false; let readActSig = ''; // 앞의 활동을 펼쳤나(상자) / 요약을 펼쳤나 / 그린 줄 목록의 표지
+  let readPeekTimer = null; let readPeekTxt = '';
+  const readActEl = el('div', 'read-act'); readActEl.hidden = true; readActEl.setAttribute('role', 'group');
+  const readActT = el('span', 'read-act-t'); const readActEl2 = el('span', 'read-act-el'); const readActRows = el('div', 'read-act-rows-host');
+  const readPeekEl = el('div', 'read-peek'); readPeekEl.hidden = true; const readPeekPre = el('pre', 'read-peek-pre'); readPeekPre.setAttribute('aria-hidden', 'true');
+  readActEl.append(el('div', 'read-act-head', ''), readActRows, readPeekEl); readActEl.firstChild.append(readActT, readActEl2);
+  readPeekEl.append(el('p', 'read-peek-l'), readPeekPre);
+  readList.after(readActEl);
+  function readFollow(fn) { const near = !readEl.hidden && readNearBottom(); const h0 = readBody.scrollHeight; fn(); if (near && !readEl.hidden && readBody.scrollHeight !== h0) readBody.scrollTop = readBody.scrollHeight; } // 맨 아래 근처를 보고 있을 때만 자란 만큼 따라간다(위로 올려 읽는 중이면 건드리지 않는다)
+  const readActDurText = (ms) => { const d = Lib.actDur(ms); return T(d.key, d.params); };
+  let readActQ = ''; let readActGen = 0; // 대화의 마지막 질문 시각(바뀌면 받아 둔 활동을 비운다) / 받기 세대(비운 뒤 늦게 온 옛 응답을 버린다)
+  function readActClear() { readActGen++; readActQ = ''; readActFetching = false; readActKey = ''; readActItems = []; readActMore = 0; readActSumKey = null; readActOpen = false; readSumOpen = false; readActSig = ''; readPeekTxt = ''; readActRows.replaceChildren(); readActEl.hidden = true; readPeekEl.hidden = true; readPeekPre.textContent = ''; }
+  function readActLive() { // 활동 상자를 보이는가: 읽기 화면이 켜져 있고 마지막 항목이 질문이며 세션이 작업 중·답 대기
+    if (!readCurOn || detailOpen || !readItems.length) return false;
+    const last = readItems[readItems.length - 1]; if (!last || last.role !== 'user') return false;
+    const ux = readUx(); return ux === 'busy' || ux === 'waiting';
+  }
+  const readActLastAssistant = () => { const l = readItems[readItems.length - 1]; return !!l && l.role === 'assistant'; };
+  function readActRowEl(it, live) { // 한 줄. 상태·종류 이름·요약·걸린 시간. kind 는 정해진 값일 때만 클래스에 쓴다. live: 살아 있는 상자의 줄(끝난 턴의 끝나지 않은 줄은 진행 중이 아니라 중립 표시)
+    const st = it.err ? 'err' : it.done ? 'ok' : live ? 'run' : 'none';
+    const li = el('div', 'read-act-row is-' + st); const s = el('span', 'read-act-st is-' + st, st === 'err' ? '!' : st === 'ok' ? '✓' : st === 'none' ? '–' : '●');
+    s.setAttribute('role', 'img'); s.setAttribute('aria-label', T('read.st.' + st));
+    const kind = READ_ACT_KINDS.includes(it.kind) ? it.kind : ''; const kl = el('span', 'read-act-k' + (kind ? ' k-' + kind : ''), kind ? T('read.k.' + kind) : String(it.tool || ''));
+    const sum = el('span', 'read-act-s', typeof it.sum === 'string' ? it.sum : '');
+    const ms = el('span', 'read-act-ms', ''); if (it.done) { if (Number.isFinite(it.ms)) ms.textContent = readActDurText(it.ms); } else if (live && Number.isFinite(it.at)) { ms.dataset.at = String(it.at); ms.textContent = readActDurText(Date.now() - it.at); }
+    li.append(s, kl, sum, ms); return li;
+  }
+  function readActListEl(open, onToggle, noFold, src, live) { // 앞의 N개 접힘 줄 + 최근 줄들. noFold: 접기 단추 없이 전부(요약을 펼친 곳). src: 그릴 활동(없으면 받아 둔 전부)
+    const list = Array.isArray(src) ? src : readActItems; const w = Lib.actWindow(list, Array.isArray(src) ? 0 : readActMore, open, 8); const host = el('div', 'read-act-list');
+    if (!noFold && (w.folded > 0 || (open && list.length > 8))) {
+      const b = el('button', 'read-act-fold', open ? T('read.act.less') : T('read.act.fold', { n: w.folded })); b.type = 'button'; b.setAttribute('aria-expanded', String(open));
+      if (!open) b.setAttribute('aria-label', T('read.act.fold.aria', { n: w.folded }));
+      b.addEventListener('click', () => { if (modalOpen()) return; onToggle(!open); }); host.append(b);
+    }
+    const rows = el('div', 'read-act-rows'); for (const it of w.shown) rows.append(readActRowEl(it, live === true)); host.append(rows); return host;
+  }
+  const readActLiveItems = () => Lib.actSinceQuestion(readActItems, readItems) || []; // 작업 중 상자는 마지막 질문 시각 - 1초보다 뒤의 활동만 쓴다(앞 턴의 활동을 보이지 않는다)
+  function readActClock() { // 매초: 지난 시간 글자만 고친다(줄을 다시 만들지 않는다). 살아 있는 활동 상자 안의 줄만
+    if (readActEl.hidden) return;
+    if (readItems.length) { const q = readItems[readItems.length - 1]; if (q && q.role === 'user' && Number.isFinite(q.at)) { const t = readActDurText(Date.now() - q.at * 1000); if (readActEl2.textContent !== t) readActEl2.textContent = t; } }
+    for (const n of readActEl.querySelectorAll('.read-act-ms[data-at]')) { const at = Number(n.dataset.at); if (Number.isFinite(at)) { const t = readActDurText(Date.now() - at); if (n.textContent !== t) n.textContent = t; } }
+  }
+  function readActRender(follow) { // 멱등. 보일 때만 그리고, 줄 목록은 활동 key·펼침이 바뀔 때만 다시 만든다
+    const live = readActLive(); const ux = readUx();
+    const apply = () => {
+      if (!live) { if (!readActEl.hidden) { readActEl.hidden = true; readActSig = ''; } readActOpen = false; return; }
+      readActEl.hidden = false; readActEl.setAttribute('aria-label', T('read.act.aria'));
+      const tt = T('read.act.busy'); if (readActT.textContent !== tt) readActT.textContent = tt; // 답 대기일 때도 머리는 "작업 중"이다(답 대기 안내는 아래 상태 줄 하나만)
+      readPeekEl.firstChild.textContent = T('read.peek');
+      const mine = readActLiveItems(); const sig = readActKey + '|' + mine.length + '|' + (readActOpen ? 1 : 0) + '|' + readActMore + '|' + lang;
+      if (sig !== readActSig) {
+        readActSig = sig; readActRows.replaceChildren();
+        if (mine.length) readActRows.append(readActListEl(readActOpen, (o) => { readFollow(() => { readActOpen = o; readActRender(false); }); }, false, mine, true));
+      }
+      readActClock();
+    };
+    if (follow === false) apply(); else readFollow(apply);
+  }
+  async function readActFetch() {
+    if (readActFetching || !activeId || readCurId !== activeId || !readCurOn || detailOpen) return;
+    const id = activeId; const my = readSeq; const gen = readActGen; const forKey = readKey; readActFetching = true; let res = null;
+    try { res = await window.maru.actGet(id, readActKey); } catch (x) { res = null; } finally { if (gen === readActGen) readActFetching = false; }
+    if (my !== readSeq || gen !== readActGen || id !== activeId || !readCurOn) return;
+    if (!res || typeof res !== 'object' || typeof res.key !== 'string') return;
+    if (!readActLive()) readActSumKey = forKey; // 요약용으로는 대화 key 마다 한 번만 받는다(턴이 끝난 뒤에는 활동이 바뀌지 않는다)
+    if (res.same === true || !Array.isArray(res.items)) return;
+    readActKey = res.key; readActItems = res.items; readActMore = Number.isInteger(res.more) && res.more > 0 ? res.more : 0;
+    if (readActLive()) readActRender(); else readSumRefresh(); // 요약만 바뀐 경우: 화면 전체를 다시 그리지 않고 요약 칸만 고친다(readSurfHold 도 건드리지 않는다)
+  }
+  const readActAborted = () => { // 마지막 항목이 질문인데 세션이 쉬는 중이다(중단·실패)
+    if (!readCurOn || detailOpen || !readItems.length || readActLive()) return false;
+    const l = readItems[readItems.length - 1]; return !!l && l.role === 'user';
+  };
+  function readSumRefresh() { // 마지막 답변(또는 중단된 질문) 아래·위의 요약 칸만 다시 만든다. 바뀐 것이 없으면 건드리지 않는다
+    const slot = readList.querySelector('.read-act-sumslot'); if (!slot) return;
+    const n = readSumNode(); const sig = n ? n.sig : '';
+    if (slot.dataset.sig === sig) return;
+    readFollow(() => { slot.dataset.sig = sig; slot.replaceChildren(); if (n) slot.append(n.el); });
+  }
+  function readSumSlot() { const slot = el('div', 'read-act-sumslot'); const n = readSumNode(); slot.dataset.sig = n ? n.sig : ''; if (n) slot.append(n.el); return slot; }
+  function readSumNode() { // 지금 대화에서 보일 요약 { el, sig } 또는 null. 답변이면 그 턴의 활동(거른 결과), 중단된 질문이면 질문 뒤의 활동
+    if (readActLastAssistant()) {
+      const sum = Lib.actSummary(readActItems, readItems); if (!sum) return null;
+      const turn = Lib.actTurnItems(readActItems, readItems) || [];
+      return { el: readSumEl(sum, turn, T('read.act.sum', { n: sum.count, t: readActDurText(sum.ms) })), sig: 'a|' + sum.count + '|' + sum.ms + '|' + readActKey + '|' + lang };
+    }
+    if (readActAborted()) {
+      const since = Lib.actSinceQuestion(readActItems, readItems) || []; if (!since.length) return null;
+      return { el: readSumEl({ count: since.length, ms: 0 }, since, T('read.act.aborted', { n: since.length })), sig: 'q|' + since.length + '|' + readActKey + '|' + lang };
+    }
+    return null;
+  }
+  function readActPoll() { // 1초 poll: 작업 중·답 대기일 때와 요약이 필요할 때만 활동 기록을 받는다. 그 밖에는 부르지 않는다
+    if (!readCurOn || detailOpen) return;
+    if (readActLive() || ((readActLastAssistant() || readActAborted()) && readActSumKey !== readKey)) readActFetch();
+    readActClock();
+  }
+  function readPeekWant() { return readCurOn && !readEl.hidden && readTermFolded && !readActEl.hidden; } // 터미널이 띠로 접혔고(좁은 창에서 터미널이 덮은 동안은 읽기 영역이 숨는다) 활동 상자가 보일 때만
+  function readPeekTick() {
+    if (!readPeekWant()) { readPeekSync(); return; }
+    let lines = []; const e = terms.get(readCurId);
+    if (e && e.term) { try { const term = e.term; lines = Lib.termPeek({ lines: termScreenLines(term), cursorY: term.buffer.active.cursorY, rows: term.rows }, 8).lines; } catch (x) { lines = []; } }
+    const txt = lines.join('\n'); if (txt === readPeekTxt) return; // 같으면 DOM 을 건드리지 않는다
+    readPeekTxt = txt; readFollow(() => { readPeekPre.textContent = txt; readPeekEl.hidden = txt === ''; });
+  }
+  function readPeekSync() { // 타이머를 켜고 끈다. renderReadStatus·applyReadLayout 이 지나갈 때마다 부른다
+    if (readPeekWant()) { if (!readPeekTimer) { readPeekTimer = setInterval(readPeekTick, 500); readPeekTick(); } return; }
+    if (readPeekTimer) { clearInterval(readPeekTimer); readPeekTimer = null; }
+    if (readPeekTxt !== '' || !readPeekEl.hidden) { readPeekTxt = ''; readPeekPre.textContent = ''; readPeekEl.hidden = true; }
+  }
+  function readSumEl(sum, items, label) { // 턴이 끝난 뒤의 한 줄 요약(답변 위. 중단된 질문 아래에도). 누르면 그 턴의 활동 줄 전체를 펼친다(개수와 같은 거름 결과)
+    const w = el('div', 'read-act-sumwrap'); const b = el('button', 'read-act-sum', label); b.type = 'button'; b.setAttribute('aria-expanded', String(readSumOpen)); b.setAttribute('aria-label', T('read.act.sum.aria') + ': ' + b.textContent);
+    const detail = el('div', 'read-act-sumd'); detail.hidden = !readSumOpen;
+    const fill = () => { detail.replaceChildren(); if (readSumOpen) detail.append(readActListEl(true, () => {}, true, items, false)); detail.hidden = !readSumOpen; };
+    b.addEventListener('click', () => { if (modalOpen()) return; readSumOpen = !readSumOpen; b.setAttribute('aria-expanded', String(readSumOpen)); fill(); });
+    fill(); w.append(b, detail); return w;
+  }
+  const readUx = () => { if (readDevWait) return 'waiting'; if (readDevLive || readDevBusy) return 'busy'; const w = wsList.find((x) => x.id === activeId); return w ? (w.ux || w.state) : ''; };
+  const readSessSrc = () => { const w = wsList.find((x) => x.id === activeId); const s = w && w.sess && typeof w.sess === 'object' ? w.sess.source : ''; return s === 'precompact' || s === 'compact' ? s : ''; }; // main 이 준 세션 시작 표지(살아 있을 때만)
   function renderReadStatus() { // 작업 중·답 기다림 표시(읽기 영역 맨 아래 줄)와 접힌 띠의 점·테두리
-    const ux = readCurOn ? readUx() : ''; const wait = ux === 'waiting'; const busy = ux === 'busy';
-    const txt = wait ? T('read.wait') : busy ? T('read.busy') : '';
+    const ux = readCurOn ? readUx() : ''; const wait = ux === 'waiting'; const sessSrc = readCurOn ? readSessSrc() : ''; const comp = sessSrc === 'precompact'; const busy = ux === 'busy' || comp;
+    readActRender(); const boxOn = !readActEl.hidden && !comp; // 활동 상자가 보이면 작업 중 한 줄은 상자의 머리가 대신한다(답 대기 안내는 그대로)
+    const txt = wait ? T('read.wait') : comp ? T('read.compacting') : busy && !boxOn ? T('read.busy') : '';
+    const cOn = sessSrc === 'compact'; if (readCompactedEl.hidden === cOn) { const nr = readNearBottom(); readCompactedEl.textContent = T('read.compacted'); readCompactedEl.hidden = !cOn; if (nr && !readEl.hidden) readBody.scrollTop = readBody.scrollHeight; } else if (cOn && readCompactedEl.textContent !== T('read.compacted')) readCompactedEl.textContent = T('read.compacted'); // 압축을 마쳤다: 대화 끝에 흐린 한 줄(앱이 만든 줄. 다음 질문이 오면 표지가 죽어 사라진다)
     const near = readNearBottom(); const was = readStatusEl.hidden;
     readStatusEl.classList.toggle('wait', wait);
     if (readStatusEl.textContent !== txt) readStatusEl.textContent = txt;
     readStatusEl.hidden = txt === '';
     if (was !== readStatusEl.hidden && near && !readEl.hidden) readBody.scrollTop = readBody.scrollHeight; // 맨 아래를 보고 있었으면 새 줄까지 따라간다
     $('read-rail-dot').className = 'read-rail-dot' + (wait ? ' wait' : busy ? ' busy' : '');
-    const stripAlert = readTermFolded && (readNoteKey === 'first-screen' || readNoteKey === 'first-unsent'); // 첫 메시지 길이 거부했다: 접힌 터미널 안에 확인 창이 있을 수 있다
+    const stripAlert = readTermFolded && (readNoteKey === 'first-screen' || readNoteKey === 'first-unsent' || readNoteKey === 'img-screen' || readNoteKey === 'img-unsent' || readNoteKey === 'slash-screen' || readNoteKey === 'slash-unsent' || readNoteKey === 'busy-screen' || readNoteKey === 'busy-unsent'); // 첫 메시지·이미지 길이 거부했다: 접힌 터미널 안에 확인 창이 있을 수 있다
     termWrap.classList.toggle('read-wait', wait || stripAlert); // 접힌 띠의 테두리를 주황으로(펼치지는 않는다)
+    readPeekSync();
     renderReadInput();
   }
   function placeReadHandle() {
@@ -509,6 +664,7 @@
   function readSurfFill(btn, text) { // 단추: 입력창에 글을 넣고 포커스만 준다. 보내는 함수와 보내기 IPC 는 부르지 않는다
     if (btn.disabled || btn.dataset.last !== '1' || modalOpen() || readSending || !activeId || activeId !== readCurId || readEl.hidden || readLock() !== '') return;
     const c = Lib.readCleanSend(text); if (!c.ok || c.text !== text) return; // 입력창이 보낼 때와 같은 정리를 한 번 더 거친다. 비거나, 정리한 글이 단추의 글과 다르면 채우지 않는다(보이는 글과 채우는 글이 같아야 한다)
+    if (readAtts.length > 0) { readNoteKey = 'fillatt'; renderReadInput(); return; } // 첨부가 있으면 쓰던 글이 있는 것과 같이 채우지 않고 안내를 보인다
     if (readTa.value.trim() !== '') {
       if (readTa.value === readLastFill) { readTa.focus(); return; } // 방금 채운 글 그대로다: "채웠습니다" 안내를 "채우지 않았습니다"로 덮지 않는다
       readNoteKey = 'fillno'; renderReadInput(); return; // 쓰던 글을 지우지 않는다
@@ -552,16 +708,24 @@
       const w = el('div', 'read-surf-ch'); w.append(el('p', 'read-surf-q', String(p.q)));
       const o = el('div', 'read-surf-opts'); for (const s of Array.isArray(p.options) ? p.options : []) if (typeof s === 'string' && s) o.append(readSurfBtn(s, 'opt', last));
       w.append(o); box.append(w);
+    } else if (p.t === 'section') {
+      const h = el('div', 'read-surf-sec'); h.append(el('span', 'read-surf-sec-t', String(p.title))); if (p.desc) h.append(el('span', 'read-surf-sec-d', String(p.desc))); box.append(h); // 머리일 뿐 뒤의 부품을 감싸지 않는다
+    } else if (p.t === 'cards') {
+      const g = el('div', 'read-surf-cards'); // 단추가 아니다: 클릭 처리·hover 없음
+      for (const s of items) { const c = el('div', 'read-surf-card'); if (s.tag) c.append(el('span', 'read-surf-card-g', String(s.tag))); c.append(el('span', 'read-surf-card-t', String(s.title))); if (s.desc) c.append(el('span', 'read-surf-card-d', String(s.desc))); g.append(c); }
+      box.append(g);
     } else if (p.t === 'text') box.append(el('p', '', String(p.text)));
   }
   function readSurface(host, b, ctx) {
     const box = el('div', 'read-surf'); box.setAttribute('role', 'group'); box.setAttribute('aria-label', T('read.surf.aria'));
-    box.append(el('p', 'read-surf-src', T('read.surf.src'))); // 출처 표지: 항상 보인다
+    { const top = el('p', 'read-surf-src read-surf-src-top', T('read.surf.src')); top.setAttribute('aria-hidden', 'true'); box.append(top); } // 출처 표지(위): 상자가 화면보다 길어도 위쪽에서 보인다. 화면 읽기 프로그램에는 상자의 aria-label 이 전한다
     if (typeof b.title === 'string' && b.title) box.append(el('h3', 'read-surf-title', b.title));
+    if (typeof b.sub === 'string' && b.sub) box.append(el('p', 'read-surf-sub', b.sub));
     for (const p of Array.isArray(b.parts) ? b.parts : []) { try { readSurfPart(box, p, ctx.last); } catch (x) { /* 이 부품만 건너뛴다 */ } }
     const nx = (Array.isArray(b.next) ? b.next : []).filter((s) => typeof s === 'string' && s);
-    if (nx.length) { const r = el('div', 'read-surf-next'); r.append(el('span', 'read-surf-next-l', T('read.surf.next'))); for (const s of nx) r.append(readSurfBtn(s, 'nx', ctx.last)); box.append(r); }
+    if (nx.length) { const w = el('div', 'read-surf-nextw'); w.append(el('p', 'read-surf-next-l', T('read.surf.nextnote'))); const r = el('div', 'read-surf-next'); for (const s of nx) r.append(readSurfBtn(s, 'nx', ctx.last)); w.append(r); box.append(w); }
     if (b.truncated === true) box.append(el('p', 'read-note', T('read.trunc')));
+    box.append(el('p', 'read-surf-src', T('read.surf.src'))); // 출처 표지: 항상 보인다(상자 맨 아래 오른쪽)
     host.append(box);
     if (ctx.last && ctx.key && !readSurfSeen.has(ctx.key)) { if (readSurfSeen.size > 500) readSurfSeen.clear(); readSurfSeen.add(ctx.key); window.maru.readMark('surf'); } // 그린 횟수(답변마다 한 번, 내용은 보내지 않는다)
   }
@@ -595,10 +759,12 @@
       }
       if (it.lost === true) wrap.append(el('p', 'read-note', T('read.lost')));
       if (it.cut === true) wrap.append(el('p', 'read-note', T('read.cut')));
+      if (idx === readItems.length - 1) wrap.append(readSumSlot()); // 마지막 질문이 중단됐으면 그 아래에 접힌 요약 한 줄
       return wrap;
     }
     if (it.role === 'assistant') {
       const wrap = el('div', 'read-item'); const box = el('div', 'read-a');
+      if (idx === readItems.length - 1) wrap.append(readSumSlot()); // 마지막 답변 위: 그 턴의 활동 한 줄 요약
       const ctx = { last: idx === readItems.length - 1, key: readCurId + ':' + String(it.at) }; // 단추는 대화의 마지막 항목인 답변에서만 누를 수 있다
       for (const b of Array.isArray(it.blocks) ? it.blocks : []) { try { readBlock(box, b, ctx); } catch (x) { /* 이 블록만 건너뛴다 */ } }
       if (it.lost === true) box.append(el('p', 'read-note', T('read.lost')));
@@ -630,7 +796,9 @@
       f.append(fb); frag.append(f);
     }
     readItems.forEach((it, idx) => { try { const n = readItemEl(it, idx); if (n) frag.append(n); } catch (x) { /* 이 항목만 건너뛴다 */ } });
+    if (readActLive()) readSumOpen = false; // 다음 질문이 작업 중이면 요약은 사라지고 펼침도 잊는다
     readList.replaceChildren(frag);
+    readActRender(false); // 활동 상자를 보일지 다시 정한다(스크롤은 아래 줄이 맞춘다)
     readSurfHold = false; readSurfRefresh(); // 새 기록이 왔다: 보내기 뒤에 끈 단추를 다시 켠다(마지막 답변의 것만)
     if (hidden) return;
     readFoldPass();
@@ -640,16 +808,23 @@
   }
   async function readTick() { // 1초 poll 에서 부른다. 켜진 활성 작업 공간에 대해서만 받는다
     try {
-      renderReadStatus();
+      renderReadStatus(); readActPoll();
       if (!activeId || readCurId !== activeId || !readCurOn || readFetching || detailOpen) return; // 상세 화면이 열려 읽기 배치가 풀린 동안은 받지 않는다
       const id = activeId; const my = readSeq; readFetching = true;
       let res = null;
       try { res = await window.maru.talkGet(id, readKey); } catch (x) { res = null; } finally { readFetching = false; }
       if (my !== readSeq || id !== activeId || !readCurOn) return; // 그 사이 작업 공간이 바뀌었거나 꺼졌다
+      if (res && typeof res === 'object') renderReadCtx(res.ctx); // 대화가 그대로여도 사용량은 매번 다시 그린다
       if (!res || typeof res !== 'object' || typeof res.key !== 'string' || res.same === true || !Array.isArray(res.items)) return;
       if (readLoaded && res.key === '' && readKey === '' && !res.items.length && !readItems.length) return; // 빈 대화가 그대로면 다시 그리지 않는다(첫 메시지 안내의 단추가 매초 바뀌지 않게)
       readKey = res.key; readItems = res.items; readMore = res.more === true; readLoaded = true;
-      readRender();
+      let lq = null; for (let i = readItems.length - 1; i >= 0; i--) if (readItems[i] && readItems[i].role === 'user') { lq = readItems[i]; break; }
+      const qk = lq && Number.isFinite(lq.at) ? String(lq.at) : ''; // 새 질문이 생겼다: 받아 둔 활동 목록과 키를 비우고 이 틱에서 바로 다시 받는다
+      let reAct = false;
+      if (qk !== '' && readActQ !== '' && qk !== readActQ) { readActGen++; readActFetching = false; readActKey = ''; readActItems = []; readActMore = 0; readActSumKey = null; readActSig = ''; readActOpen = false; readSumOpen = false; reAct = true; }
+      if (qk !== '') readActQ = qk;
+      readRender(); renderReadStatus(); // 마지막 항목이 바뀌었다: 활동 상자와 작업 중 줄을 다시 정한다
+      if (reAct) readActFetch();
     } catch (x) { /* 읽기 화면 오류가 앱을 멈추지 않게 한다 */ }
   }
   $('read-toggle').addEventListener('click', () => { if (modalOpen() || !activeId) return; const on = readSt(activeId).on !== true; readSet({ on }, true); if (on) window.maru.readMark('on'); if (!on) focusTerm(); });
@@ -699,15 +874,24 @@
   // ---- 읽기 화면 입력창: 쉬는 중일 때만 보낼 수 있다(main 이 다시 검사한다). 잠겨 있어도 글은 쓸 수 있다 ----
   function readLock() { // '' (보낼 수 있다) | 'busy' | 'wait' | 'draft' | 'settling' | 'notclaude' | 'first' | 'touched' | 'failed' | 'shell'. 미리 보이는 이유일 뿐이고 최종 판단은 main(read:send)이다
     if (readDevWait) return 'wait';
-    if (readDevSend) return '';
+    if (readDevSend || readDevBusy) return '';
     const w = wsList.find((x) => x.id === activeId); if (!w) return 'shell';
     const ux = w.ux || w.state;
+    if (readSessSrc() === 'precompact') return 'busy'; // 대화를 압축하는 중
     if (ux === 'waiting') return 'wait';
-    if (ux === 'busy') return 'busy';
+    if (ux === 'busy') return readBusySend() ? '' : 'busy'; // 작업 중이라도 main 이 대기열에 넣기가 된다고 알리면(bs) 잠그지 않는다
     if (typeof w.sr !== 'string') return 'shell'; // main 이 판정을 보내지 않았다: 잠근다
     const sr = w.sr; // main 의 L.readCanSend 결과(''=통과)
-    return sr === '' ? '' : sr === 'busy' ? 'busy' : sr === 'waiting' ? 'wait' : sr === 'draft' || sr === 'settling' || sr === 'notclaude' || sr === 'first' || sr === 'touched' || sr === 'failed' ? sr : 'shell';
+    return sr === '' ? '' : sr === 'busy' ? 'busy' : sr === 'waiting' ? 'wait' : sr === 'draft' || sr === 'settling' || sr === 'notclaude' || sr === 'first' || sr === 'touched' || sr === 'first-touched' || sr === 'failed' ? sr : 'shell';
   }
+  function readBusySend() { // 작업 중이고 main 이 "대기열에 넣어 보낼 수 있다"고 알렸는가(waiting·대화 압축 중이면 거짓). 미리 보이는 이유일 뿐이고 최종 판단은 main 이다
+    if (readDevBusy) return true;
+    if (readDevWait || readDevLive || readSessSrc() === 'precompact') return false;
+    const w = wsList.find((x) => x.id === activeId);
+    return !!w && (w.ux || w.state) === 'busy' && w.bs === true;
+  }
+  const readIsMac = () => /Mac/i.test((typeof navigator === 'object' && (navigator.platform || navigator.userAgent)) || '');
+  const READ_ALERT_KEYS = ['first-screen', 'first-unsent', 'img-screen', 'img-unsent', 'slash-screen', 'slash-unsent', 'busy-screen', 'busy-unsent']; // 터미널 확인을 권하는 거부 이유
   function readFitTa() { // 내용에 따라 1줄에서 8줄까지 늘어난다. 숨어 있으면(크기 0) 건너뛴다
     if (readEl.hidden) return;
     readTa.style.height = 'auto';
@@ -716,37 +900,171 @@
   }
   function renderReadInput() {
     const lock = readLock(); const wait = lock === 'wait';
-    const noteKey = (readNoteKey === 'first-screen' || readNoteKey === 'first-unsent') && lock !== 'wait' ? readNoteKey : lock || readNoteKey; // 잠긴 이유가 보내기 거부 이유보다 먼저다. 단 첫 메시지 길의 거부는 더 알려 주므로(터미널 확인) 일반 잠금 문구(first·draft)보다 앞선다
+    const bsend = lock === '' && readBusySend(); // 작업 중이지만 대기열에 넣을 수 있다
+    const noteKey = READ_ALERT_KEYS.includes(readNoteKey) && lock !== 'wait' ? readNoteKey : lock || readNoteKey || (bsend ? (readIsMac() ? 'busysend' : 'busysendc') : ''); // 잠긴 이유가 보내기 거부 이유보다 먼저다. 단 첫 메시지 길의 거부는 더 알려 주므로(터미널 확인) 일반 잠금 문구(first·draft)보다 앞선다
     const txt = noteKey ? T('read.input.' + noteKey) : '';
     readInputBox.classList.toggle('wait', wait); readInputNote.classList.toggle('wait', wait);
     if (readInputNote.textContent !== txt) readInputNote.textContent = txt;
     readInputNote.hidden = txt === '';
-    readSendBtn.disabled = readSending || lock !== '' || readTa.value.trim() === ''; // 보내는 중에는 잠가 두 번 보내지 않게 한다
+    readSendBtn.disabled = readSending || lock !== '' || (readTa.value.trim() === '' && readAtts.length === 0); // 보내는 중에는 잠가 두 번 보내지 않게 한다. 글이 비어도 첨부가 있으면 보낼 수 있다
+    renderReadAtt();
     const ro = readSending && readSendId === readCurId; if (readTa.readOnly !== ro) readTa.readOnly = ro; // 보내는 동안 그 글이 든 입력창은 읽기 전용: 보낸 글과 그 사이에 쓴 글이 섞이지 않는다
-    const ph = T('read.input.ph'); if (readTa.placeholder !== ph) readTa.placeholder = ph;
+    const bl = T(bsend ? 'read.send.queue' : 'read.send'); if (readSendBtn.textContent !== bl) readSendBtn.textContent = bl; // 작업 중에는 "대기열에 넣기"
+    readGhostSync();
+    const ghostOn = readGhost !== '' && readTa.value === '';
+    const ph = ghostOn ? (readGhost.length > 80 ? readGhost.slice(0, 80) + '…' : readGhost) : T('read.input.ph'); if (readTa.placeholder !== ph) readTa.placeholder = ph; // 추천 글은 placeholder 속성으로만 넣는다(긴 글은 80자에서 자른다)
+    if (readGhostTab.hidden === ghostOn) readGhostTab.hidden = !ghostOn;
+    if (ghostOn) { const ad = T('read.ghost.aria', { text: readGhost }); if (readTa.getAttribute('aria-description') !== ad) readTa.setAttribute('aria-description', ad); } else if (readTa.hasAttribute('aria-description')) readTa.removeAttribute('aria-description'); // aria-live 는 쓰지 않는다
     readSurfRefresh();
+    readCmdRefresh();
   }
+  // ---- 터미널의 흐린 추천 글: 입력창이 비어 있고 "한가할 때 보내기" 상태일 때만 1초마다 이 작업 공간의 xterm 화면에서 읽는다. 읽기만 하고 pty 에는 쓰지 않는다 ----
+  function readGhostWant() {
+    if (!readCurOn || readEl.hidden || !readCurId || readCurId !== activeId || readSending || modalOpen()) return false;
+    if (readLock() !== '' || readBusySend()) return false; // 입력 잠금·작업 중·권한 대기
+    const ux = readUx(); if (ux === 'busy' || ux === 'waiting') return false;
+    return readTa.value === '' && readAtts.length === 0;
+  }
+  function readGhostTick() {
+    if (!readGhostWant()) { readGhostSync(); return; }
+    let g = '';
+    if (readDevGhost) g = '다음 단계로 넘어가 줘'; // 시험 전용: 가짜 값(터미널을 읽지 않는다)
+    else { const e = terms.get(readCurId); if (e && e.term) { try { g = Lib.promptGhost(termSnapNow(e.term)); } catch (x) { g = ''; } } }
+    if (g !== readGhost) { readGhost = g; renderReadInput(); }
+  }
+  function readGhostSync() { // 타이머를 켜고 끈다. 조건이 깨지면 추천 글을 지운다. renderReadInput 이 지나갈 때마다 부른다
+    if (readGhostWant()) { if (!readGhostTimer) { readGhostTimer = setInterval(readGhostTick, 1000); readGhostTick(); } return; }
+    if (readGhostTimer) { clearInterval(readGhostTimer); readGhostTimer = null; }
+    if (readGhost !== '') readGhost = '';
+  }
+  function readGhostFill() { // Tab·→: 입력창에 추천 글 전체를 채우고 커서를 끝에 둔다. 보내지 않는다(Enter 는 사용자가 누른다)
+    if (readGhost === '' || readTa.value !== '' || !readGhostWant()) return;
+    const c = Lib.readCleanSend(readGhost); if (!c.ok) return;
+    readTa.value = c.text; readGhost = ''; readNoteKey = ''; readLastFill = ''; readCmdEsc = false; readFitTa();
+    const n = readTa.value.length; try { readTa.setSelectionRange(n, n); } catch (x) { /* 무시 */ }
+    renderReadInput();
+  }
+  // ---- 첨부한 이미지: 표(token)만 가진다(경로는 main 만 안다). 작업 공간별로 맡겼다가 돌려준다(디스크에는 쓰지 않는다) ----
+  const readAttBox = $('read-att');
+  const READ_ATT_MAX = 4; const READ_PASTE_MAX = 10 * 1024 * 1024;
+  const readAttSaved = new Map(); // 작업 공간 id -> [{ token, thumb }]
+  let readAtts = []; // 지금 작업 공간의 첨부
+  let readAttKey = '';
+  const READ_THUMB_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/; // main 이 준 작은 미리보기만 쓴다(CSP 의 img-src data: 로 뜬다). 아니면 글 조각으로 둔다
+  function renderReadAtt() {
+    const key = readAtts.map((a) => a.token + (a.maybe ? '!' : '') + (a.thumb ? 't' : '')).join(',') + (readSending ? '|s' : '') + '|' + lang;
+    if (key === readAttKey) return;
+    readAttKey = key;
+    readAttBox.textContent = '';
+    readAtts.forEach((a, i) => {
+      const x = el('button', 'read-att-x', '×'); x.type = 'button'; x.disabled = readSending; x.setAttribute('aria-label', T('read.att.remove', { n: i + 1 }));
+      x.addEventListener('click', () => readAttRemove(a.token));
+      const maybe = a.maybe ? el('span', 'read-att-maybe', T('read.att.maybe')) : null; // img-unsent 뒤: 터미널 입력줄에 들어갔을 수 있다
+      if (a.thumb) { // 미리보기: 오른쪽 위에 지우기 단추를 겹친다
+        const box = el('span', 'read-att-th'); box.setAttribute('role', 'listitem');
+        const im = el('img'); im.src = a.thumb; im.alt = T('read.att.item', { n: i + 1 });
+        box.append(im, x); if (maybe) box.append(maybe); readAttBox.append(box);
+      } else {
+        const chip = el('span', 'read-att-chip'); chip.setAttribute('role', 'listitem');
+        chip.append(el('span', '', T('read.att.item', { n: i + 1 })));
+        if (maybe) chip.append(maybe);
+        chip.append(x); readAttBox.append(chip);
+      }
+    });
+    readAttBox.hidden = readAtts.length === 0;
+  }
+  function readAttRemove(token) {
+    if (readSending) return;
+    const i = readAtts.findIndex((a) => a.token === token); if (i < 0) return;
+    readAtts.splice(i, 1);
+    const id = readCurId; renderReadInput();
+    if (id) { try { Promise.resolve(window.maru.readPasteDrop(id, token)).catch(() => {}); } catch (x) { /* 무시 */ } }
+    readTa.focus();
+  }
+  function readAttClear() { readAtts = []; readAttKey = ''; }
+  let readPasting = false;
+  readTa.addEventListener('paste', async (e) => {
+    const cd = e.clipboardData; if (!cd || !cd.items) return;
+    const items = Array.from(cd.items);
+    if (!Lib.pasteIsImage(items.map((it) => ({ kind: it.kind, type: it.type })))) return; // 글을 붙이는 기본 동작 그대로. 글 항목이 같이 와도 이미지인지는 pasteIsImage 가 정한다
+    const img = items.find((it) => it.kind === 'file' && typeof it.type === 'string' && it.type.startsWith('image/'));
+    e.preventDefault();
+    const file = img ? img.getAsFile() : null;
+    const id = readCurId;
+    if (readSending || !id || id !== activeId) return;
+    if (readAtts.length >= READ_ATT_MAX) { readNoteKey = 'maxatt'; renderReadInput(); return; }
+    if (readPasting) return; // 진행 중인 붙여넣기 요청은 1개만(되풀이 paste 는 무시)
+    readPasting = true;
+    let res = null;
+    try {
+      if (file && file.size > 0 && file.size <= READ_PASTE_MAX) { // 먼저 paste 이벤트의 파일 바이트를 main 에 보낸다
+        try { res = await window.maru.readPasteBytes(id, new Uint8Array(await file.arrayBuffer())); } catch (x) { res = null; }
+      }
+      if (!res || (res.ok !== true && res.reason === 'noimage')) { // 파일이 없거나 main 이 이미지로 풀지 못했을 때만 main 이 클립보드를 직접 읽는다
+        try { res = await window.maru.readPasteImage(id); } catch (x) { res = null; }
+      }
+    } finally { readPasting = false; }
+    if (!res || res.ok !== true || typeof res.token !== 'string') {
+      const r = res && typeof res.reason === 'string' ? res.reason : '';
+      if (r === 'busy') return; // 조용히 무시
+      if (id === activeId) { readNoteKey = r === 'noimage' ? 'noimage' : r === 'toobig' ? 'toobig' : r === 'full' ? 'maxatt' : 'invalid'; renderReadInput(); }
+      return;
+    }
+    const drop = () => { try { Promise.resolve(window.maru.readPasteDrop(id, res.token)).catch(() => {}); } catch (x) { /* 무시 */ } };
+    if (id !== activeId || id !== readCurId || readSending || readAtts.length >= READ_ATT_MAX) { drop(); return; } // 기다리는 사이 작업 공간이 바뀌었거나 다른 붙여넣기가 먼저 찼다
+    const thumb = typeof res.thumb === 'string' && res.thumb.length <= 400000 && READ_THUMB_RE.test(res.thumb) ? res.thumb : null;
+    readAtts.push({ token: res.token, thumb }); readNoteKey = ''; renderReadInput();
+  });
   function readDraftSwap(from, to) { // 작업 공간을 바꿀 때 쓰던 글을 맡기고 새 작업 공간의 글을 꺼낸다(디스크에는 쓰지 않는다)
+    readLbFix = ''; readEnter.at = NaN;
     if (from) { if (readTa.value !== '') readDrafts.set(from, readTa.value); else readDrafts.delete(from); }
     const ids = new Set(wsList.map((x) => x.id)); for (const k of [...readDrafts.keys()]) if (!ids.has(k)) readDrafts.delete(k); // 닫힌 작업 공간의 글은 버린다
-    readTa.value = to && readDrafts.has(to) ? readDrafts.get(to) : ''; readNoteKey = ''; readLastFill = ''; readFitTa();
+    readTa.value = to && readDrafts.has(to) ? readDrafts.get(to) : ''; readNoteKey = ''; readLastFill = ''; readCmdEsc = false; readCmdSel = 0; readGhost = ''; // 추천 글은 작업 공간을 바꾸면 바로 지운다
+    if (readDevCmd && to && readTa.value === '') { readTa.value = '/c'; readDevCmd = false; } // 시험 전용(readcmd): 입력창에 /c 를 넣어 목록이 열린 채로 둔다
+    readFitTa();
+    if (from) { if (readAtts.length) readAttSaved.set(from, readAtts); else readAttSaved.delete(from); }
+    readAtts = []; readAttKey = '';
+    for (const k of [...readAttSaved.keys()]) if (!ids.has(k)) readAttSaved.delete(k); // 닫힌 작업 공간의 첨부는 버린다
+    if (to && readAttSaved.has(to)) { readAtts = readAttSaved.get(to); readAttSaved.delete(to); }
+    if (readDevAtt && to && readAtts.length === 0) { const px = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='; readAtts = [{ token: 'devatt1', thumb: px }, { token: 'devatt2', thumb: px }]; readAttKey = ''; readDevAtt = false; } // 시험 전용(readatt): 가짜 첨부 2개(미리보기 포함)를 한 번 붙인다
   }
-  async function readSendNow() {
+  async function readSendNow(opts) { // opts.now: 지금 보내기(Cmd/Ctrl+Enter). 쉬는 중이면 보통 보내기와 같다. 작업 중이면 대기열에 넣은 뒤 지금 보낸다
     if (readSending || !activeId || modalOpen()) return;
+    const nowKey = !!(opts && opts.now === true) && readBusySend(); // 화면이 쉬는 중으로 보였으면 지금 보내기를 요청하지 않는다(뜻하지 않게 작업을 끊지 않는다)
     if (activeId !== readCurId) { applyReadLayout(); return; } // 입력창의 글은 readCurId 작업 공간의 것이다. 다르면 보내지 않고 입력창을 지금 작업 공간에 맞춘 뒤 멈춘다
     const id = activeId; const raw = readTa.value;
-    if (raw.trim() === '') return;
+    const sentAtts = readAtts.slice(); const tokens = sentAtts.map((a) => a.token);
+    if (raw.trim() === '' && tokens.length === 0) return;
     if (readLock() !== '') { renderReadInput(); return; }
+    const busyMode = readBusySend(); // 작업 중 보내기: 이미지 첨부와 슬래시 명령은 보내지 않는다(main 도 막는다)
+    if (busyMode && (tokens.length > 0 || /^\s*\//.test(raw))) { readNoteKey = 'busy'; renderReadInput(); return; }
+    if (tokens.length === 0) { // 한 줄 슬래시 글은 목록 규칙을 따른다(main 도 허용 목록으로 다시 거른다)
+      const act = readSlashAction(raw);
+      if (act !== 'send' || /^\s*\//.test(raw)) {
+        const sel = readCmdShown[readCmdSel];
+        const word = (/^\s*\/(\S*)/.exec(raw) || [])[1];
+        if (act === 'wait') { readCmdFetch(id); renderReadInput(); return; } // 목록이 올 때까지 보내지 않는다
+        if (act === 'none') { readNoteKey = 'slash-unknown'; renderReadInput(); return; }
+        if (act === 'fill') { if (sel) readCmdFill(sel.name); return; }
+        if (act === 'send' && sel && typeof word === 'string' && sel.name !== word.toLowerCase()) { readCmdFill(sel.name); return; } // 위아래 키로 다른 항목을 골랐으면 그것을 채운다
+      }
+    }
     readSending = true; readSendId = id; readNoteKey = ''; renderReadInput();
     let res = null;
-    try { res = await window.maru.readSend(id, raw); } catch (x) { res = null; }
+    try { res = await (tokens.length ? window.maru.readSend(id, raw, tokens) : nowKey ? window.maru.readSend(id, raw, undefined, true) : window.maru.readSend(id, raw)); } catch (x) { res = null; }
     readSending = false; readSendId = null;
     if (res && res.ok === true) {
+      if (tokens.length) { // 보낸 첨부의 표시를 비운다(파일은 main 이 남긴다)
+        if (id === activeId && id === readCurId) { readAtts = readAtts.filter((a) => !tokens.includes(a.token)); readAttKey = ''; }
+        else { const sv = readAttSaved.get(id); if (sv) { const rest = sv.filter((a) => !tokens.includes(a.token)); if (rest.length) readAttSaved.set(id, rest); else readAttSaved.delete(id); } }
+      }
       readSurfHold = true; readLastFill = ''; // 다음 기록 갱신(readRender)이 올 때까지 화면 블록 단추를 끈다: 방금 보낸 답이 아직 지난 답변 위에 있다
       if (id === activeId) { if (readTa.value === raw) { readTa.value = ''; readFitTa(); } } else if (readDrafts.get(id) === raw) readDrafts.delete(id); // 보내는 사이 작업 공간을 바꿨으면 맡겨 둔 글을 지운다
+      if (res.queued === true && id === activeId) readNoteKey = nowKey ? (res.now === true ? 'sentnow' : 'queuednow') : 'queued'; // 대기열에 넣었다: 지금 보내기까지 됐는지 따로 알린다
     } else if (id === activeId) {
       const r = res && typeof res.reason === 'string' ? res.reason : '';
-      readNoteKey = r === 'busy' ? 'busy' : r === 'waiting' ? 'wait' : r === 'draft' || r === 'settling' || r === 'notclaude' || r === 'first' || r === 'touched' || r === 'failed' || r === 'first-screen' || r === 'first-unsent' ? r : r === 'shell' || r === 'nosession' ? 'shell' : r === 'toolong' || r === 'empty' || r === 'rate' ? r : 'invalid'; // 글은 그대로 둔다(first-screen·first-unsent 도: 띠 강조는 renderReadStatus 가 한다)
+      if (r === 'img-unsent') { for (const a of sentAtts) a.maybe = true; readAttKey = ''; } // 글과 첨부 표시는 그대로 두고 첨부 조각에 흐린 표시를 붙인다
+      readNoteKey = r === 'busy' ? 'busy' : r === 'waiting' ? 'wait' : r === 'draft' || r === 'settling' || r === 'notclaude' || r === 'first' || r === 'touched' || r === 'first-touched' || r === 'failed' || r === 'first-screen' || r === 'first-unsent' || r === 'slash-term' || r === 'slash-nosession' || r === 'slash-screen' || r === 'slash-unsent' || r === 'img-nosession' || r === 'img-screen' || r === 'img-unsent' || r === 'busy-screen' || r === 'busy-unsent' || r === 'busy-tool' || r === 'busy-short' ? r : r === 'shell' || r === 'nosession' ? 'shell' : r === 'toolong' || r === 'empty' || r === 'rate' ? r : 'invalid'; // 글은 그대로 둔다(first-screen·first-unsent 도: 띠 강조는 renderReadStatus 가 한다)
     }
     renderReadStatus(); // 안에서 renderReadInput 도 부른다
     if (id === activeId && !readEl.hidden) readTa.focus();
@@ -754,25 +1072,130 @@
   let readComposing = false; let readComposeEnd = 0;
   readTa.addEventListener('compositionstart', () => { readComposing = true; });
   readTa.addEventListener('compositionend', () => { readComposing = false; readComposeEnd = Date.now(); });
-  readTa.addEventListener('input', () => { readNoteKey = ''; readFitTa(); renderReadInput(); });
+  readTa.addEventListener('input', () => {
+    if (readLbFix) { // beforeinput 을 취소하지 못해 들어간 줄바꿈 한 글자(커서 바로 앞)를 지운다
+      const m = readLbFix; readLbFix = ''; const p = readTa.selectionStart;
+      if (p > 0 && readTa.value[p - 1] === '\n') { readTa.value = readTa.value.slice(0, p - 1) + readTa.value.slice(p); try { readTa.setSelectionRange(p - 1, p - 1); } catch (x) { /* 무시 */ } }
+      if (m === 'send') readSendNow();
+    }
+    readNoteKey = ''; readCmdEsc = false; readCmdSel = 0; readFitTa(); renderReadInput(); });
+  // ---- 명령 목록: 글이 / 로 시작하고 첫 낱말을 쓰는 중이면 입력창 위에 띄운다. 고르면 입력창에 채우기만 한다(보내지 않는다). 글은 textContent 로만 넣는다 ----
+  const READ_CMD_KINDS = ['builtin', 'skill', 'command'];
+  const readCmdQuery = () => { const v = readTa.value; return /^\/[^\s]*$/.test(v) ? v.slice(1).toLowerCase() : null; }; // 첫 낱말을 쓰는 중(공백·줄바꿈 없음)일 때만
+  const readCmdFilter = (items, q) => Lib.slashFilter(items, q); // 정확히 같은 이름 -> 앞머리 -> 포함, 같은 급에서는 기본 명령 먼저
+  function readSlashAction(raw) { // 슬래시 글의 Enter 동작('send'|'fill'|'none'|'wait'): 목록을 받아 온 적이 없으면 null 을 넘겨 기다린다
+    const c = readCmdCache.get(readCurId);
+    return Lib.slashEnterAction(raw, c ? c.items : null, !readCmdEl.hidden && readCmdShown.length > 0);
+  }
+  function readCmdHide() { if (!readCmdEl.hidden) readCmdEl.hidden = true; readCmdShown = []; readCmdSig = ''; readTa.removeAttribute('aria-activedescendant'); readTa.setAttribute('aria-expanded', 'false'); }
+  function readCmdDesc(x) { return x.kind === 'builtin' && x.desc === '' ? (x.name === 'clear' ? T('read.cmd.clear') : x.name === 'compact' ? T('read.cmd.compact') : '') : x.desc; }
+  function readCmdFetch(id) {
+    if (readCmdFetching === id) return;
+    readCmdFetching = id;
+    Promise.resolve(window.maru.readCommands(id)).then((r) => {
+      readCmdFetching = '';
+      const raw = r && Array.isArray(r.items) ? r.items.slice(0, 100) : [];
+      const items = raw.filter((x) => x && typeof x.name === 'string' && /^[a-z0-9][a-z0-9:_-]{0,63}$/.test(x.name) && typeof x.desc === 'string' && x.desc.length <= 400 && READ_CMD_KINDS.includes(x.kind));
+      readCmdCache.set(id, { at: Date.now(), items });
+      renderReadInput();
+    }).catch(() => { readCmdFetching = ''; readCmdCache.set(id, { at: Date.now(), items: [] }); });
+  }
+  function readCmdRefresh() {
+    const q = readCmdQuery(); const id = readCurId;
+    if (q === null || readCmdEsc || !id || id !== activeId || readEl.hidden || readSending || readLock() !== '' || modalOpen()) { readCmdHide(); return; }
+    const c = readCmdCache.get(id);
+    if (!c || Date.now() - c.at > 30000) readCmdFetch(id);
+    if (!c) { readCmdHide(); return; }
+    const list = readCmdFilter(c.items, q);
+    if (!list.length) { readCmdHide(); return; }
+    if (readCmdSel >= list.length || readCmdSel < 0) readCmdSel = 0;
+    const sig = list.map((x) => x.name).join(',') + '|' + readCmdSel + '|' + lang;
+    readCmdShown = list;
+    readCmdEl.hidden = false; readTa.setAttribute('aria-expanded', 'true');
+    if (sig === readCmdSig) return;
+    readCmdSig = sig;
+    readCmdEl.replaceChildren();
+    list.forEach((x, i) => {
+      const li = el('li', 'read-cmd' + (i === readCmdSel ? ' sel' : '')); li.id = 'read-cmd-' + i; li.setAttribute('role', 'option'); li.setAttribute('aria-selected', String(i === readCmdSel));
+      li.append(el('span', 'read-cmd-n', '/' + x.name), el('span', 'read-cmd-d', readCmdDesc(x)), el('span', 'read-cmd-k', T('read.cmd.' + x.kind)));
+      li.addEventListener('mousedown', (ev) => { ev.preventDefault(); readCmdFill(x.name); }); // 입력창의 포커스를 지키고 채운다
+      readCmdEl.append(li);
+    });
+    readTa.setAttribute('aria-activedescendant', 'read-cmd-' + readCmdSel);
+    const s = readCmdEl.children[readCmdSel]; if (s && s.scrollIntoView) s.scrollIntoView({ block: 'nearest' });
+  }
+  function readCmdFill(name) { // 입력창에 "/이름 " 을 채운다. 보내지 않는다. 화면 블록 단추와 같은 보호(0.5초·눌려 있던 Enter 를 뗄 때까지 Enter 로 보내지 않음)
+    if (!/^[a-z0-9][a-z0-9:_-]{0,63}$/.test(name)) return;
+    readTa.value = '/' + name + ' '; readNoteKey = ''; readLastFill = ''; readCmdEsc = false; readFillAt = Date.now(); readFillHeld = readEnterDown;
+    readFitTa(); readTa.focus(); const n = readTa.value.length; try { readTa.setSelectionRange(n, n); } catch (x) { /* 무시 */ }
+    renderReadInput();
+  }
+  readInputBox.addEventListener('keydown', (e) => { // 목록 키: 입력창 위쪽(상자)에서 캡처 단계로 받아 입력창의 보내기 처리(아래)보다 먼저 돈다
+    if (e.target !== readTa || readCmdEl.hidden || !readCmdShown.length) return;
+    if (e.isComposing || e.keyCode === 229 || readComposing || Date.now() - readComposeEnd < 50) return; // 조합 중에는 가로채지 않는다
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const n = readCmdShown.length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { if (e.shiftKey) return; e.preventDefault(); e.stopImmediatePropagation(); readCmdSel = (readCmdSel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; readCmdSig = ''; readCmdRefresh(); return; }
+    if (e.key === 'Tab' && !e.shiftKey) { // Enter 는 가로채지 않는다: 입력창의 보내기 처리(readSendNow)가 slashEnterAction 으로 정한다. Tab 은 고른 항목을 `/이름 ` 으로 채운다
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (e.repeat) return;
+      const x = readCmdShown[readCmdSel]; if (x) readCmdFill(x.name);
+      return;
+    }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); readCmdEsc = true; readCmdHide(); }
+  }, true);
   document.addEventListener('keydown', (e) => { if (e.key === 'Enter') readEnterDown = true; }, true); // 지금 Enter 가 눌려 있나(단추를 Enter 로 눌러 채웠는지 알기 위해)
-  document.addEventListener('keyup', (e) => { if (e.key === 'Enter') { readEnterDown = false; readFillHeld = false; } }, true);
-  window.addEventListener('blur', () => { readEnterDown = false; readFillHeld = false; }); // 창을 떠나면 keyup 을 못 받을 수 있다
+  document.addEventListener('keyup', (e) => { if (e.key === 'Enter') { readEnterDown = false; readFillHeld = false; readEnterDone = false; } }, true);
+  window.addEventListener('blur', () => { readEnterDown = false; readFillHeld = false; readEnterDone = false; }); // 창을 떠나면 keyup 을 못 받을 수 있다
+  let readEnter = { at: NaN, plain: false, repeat: false }; // 마지막 Enter keydown 의 시각·보통 Enter 여부·반복 여부(조합 중의 Enter 도 적는다)
+  let readEnterDone = false; // beforeinput 길이 이번 Enter 를 이미 처리했다
+  let readLbFix = ''; // beforeinput 을 취소할 수 없었을 때: 다음 input 에서 들어간 줄바꿈 한 글자를 지우고 'send' 면 보낸다
+  function readEnterNote(e) {
+    if (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter') readEnter = { at: Date.now(), plain: !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey, repeat: e.repeat === true };
+    else if (!(e.keyCode === 229 && (e.key === 'Process' || e.key === 'Unidentified'))) readEnter.at = NaN; // 다른 키가 오면 지운다. 조합 키(229)는 지우지 않는다
+  }
   readTa.addEventListener('keydown', (e) => {
+    readEnterNote(e);
+    if ((e.key === 'Tab' || e.key === 'ArrowRight') && readGhost !== '' && readTa.value === '' && readCmdEl.hidden && !e.isComposing && e.keyCode !== 229 && !readComposing && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) { // 추천 글 채우기: 그 밖의 Tab 은 초점 이동 그대로다
+      e.preventDefault();
+      if (!e.repeat) readGhostFill();
+      return;
+    }
+    if (e.key !== 'Enter' || (!e.isComposing && e.keyCode !== 229)) readLbFix = ''; // 줄바꿈을 지우려던 표시는 다음 키에서 버린다
+    if (readEnterDone && e.key === 'Enter') { if (!e.shiftKey && !e.isComposing && e.keyCode !== 229) e.preventDefault(); return; }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) { // Cmd+Enter(다른 운영체제는 Ctrl+Enter): 지금 보내기. 조합 중이거나 길게 눌러 반복되면 보내지 않는다
+      e.preventDefault();
+      if (e.isComposing || e.keyCode === 229 || readComposing || e.repeat) return;
+      readSendNow({ now: true });
+      return;
+    }
     if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return; // Shift+Enter 는 줄바꿈(기본 동작)
-    if (e.isComposing || e.keyCode === 229 || readComposing || Date.now() - readComposeEnd < 50) return; // 한글 등 조합 중의 Enter 는 조합 확정용이다(터미널 입력과 같은 판단)
+    if (e.isComposing || e.keyCode === 229 || readComposing) return; // 조합 중의 Enter 는 조합 확정용이라 여기서 보내지 않는다. 줄바꿈이 들어가려 하면 아래 beforeinput 이 잡는다
     if (e.repeat) { e.preventDefault(); return; } // 길게 눌러 반복되는 Enter 는 보내지 않는다
     if (readFillHeld || Date.now() - readFillAt < 500) { e.preventDefault(); return; } // 단추로 채운 직후 500ms, 그리고 채울 때 눌려 있던 Enter 를 뗄 때까지는 조용히 무시한다
     e.preventDefault();
+    readEnter.at = NaN; // 이 Enter 는 여기서 보낸다: beforeinput 길이 같은 Enter 로 또 보내지 않는다
     readSendNow();
+  });
+  // 줄바꿈이 들어가려는 순간을 잡는다(조합이 끝난 직후의 빠른 Enter 포함). 일본어처럼 Enter 가 변환 확정만 하고 줄바꿈을 만들지 않는 입력기에서는 이 이벤트가 오지 않으므로 보내지 않는다
+  readTa.addEventListener('beforeinput', (e) => {
+    if (e.inputType !== 'insertLineBreak' && e.inputType !== 'insertParagraph') return;
+    const v = Lib.enterLineBreakVerdict({ now: Date.now(), enterAt: readEnter.at, enterPlain: readEnter.plain, enterRepeat: readEnter.repeat, fillHeld: readFillHeld, fillAt: readFillAt });
+    if (v === 'newline') return;
+    if (v === 'block') { if (e.cancelable) e.preventDefault(); else readLbFix = 'block'; return; }
+    readEnter.at = NaN; // 같은 Enter 한 번이 보내기를 두 번 일으키지 않는다
+    readEnterDone = true; // 같은 Enter 의 keydown 이 뒤따라 와도 또 보내지 않는다(keyup 에서 푼다)
+    const at = readCurId;
+    if (e.cancelable) { e.preventDefault(); setTimeout(() => { if (at === readCurId && at === activeId) readSendNow(); }, 0); } // 조합이 끝난 글을 읽도록 한 틱 뒤에 보낸다. 그 사이 작업 공간이 바뀌었으면 보내지 않는다
+    else readLbFix = 'send';
   });
   readSendBtn.addEventListener('click', () => { readSendNow(); });
   function initRead(init) {
-    if (colsStore) { try { readStore = Lib.readParseStore(localStorage.getItem(Lib.READ_STORE_KEY)); } catch (x) { readStore = {}; } } // 스모크·가짜 화면(colsStore 거짓)에서는 읽지도 쓰지도 않는다
+    if (colsStore) { try { readStore = Lib.readStoreStart(Lib.readParseStore(localStorage.getItem(Lib.READ_STORE_KEY))); } catch (x) { readStore = {}; } } // 스모크·가짜 화면(colsStore 거짓)에서는 읽지도 쓰지도 않는다
     const m = init && typeof init.uiOpen === 'string' ? init.uiOpen : '';
-    if (m === 'read' || m === 'readrail' || m === 'readwait' || m === 'readsurf' || m === 'readsurftop' || m === 'readempty') readDevDefault = { on: true, w: Lib.READ_TERM_DEFAULT, rail: m !== 'read' && m !== 'readsurf' && m !== 'readsurftop' }; // 시험 전용: 저장값이 없는 작업 공간은 켜진 채로
+    if (m === 'read' || m === 'readrail' || m === 'readwait' || m === 'readsurf' || m === 'readsurftop' || m === 'readempty' || m === 'readcmd' || m === 'readatt' || m === 'readghost' || m === 'readlive' || m === 'readlivedone' || m === 'readbusy') readDevDefault = { on: true, w: Lib.READ_TERM_DEFAULT, rail: m !== 'read' && m !== 'readsurf' && m !== 'readsurftop' }; // 시험 전용: 저장값이 없는 작업 공간은 켜진 채로
     else if (!colsStore) readDevDefault = { on: false, w: Lib.READ_TERM_DEFAULT, rail: false }; // 스모크·다른 가짜 화면은 새 기본값(읽기 화면 켜짐)을 따르지 않고 예전 화면 그대로 둔다
-    readDevWait = m === 'readwait'; readDevSend = m === 'read' || m === 'readrail' || m === 'readsurf' || m === 'readsurftop' || m === 'readempty'; readDevTop = m === 'readsurftop';
+    readDevWait = m === 'readwait'; readDevLive = m === 'readlive'; readDevBusy = m === 'readbusy'; readDevSend = m === 'read' || m === 'readrail' || m === 'readsurf' || m === 'readsurftop' || m === 'readempty' || m === 'readcmd' || m === 'readatt' || m === 'readghost'; readDevGhost = m === 'readghost'; readDevCmd = m === 'readcmd'; readDevAtt = m === 'readatt'; readDevTop = m === 'readsurftop';
     applyReadLayout();
   }
 
@@ -1376,17 +1799,20 @@
 
   // ---- 원격 제어 토글(터미널 위 막대): 상태는 main 이 정한 w.rc 를 그대로 그린다. 눌러도 main 이 문장을 보내고 확인된 증거가 올 때까지 표시가 바뀌지 않는다 ----
   const RC_STATES = ['off', 'on', 'turning-on', 'turning-off', 'unknown'];
+  const RC_BTNS = [$('rc-toggle'), $('rc-toggle-read')];
   function renderRc() {
     applyReadLayout(); // 상세 화면이 열리고 닫힐 때와 활성 작업 공간이 바뀔 때마다 여기를 지나므로, 읽기 배치도 같이 맞춘다
-    const b = $('rc-toggle'); if (!b) return;
     const a = wsList.find((w) => w.id === activeId);
-    b.hidden = !a || detailOpen; // 활성 작업 공간이 없거나 상세 화면이 터미널을 가리면 숨긴다
-    if (b.hidden) return;
-    const st = RC_STATES.includes(a.rc) ? a.rc : 'off';
-    b.dataset.rc = st; b.setAttribute('aria-checked', String(st === 'on' || st === 'turning-on'));
-    b.querySelector('.rc-label').textContent = T('rc.label.' + st);
-    b.title = T('rc.title'); b.setAttribute('aria-description', T('rc.title'));
-    b.disabled = a.cc !== true || a.state === 'exited'; // Claude 화면이 아니거나 끝난 세션이면 숨기지 않고 끈다
+    for (const b of RC_BTNS) { // 터미널 막대의 토글과 읽기 화면 머리의 토글: 같은 상태를 그리고 같은 처리를 부른다
+      if (!b) continue;
+      b.hidden = !a || detailOpen; // 활성 작업 공간이 없거나 상세 화면이 터미널을 가리면 숨긴다
+      if (b.hidden) continue;
+      const st = RC_STATES.includes(a.rc) ? a.rc : 'off';
+      b.dataset.rc = st; b.setAttribute('aria-checked', String(st === 'on' || st === 'turning-on'));
+      b.querySelector('.rc-label').textContent = T('rc.label.' + st);
+      b.title = T('rc.title'); b.setAttribute('aria-description', T('rc.title'));
+      b.disabled = a.cc !== true || a.state === 'exited'; // Claude 화면이 아니거나 끝난 세션이면 숨기지 않고 끈다
+    }
   }
   const rcErrKey = (r) => 'rc.err.' + (['no-session', 'shell', 'not-ready', 'waiting', 'busy', 'unknown', 'draft', 'pending', 'inactive', 'busy-ui'].includes(r) ? r : 'invalid');
   async function rcClick() {
@@ -1397,7 +1823,7 @@
     if (!res || !res.ok) note(T(rcErrKey(res && res.reason)));
     else { syncWs(); focusTerm(); } // 성공: 터미널로 포커스를 돌려 사용자가 곧바로 Claude 의 확인 질문에 답할 수 있게 한다
   }
-  $('rc-toggle').addEventListener('click', rcClick);
+  for (const b of RC_BTNS) if (b) b.addEventListener('click', rcClick);
   window.maru.onRcToggle(() => { rcClick(); }); // 앱 메뉴도 같은 처리
 
   let noteTimer = null;
