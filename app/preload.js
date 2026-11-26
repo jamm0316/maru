@@ -74,6 +74,11 @@ contextBridge.exposeInMainWorld('maru', {
   setCalendar: (on) => ipcRenderer.invoke('calendar:set', on === true),
   // 하위 세션: 작업 공간 id·불리언만 싣는다. 보고는 읽기 전용 목록(main 이 검증해 보낸 평문)
   getReports: (id) => ipcRenderer.invoke('reports:get', String(id)),
+  // 읽기 화면의 대화 기록: 작업 공간 id 와 마지막으로 받은 판 표시(key)만 싣는다. 경로는 main 이 정한다
+  talkGet: (id, key) => ipcRenderer.invoke('talk:get', { id: String(id).slice(0, 64), key: typeof key === 'string' ? key.slice(0, 64) : '' }),
+  // 읽기 화면 입력창: 글을 터미널에 보낸다. 검사·정리는 main 이 다시 한다
+  readSend: (id, text) => ipcRenderer.invoke('read:send', { id: String(id).slice(0, 64), text }),
+  readMark: (kind) => ipcRenderer.send('read:mark', kind === 'on' ? 'on' : ''), // 읽기 화면을 단추로 켰다는 표지(횟수만 센다)
   setWsCollapsed: (id, on) => ipcRenderer.invoke('ws:set-collapsed', String(id), on === true),
   // 동의 창 답: 한 번만 쓰는 토큰과 'open'|'cancel' 만. main 이 토큰·보낸 창을 다시 검증한다
   answerChildConsent: (token, answer, squad) => ipcRenderer.invoke('child:answer', String(token).slice(0, 64), answer === 'open' ? 'open' : 'cancel', typeof squad === 'string' ? squad.slice(0, 40) : null), // squad: 고른 팀 slug 또는 null(팀 없이). main 이 설치된 목록과 다시 대조한다

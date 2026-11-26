@@ -40,6 +40,7 @@
   <div class="cols" id="cols">
     <div class="col-handle l" id="col-l" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-aria="cols.left.aria" aria-label="왼쪽 패널 너비 조절"></div>
     <div class="col-handle r" id="col-r" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-aria="cols.right.aria" aria-label="오른쪽 패널 너비 조절"></div>
+    <div class="col-handle rd" id="read-h" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-aria="read.handle.aria" aria-label="터미널 너비 조절" hidden></div>
     <nav class="left" aria-label="작업 공간" data-i18n-aria="nav.ws.aria">
       <section class="card ws-card">
         <div class="head"><h2 class="eyebrow" data-i18n="ws.eyebrow">작업 공간</h2>
@@ -76,8 +77,31 @@
       </div>
     </nav>
 
+    <section class="read-wrap" id="read" role="region" aria-labelledby="read-title" hidden>
+      <div class="read-top">
+        <h2 class="read-title" id="read-title" data-i18n="read.title">읽기 화면</h2>
+        <button type="button" class="btn ghost read-x" id="read-close" data-i18n="read.close" data-i18n-aria="read.close.aria" aria-label="읽기 화면 끄기">닫기</button>
+      </div>
+      <div class="read-body" id="read-body" role="log" aria-live="off" tabindex="0" data-i18n-aria="read.log.aria" aria-label="질문과 답변">
+        <div class="read-col">
+          <div class="read-list" id="read-list"></div>
+          <div class="read-status" id="read-status" role="status" hidden></div>
+        </div>
+      </div>
+      <div class="read-input-wrap">
+        <div class="read-col">
+          <div class="read-input" id="read-input">
+            <textarea id="read-ta" class="read-ta" rows="1" spellcheck="false" autocomplete="off" data-i18n-aria="read.input.aria" aria-label="Claude 에게 보낼 글"></textarea>
+            <button type="button" id="read-send" class="btn read-send" data-i18n="read.send" data-i18n-aria="read.send.aria" aria-label="보내기">보내기</button>
+          </div>
+          <p class="read-input-note" id="read-input-note" role="status" hidden></p>
+        </div>
+      </div>
+    </section>
+
     <main class="term-wrap">
-      <div class="term-bar"><span class="accent">●</span><span id="term-name">maru</span><span id="term-cwd">~</span><span class="right">claude</span><button type="button" id="rc-toggle" class="rc-toggle" role="switch" aria-checked="false" hidden><span class="rc-track" aria-hidden="true"><span class="rc-thumb"></span></span><span class="rc-label"></span></button></div>
+      <div class="term-bar"><span class="accent">●</span><span id="term-name">maru</span><span id="term-cwd">~</span><span class="right">claude</span><button type="button" id="rc-toggle" class="rc-toggle" role="switch" aria-checked="false" hidden><span class="rc-track" aria-hidden="true"><span class="rc-thumb"></span></span><span class="rc-label"></span></button><button type="button" id="read-toggle" class="read-btn" aria-pressed="false" data-i18n="read.toggle" data-i18n-aria="read.toggle.aria" aria-label="읽기 화면" hidden>읽기 화면</button><button type="button" id="read-fold" class="read-btn" data-i18n="read.fold" data-i18n-aria="read.fold.aria" data-i18n-title="read.fold.aria" aria-label="터미널 접기" title="터미널 접기" hidden>터미널 접기</button><button type="button" id="read-back" class="read-btn" data-i18n="read.back" data-i18n-aria="read.back.aria" aria-label="읽기 화면으로 돌아가기" hidden>읽기 화면으로</button></div>
+      <button type="button" id="read-rail" class="read-rail" data-i18n-aria="read.rail.aria" data-i18n-title="read.rail.aria" aria-label="터미널 펼치기" title="터미널 펼치기" hidden><span class="read-rail-arrow" aria-hidden="true">‹</span><span class="read-rail-t" data-i18n="read.rail">터미널</span><span class="read-rail-dot" id="read-rail-dot" aria-hidden="true"></span></button>
       <div id="terminal"></div>
       <section id="proj-detail" class="proj-detail" role="region" aria-labelledby="pd-title" hidden>
         <div class="pd-top">

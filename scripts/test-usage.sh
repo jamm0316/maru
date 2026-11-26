@@ -138,9 +138,9 @@ d = json.loads(a[1])
 sl = d["statusLine"]
 assert sl["type"] == "command" and shlex.split(sl["command"]) == [sys.argv[2]], sl
 assert (sys.argv[3] == "hooks") == ("hooks" in d), sorted(d)
-if "hooks" in d: assert len(d["hooks"]) == 7
+if "hooks" in d: assert len(d["hooks"]) == 8
 ' "$SO" "$R/scripts/usage-status.sh" "$1"; }
-wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "저장소 밖(공백 폴더): 유효한 JSON, statusLine + 훅 7종" settings_check hooks
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "저장소 밖(공백 폴더): 유효한 JSON, statusLine + 훅 8종" settings_check hooks
 wrap_in "$R" MARU_APP_SESSION=inroot-12345; check "저장소 루트: 유효한 JSON, statusLine 만(훅 없음)" settings_check none
 mkdir -p "$R/sub"; wrap_in "$R/sub" MARU_APP_SESSION=insub-12345; check "저장소 하위 폴더: statusLine + 훅" settings_check hooks
 wrap_in "$R" ; check "MARU_APP_SESSION 없음: 인자 없음" [ ! -s "$SO" ]

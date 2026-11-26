@@ -4190,6 +4190,508 @@ function panelKeyDelta(side, key, shift) {
   return side === 'left' ? (toRight ? step : -step) : (toRight ? -step : step);
 }
 
+// ---- 읽기 화면 배치·표 정렬·작업 공간별 상태 ----
+const READ_TERM_DEFAULT = 420; // 읽기 화면을 켰을 때 터미널 기본 폭
+const READ_TERM_MIN = 320;
+const READ_MAIN_MIN = 360; // 읽기 영역이 항상 남겨야 할 폭
+const READ_STORE_KEY = 'maru.read.v1';
+const READ_STORE_MAX = 100; // 저장하는 작업 공간 수 상한
+// 좁은 창(읽기 영역만 보이고 터미널은 띠로 접힌다). 창 너비를 모르면 좁지 않다고 본다
+function readIsNarrow(viewportWidth) { const v = panelVw(viewportWidth); return v !== null && v <= PANEL_NARROW_MAX; }
+// 터미널이 가질 수 있는 가장 큰 폭: 창 - 여백 2개 - 간격 2개(왼쪽|읽기|터미널) - 왼쪽 열 - 읽기 영역 최소 폭. 최소값이 항상 이긴다
+function readTermMax(viewportWidth, leftWidth) {
+  const v = panelVw(viewportWidth); if (v === null) return READ_TERM_MIN;
+  const left = readIsNarrow(v) ? PANEL_LEFT_NARROW : panelNum(leftWidth, PANEL_DEFAULT.left);
+  return Math.max(READ_TERM_MIN, v - 4 * PANEL_PAD - left - READ_MAIN_MIN);
+}
+// 원하는 폭(숫자가 아니면 기본값) -> 화면에 적용할 폭
+function readTermWidth(want, viewportWidth, leftWidth) {
+  return Math.max(READ_TERM_MIN, Math.min(readTermMax(viewportWidth, leftWidth), panelNum(want, READ_TERM_DEFAULT)));
+}
+// 표 칸 글이 숫자 모양인가: 부호, 쉼표 묶음 또는 연속 숫자, 소수점, 끝의 % 만. 단위 글자가 붙으면 아니다
+// 앞자리 0 이 둘 이상인 값('00012')은 코드·식별자일 수 있어 숫자로 보지 않는다. '0'·'-0'·'0.5' 는 숫자다
+function readIsNumText(s) { if (typeof s !== 'string') return false; const t = s.trim(); return /^[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?$/.test(t) && !/^[+-]?0{2,}/.test(t); }
+// 열 정렬 목록. align 이 있으면 그대로, 없으면 본문 칸이 모두 숫자 모양(빈 칸은 건너뜀, 숫자 칸이 하나 이상)일 때 'right', 아니면 null
+function readTableAligns(table) {
+  const t = table && typeof table === 'object' ? table : {};
+  const head = Array.isArray(t.head) ? t.head : []; const rows = Array.isArray(t.rows) ? t.rows : []; const al = Array.isArray(t.align) ? t.align : [];
+  const txt = (cell) => (Array.isArray(cell) ? cell.map((p) => (p && typeof p.v === 'string' ? p.v : '')).join('') : '');
+  const out = [];
+  for (let k = 0; k < head.length; k++) {
+    if (al[k] === 'left' || al[k] === 'right' || al[k] === 'center') { out.push(al[k]); continue; }
+    let nums = 0; let other = 0;
+    for (const r of rows) { const s = txt(Array.isArray(r) ? r[k] : null).trim(); if (s === '') continue; if (readIsNumText(s)) nums++; else other++; }
+    out.push(nums > 0 && other === 0 ? 'right' : null);
+  }
+  return out;
+}
+// 저장 글 -> { <작업 공간 id>: { on, w, rail } }. 깨진 값은 버린다(id 는 64자 이하 문자열, 최대 READ_STORE_MAX 개)
+function readParseStore(text) {
+  let o = null; try { o = JSON.parse(text); } catch { return {}; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return {};
+  const out = {}; let n = 0;
+  for (const id of Object.keys(o)) {
+    if (n >= READ_STORE_MAX) break;
+    const v = o[id]; if (!id || id.length > 64 || id === '__proto__' || !v || typeof v !== 'object' || Array.isArray(v)) continue;
+    out[id] = { on: v.on === true, w: panelNum(v.w, READ_TERM_DEFAULT), rail: v.rail === true }; n++;
+  }
+  return out;
+}
+// store 에 id 의 상태 일부를 바꾼 새 객체. 상한을 넘으면 앞쪽(오래된) 것부터 뺀다
+function readStoreSet(store, id, patch) {
+  const base = store && typeof store === 'object' ? store : {}; const cur = base[id] || { on: false, w: READ_TERM_DEFAULT, rail: false }; const p = patch && typeof patch === 'object' ? patch : {};
+  const next = { on: p.on === undefined ? cur.on === true : p.on === true, w: p.w === undefined ? panelNum(cur.w, READ_TERM_DEFAULT) : panelNum(p.w, READ_TERM_DEFAULT), rail: p.rail === undefined ? cur.rail === true : p.rail === true };
+  const out = {}; for (const k of Object.keys(base)) if (k !== id) out[k] = base[k];
+  out[id] = next;
+  const keys = Object.keys(out); for (let i = 0; i < keys.length - READ_STORE_MAX; i++) delete out[keys[i]];
+  return out;
+}
+
+// ---- 읽기 화면 입력창: 보낼 글 정리와 보내도 되는지 판정(순수 함수). main 이 렌더러의 판단을 믿지 않고 다시 검사한다 ----
+const READ_LINE_SEP = new RegExp('[\\u2028\\u2029]', 'g'); // 줄 구분 문자(\n 으로 바꾼다)
+const READ_KEEP = [String.fromCodePoint(0x200C), String.fromCodePoint(0x200D), String.fromCodePoint(0xFE0F)]; // ZWNJ·ZWJ·변형 선택자 FE0F: 지우지 않는다
+const READ_INVISIBLE_ONLY = new RegExp('^[\\s\\u200C\\u200D\\uFE0F]*$');
+const READ_SEND_MAX = 16000; // 보낼 글의 길이 상한(정리 뒤, UTF-16 코드 단위)
+// 글 -> { ok:true, text } | { ok:false, reason:'invalid'|'empty'|'toolong' }. \r\n·\r 은 \n, 탭은 공백 하나, \n 만 남기고 ESC 를 포함한 제어 문자와 BAD_CHARS 계열은 지운다.
+// ESC 가 지워지므로 글 안의 붙여넣기 끝 표시(ESC[201~)는 힘을 잃는다(남는 "[201~" 는 그냥 글자다). 앞뒤 공백·빈 줄은 자른다.
+// U+2028·U+2029 는 \n 으로 바꾸고, ZWJ(U+200D)·ZWNJ(U+200C)·변형 선택자 U+FE0F 는 남긴다. 나머지(C0·C1·DEL·양방향 덮어쓰기·짝 없는 서로게이트 등)는 지운다
+function readCleanSend(s) {
+  if (typeof s !== 'string') return { ok: false, reason: 'invalid' };
+  if (s.length > READ_SEND_MAX * 4) return { ok: false, reason: 'toolong' }; // 정리 전의 터무니없는 크기는 훑지 않는다
+  // U+2028·U+2029 는 줄 구분이라 \n 으로 바꾼다. 터미널에서 제어 기능이 없는 ZWJ·ZWNJ·변형 선택자 FE0F 는 남긴다(이모지 묶음·일부 문자 체계가 깨진다)
+  const t = s.replace(/\r\n?/g, '\n').replace(READ_LINE_SEP, '\n').replace(/\t/g, ' ').replace(BAD_CHARS_G, (c) => (c === '\n' || READ_KEEP.includes(c) ? c : '')).trim();
+  if (!t || READ_INVISIBLE_ONLY.test(t)) return { ok: false, reason: 'empty' }; // 보이지 않는 글자뿐인 글은 보내지 않는다
+  if (t.length > READ_SEND_MAX) return { ok: false, reason: 'toolong' };
+  return { ok: true, text: t };
+}
+// 포그라운드 프로세스가 Claude Code 인가(순수). 허용 목록 방식이다: 이름을 모르거나 비었거나 셸이면 아니다.
+// knownName: 앱이 그 pty 에서 Claude 화면이 떴다고 판정한 시점의 포그라운드 이름(없으면 ''). 있으면 현재 이름이 그것과 같아야 하고, 없으면 이름 허용 목록(claude·node·버전 번호 모양)에 있어야 한다
+const CLAUDE_FRONT_NAMES = new Set(['claude']); // 'node' 는 넣지 않는다: 기억한 이름이 없을 때 node 대화형 셸이 통과하면 글이 코드로 실행된다(node 로 도는 설치는 기억한 이름으로만 통과한다)
+function procBase(name) {
+  if (typeof name !== 'string' || !name || name.length > 1024) return '';
+  return name.trim().replace(/\/+$/, '').split('/').pop().replace(/^-+/, '').toLowerCase();
+}
+function isClaudeFront(procName, knownName) {
+  const n = procBase(procName);
+  if (!n || isShellProcessName(n)) return false;
+  const k = procBase(knownName);
+  if (k && !isShellProcessName(k)) return n === k;
+  return CLAUDE_FRONT_NAMES.has(n) || /^\d+\.\d+\.\d+$/.test(n);
+}
+// 터미널이 스스로 보내는 응답만으로 이뤄진 글인가(순수, 엄격). 전체가 아래 응답의 이어 붙임일 때만 true 이고, 한 글자라도 다르면 false(= 사용자 입력으로 친다).
+//  포커스 알림 ESC[I / ESC[O, 커서 위치 보고 ESC[<숫자>;<숫자>R, 장치 속성 응답 ESC[?…c / ESC[>…c(숫자와 ; 만), 상태 보고 ESC[0n~ESC[3n.
+// isUserInput·draftStep 은 CSI 를 넓게 걸러서(방향키 ESC[A 까지 응답으로 본다) 이 판정에 쓰지 않는다. 빈 문자열·문자열이 아닌 값은 false
+// 단 ESC[1;2R ~ ESC[1;8R 은 Shift·Ctrl·Alt 와 F3 을 함께 누른 입력과 같은 모양이라 입력으로 본다(실제 보고가 1행 2~8열일 때 입력으로 치는 것은 안전한 쪽의 오판)
+const TERM_REPLY_RE = /^(?:\x1b\[[IO]|\x1b\[(?!1;[2-8]R)\d{1,5};\d{1,5}R|\x1b\[[?>][0-9;]{0,32}c|\x1b\[[0-3]n)+$/;
+function isTermReply(data) {
+  return typeof data === 'string' && data.length > 0 && data.length <= 4096 && TERM_REPLY_RE.test(data);
+}
+// 대화 기록 파일의 끝부분 글 -> { role, at(밀리초) } | null. 마지막 비지 않은 줄 하나만 본다(talkLine 과 같은 검증). 해석하지 못하면 null.
+// atStart: 이 글이 파일의 맨 처음부터인가(아니면 첫 줄이 잘렸을 수 있으므로 줄이 하나뿐일 때 믿지 않는다). at 은 기록의 초 단위 값을 밀리초로 바꾼다(상태 기록의 atMs 와 같은 단위)
+function talkLast(text, atStart) {
+  if (typeof text !== 'string') return null;
+  const lines = text.split('\n');
+  let i = lines.length - 1;
+  while (i >= 0 && !lines[i].trim()) i--;
+  if (i < 0) return null;
+  if (i === 0 && atStart !== true) return null; // 앞이 잘려 줄 일부일 수 있다
+  const c = talkLine(lines[i]);
+  return c ? { role: c.role, at: c.at * 1000 } : null;
+}
+// 입력창이 글을 터미널에 넣어도 되는가. 보내기를 통과하는 조합은 "모든 조건이 맞을 때" 하나뿐이다. 애매하면 거부한다.
+// 원칙: "방금 답변이 정상으로 끝났고 그 뒤로 터미널에 아무 입력도 없었다"가 확인될 때만 보낸다.
+// c = { hasTerm, cc(Claude 화면), procName, knownName, hooked(훅으로 상태가 들어오는 세션), ux(화면에 그리는 상태), bg(백그라운드 작업 수), bracketed, quietMs, dirty,
+//   rawState(상태 파일의 원래 기록 state; 낮추지 않은 값. 없으면 null), recAt(그 기록 시각, 밀리초 T), talkRole(대화 기록 마지막 줄의 role; 못 읽으면 null), talkAt(그 줄의 시각, 밀리초),
+//   inAt(작업 공간 pty 에 마지막으로 쓴 시각, 밀리초; 없으면 0), startAt(pty 를 띄운 시각, 밀리초) }
+//  -> { ok:true } | { ok:false, reason }. 이유의 우선순위는 검사 순서다:
+//   nosession(터미널·Claude 화면 아님, 상태 모름) > notclaude(앞에 있는 것이 Claude 가 아님) > waiting > busy(표시 상태·백그라운드 작업·표시가 idle 이 아닐 때의 원래 기록) >
+//   first(끝난 답변 없음·pty 가 기록보다 늦게 뜸) > failed(표시는 idle 인데 원래 기록이 idle 이 아님(중단된 턴 등)·그 시각의 assistant 줄 없음) > touched(답변 뒤 터미널 입력) > settling(출력이 아직 움직임) > draft(입력줄에 글)
+const READ_TALK_SLACK_MS = 15000;
+// 상태 기록 시각(recAt)은 훅이 파일을 다 쓴 시각이라 실제 턴 종료보다 조금 늦다. 그 틈의 입력이 "답변 앞"으로 판정되지 않게, 기록 시각보다 이만큼 앞선 입력까지 답변 뒤 입력으로 본다.
+// 턴이 이보다 길다는 가정이다. 틀리면(더 짧은 턴) 잘못 거부하는 쪽이라 안전하다
+const READ_IN_SLACK_MS = 2000; // idle 기록과 assistant 줄 시각이 이 안이어야 같은 턴의 끝으로 본다(Stop 훅이 둘을 거의 동시에 쓴다)
+function readCanSend(c) {
+  const { hasTerm, cc, procName, knownName, hooked, ux, bg, bracketed, quietMs, dirty, rawState, recAt, talkRole, talkAt, inAt, startAt } = c && typeof c === 'object' ? c : {};
+  if (hasTerm !== true || cc !== true) return { ok: false, reason: 'nosession' };
+  if (!isClaudeFront(procName, knownName)) return { ok: false, reason: 'notclaude' };
+  if (ux === 'waiting') return { ok: false, reason: 'waiting' };
+  if (ux === 'busy') return { ok: false, reason: 'busy' };
+  if (typeof bg !== 'number' || !(bg >= 0)) return { ok: false, reason: 'nosession' };
+  if (bg > 0) return { ok: false, reason: 'busy' }; // 백그라운드 작업이 끝나면 Claude 가 스스로 다음 턴을 시작할 수 있다(그 턴의 권한 확인 창이 입력을 받는다)
+  if (ux !== 'idle' && rawState === 'waiting') return { ok: false, reason: 'waiting' }; // 표시 상태는 낮춰졌어도(effectiveAgent: busy 기록이 20초 조용하면 idle) 원래 기록이 busy·waiting 이면 보내지 않는다(권한 확인 창은 출력 없이 멈춘다). 표시가 idle 인 경우는 아래 failed 가 맡는다
+  if (ux !== 'idle' && rawState === 'busy') return { ok: false, reason: 'busy' };
+  if (hooked !== true) return { ok: false, reason: 'nosession' }; // 상태를 알 수 없는 세션
+  if ((rawState === null || rawState === undefined) && ux === 'none') return { ok: false, reason: 'first' }; // 훅 기록이 아직 없다: 첫 메시지는 터미널에서
+  if (ux === 'idle' && rawState !== 'idle') return { ok: false, reason: 'failed' }; // 표시는 idle 인데 원래 기록은 idle 이 아니다: 사용자가 Esc 로 중단한 턴 등(답변으로 끝나지 않았다)
+  if (ux !== 'idle') return { ok: false, reason: 'nosession' }; // none·unknown·turnEnded 등
+  if (bracketed !== true) return { ok: false, reason: 'nosession' };
+  if (!Number.isFinite(recAt) || !Number.isFinite(startAt) || recAt < startAt) return { ok: false, reason: 'first' }; // 시각이 없거나, 이 pty 가 뜨기 전의 낡은 기록
+  if (talkRole === null || talkRole === undefined) return { ok: false, reason: 'first' }; // 대화 기록이 없거나 읽지 못했다
+  if (talkRole !== 'assistant' || !Number.isFinite(talkAt) || Math.abs(talkAt - recAt) > READ_TALK_SLACK_MS) return { ok: false, reason: 'failed' }; // 정상 종료(Stop)가 아니면 assistant 줄이 그 시각에 없다
+  if (!Number.isFinite(inAt) || inAt > recAt - READ_IN_SLACK_MS) return { ok: false, reason: 'touched' }; // 답변이 끝난 뒤 터미널에 입력이 있었다(읽기 입력 자신의 쓰기 포함)
+  if (!(Number.isFinite(quietMs) && quietMs >= READY_QUIET_MS)) return { ok: false, reason: 'settling' };
+  if (dirty !== false) return { ok: false, reason: 'draft' };
+  return { ok: true };
+}
+
+// ---- 읽기 화면 사용 횟수(내용 없이 날짜별 횟수만): { v:1, days: { 'YYYY-MM-DD': { on, sent } } } ----
+const READ_STATS_KEEP_DAYS = 60;
+const READ_STATS_MAX = 1000000; // 한 값의 상한
+const READ_STATS_FILE_MAX = 64 * 1024; // 파일 크기 상한(넘으면 빈 것으로 본다)
+const READ_STATS_DAY_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+// 지역 시간의 YYYY-MM-DD
+function readDayKey(date) {
+  const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+const readStatsInt = (v) => Number.isSafeInteger(v) && v >= 0;
+// 글 -> 검증된 구조. 깨졌거나 모양이 틀리면 빈 구조. 정수가 아닌 값·날짜 모양이 아닌 키·__proto__ 는 버린다
+function readStatsParse(text) {
+  const out = { v: 1, days: Object.create(null) };
+  let o = null;
+  try { o = typeof text === 'string' ? JSON.parse(text) : null; } catch { o = null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o) || o.v !== 1 || !o.days || typeof o.days !== 'object' || Array.isArray(o.days)) return { v: 1, days: {} };
+  for (const k of Object.keys(o.days)) {
+    if (!READ_STATS_DAY_RE.test(k)) continue;
+    const e = o.days[k];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    out.days[k] = { on: readStatsInt(e.on) ? Math.min(e.on, READ_STATS_MAX) : 0, sent: readStatsInt(e.sent) ? Math.min(e.sent, READ_STATS_MAX) : 0 };
+  }
+  return { v: 1, days: { ...out.days } };
+}
+// key 가 on|sent 일 때만 그날 값에 1 을 더하고 keepDays 보다 오래된 날을 지운 새 객체를 돌려준다(입력은 바꾸지 않는다)
+function readStatsBump(stats, day, key, keepDays = READ_STATS_KEEP_DAYS) {
+  const src = readStatsParse(JSON.stringify(stats));
+  if ((key !== 'on' && key !== 'sent') || typeof day !== 'string' || !READ_STATS_DAY_RE.test(day)) return src;
+  const cur = src.days[day] || { on: 0, sent: 0 };
+  src.days[day] = { ...cur, [key]: Math.min(cur[key] + 1, READ_STATS_MAX) };
+  const keep = Object.keys(src.days).sort().reverse().slice(0, Number.isSafeInteger(keepDays) && keepDays > 0 ? keepDays : READ_STATS_KEEP_DAYS);
+  const days = {};
+  for (const k of keep.sort()) days[k] = src.days[k];
+  return { v: 1, days };
+}
+// 파일 읽기(일반 파일만, 심볼릭 링크·큰 파일·없음이면 빈 구조)
+function readStatsLoad(file) {
+  const fs = require('fs');
+  try {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.size > READ_STATS_FILE_MAX) return { v: 1, days: {} };
+    return readStatsParse(fs.readFileSync(file, 'utf8'));
+  } catch { return { v: 1, days: {} }; }
+}
+// 파일 쓰기(임시 파일 + 이름 바꾸기, 모드 600). 실패하면 false
+function readStatsSave(file, stats) { return writeJsonAtomic(file, readStatsParse(JSON.stringify(stats)), 'read-stats'); }
+
+// ---- 마크다운 해석(읽기 화면용). 글 -> 블록 목록. 렌더러는 textContent 로만 그리므로 이스케이프하지 않는다 ----
+const MD_INPUT_MAX = 256 * 1024; // 입력 길이 상한. UTF-16 코드 단위 기준이라 글자 수와 다를 수 있다(넘는 뒷부분은 버린다)
+const MD_BLOCK_MAX = 400; // 블록 개수 상한
+const MD_TABLE_COLS = 12; // 표 열 상한
+const MD_TABLE_ROWS = 100; // 표 행 상한(머리줄 제외)
+const MD_CODE_LINES = 400; // 코드 블록 줄 상한
+const MD_PIECE_MAX = 20000; // 조각 v 와 코드 text 글자 상한
+const MD_LANG_MAX = 40;
+const MD_CELLS_MAX = 5000; // 표 칸 총수 상한(모든 표 합계, 머리줄 포함)
+const MD_PIECES_MAX = 20000; // 조각 총수 상한(모든 블록 합계)
+// 글을 max 길이(UTF-16 단위)로 자른다. 자른 끝이 짝 없는 높은 서로게이트면 한 칸 더 줄인다
+function mdCut(str, max) {
+  if (str.length <= max) return str;
+  let e = max; const c = str.charCodeAt(e - 1);
+  if (c >= 0xD800 && c <= 0xDBFF) e--;
+  return str.slice(0, e);
+}
+// 줄 안 꾸밈을 훑어 push(스타일, 글) 로 낸다. bold 면 일반 글도 'b' 조각이 된다(굵게 안쪽을 한 겹으로 편다).
+// 닫는 표시 검색은 위치를 기억하거나 한 번만 훑어 같은 곳을 다시 훑지 않는다(선형)
+function mdScan(s, bold, push) {
+  const n = s.length; const base = bold ? 'b' : 'text'; let buf = '';
+  const cache = Object.create(null);
+  const find = (needle, from) => { // from 이 늘어나기만 하는 호출에서만 쓴다
+    let p = cache[needle];
+    if (p === undefined || (p !== -1 && p < from)) { p = s.indexOf(needle, from); cache[needle] = p; }
+    return p;
+  };
+  const lastTick = s.lastIndexOf('`'); let boldDead = n + 1; // boldDead: 이 위치부터는 닫는 ** 가 없다고 이미 확인됨
+  const closeBold = (from) => { // from 부터 코드 조각 밖의 첫 ** 위치, 없으면 -1
+    let p = from;
+    while (p < n) {
+      const c = s.charCodeAt(p);
+      if (c === 96) { // 코드 조각이면 통째로 건너뛴다(짝이 없거나 바로 옆이면 글자)
+        const q = p === lastTick ? -1 : s.indexOf('`', p + 1);
+        p = q > p + 1 ? q + 1 : p + 1; continue;
+      }
+      if (c === 42 && s.charCodeAt(p + 1) === 42) return p;
+      p++;
+    }
+    return -1;
+  };
+  const flush = () => { if (buf) { push(base, buf); buf = ''; } };
+  const link = (at) => { // s[at] === '[' 일 때 [글](주소) 를 찾는다. {label,url,end} 또는 null
+    const j = find(']', at + 1);
+    if (j === -1 || s[j + 1] !== '(') return null;
+    const k = find(')', j + 2);
+    if (k === -1) return null;
+    return { label: s.slice(at + 1, j), url: s.slice(j + 2, k), end: k + 1 };
+  };
+  let i = 0;
+  while (i < n) {
+    const c = s[i];
+    if (c === '`') {
+      const j = find('`', i + 1);
+      if (j > i + 1) { flush(); push('c', s.slice(i + 1, j)); i = j + 1; continue; }
+    } else if (c === '*' && s[i + 1] === '*' && !bold) {
+      if (i + 2 < n && i + 2 < boldDead && !/\s/.test(s[i + 2])) {
+        const j = closeBold(i + 2);
+        if (j === -1) boldDead = i + 2;
+        else if (j > i + 2 && !/\s/.test(s[j - 1])) { flush(); mdScan(s.slice(i + 2, j), true, push); i = j + 2; continue; }
+      }
+    } else if (c === '[' || (c === '!' && s[i + 1] === '[')) {
+      const at = c === '[' ? i : i + 1; const r = link(at);
+      if (r) {
+        if (r.label) { flush(); mdScan(r.label, bold, push); if (r.url) push(base, ' (' + r.url + ')'); } else buf += r.url;
+        i = r.end; continue;
+      }
+    }
+    buf += c; i++;
+  }
+  flush();
+}
+// 줄 안 꾸밈 -> [{s,v}]. 이웃한 같은 종류(코드 제외)는 합친다. 조각 총수가 상한이면 남는 조각을 버린다
+function mdInline(src, st) {
+  const out = [];
+  mdScan(String(src), false, (s, v) => {
+    if (v === '') return;
+    const l = out[out.length - 1];
+    if (l && s !== 'c' && l.s === s) l.v += v; else out.push({ s, v });
+  });
+  const res = [];
+  for (const p of out) {
+    if (st.pieces >= MD_PIECES_MAX) { st.truncated = true; st.full = true; break; }
+    st.pieces++;
+    if (p.v.length > MD_PIECE_MAX) { st.truncated = true; res.push({ s: p.s, v: mdCut(p.v, MD_PIECE_MAX) }); } else res.push(p);
+  }
+  return res;
+}
+const MD_FENCE_RE = /^([ \t]*)(`{3,}|~{3,})(.*)$/; // 1: 들여쓰기, 2: 펜스, 3: 나머지(들여쓰기 칸 수는 가리지 않는다)
+const MD_HEAD_RE = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
+const MD_LIST_RE = /^([ \t]*)([-*]|\d{1,9}\.)[ \t]+(.*)$/;
+function mdIsHr(line) { return /^(-{3,}|\*{3,}|_{3,})$/.test(line.replace(/[ \t]/g, '')); }
+function mdIsTable(line) { return /^[ \t]*\|/.test(line); }
+function mdIsQuote(line) { return /^ {0,3}>/.test(line); }
+function mdListItem(line) {
+  const m = MD_LIST_RE.exec(line);
+  if (!m) return null;
+  let indent = 0; for (const ch of m[1]) indent += ch === '\t' ? 4 : 1;
+  const ordered = m[2].length > 1 || /\d/.test(m[2]);
+  return { indent, type: ordered ? 'ol' : 'ul', num: ordered ? parseInt(m[2], 10) : 0, text: m[3].trim() };
+}
+function mdTableStart(line) { return mdIsTable(line) && line.trim() !== '|'; } // | 하나뿐인 줄은 칸이 없어 표를 열지 못한다(이미 열린 표의 행으로는 쓰인다)
+// 문단 도중(inPara)에는 1. 로 시작하는 번호 항목만 목록을 연다. 그 밖의 숫자 줄은 문단에 이어진다
+function mdIsStart(line, inPara) {
+  if (MD_FENCE_RE.test(line) || MD_HEAD_RE.test(line) || mdIsHr(line) || mdTableStart(line) || mdIsQuote(line)) return true;
+  const li = mdListItem(line);
+  return !!li && !(inPara && li.type === 'ol' && li.num !== 1);
+}
+// 표 구분 줄이면 칸 배열, 아니면 null. - 와 | 와 : 와 공백만으로 되고 - 와 | 가 모두 있어야 한다
+function mdSepCells(line) {
+  if (line === undefined || !/^[-|: \t]+$/.test(line) || !line.includes('-') || !line.includes('|')) return null;
+  const sc = mdCells(line);
+  return sc.length > 0 && sc.every((c) => /^:?-+:?$/.test(c)) ? sc : null;
+}
+// 표 한 줄 -> 칸 글자 배열. 맨 앞 | 와 맨 뒤 | 는 칸이 아니다. \| 는 글자 |
+function mdCells(line) {
+  const t = line.trim(); const cells = []; let cur = ''; let endsSep = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]; endsSep = false;
+    if (ch === '\\' && t[i + 1] === '|') { cur += '|'; i++; } else if (ch === '|') { cells.push(cur); cur = ''; endsSep = true; } else cur += ch;
+  }
+  cells.push(cur);
+  if (t[0] === '|') cells.shift();
+  if (endsSep) cells.pop();
+  return cells.map((c) => c.trim());
+}
+function mdAlignOf(cell) {
+  const l = cell[0] === ':'; const r = cell[cell.length - 1] === ':';
+  return l && r ? 'center' : l ? 'left' : r ? 'right' : null;
+}
+function mdParse(text) {
+  const st = { truncated: false, full: false, pieces: 0, cells: 0 }; const blocks = []; let clean = '';
+  try {
+    if (typeof text !== 'string') return { blocks: [], truncated: false };
+    if (text.length > MD_INPUT_MAX) { text = mdCut(text, MD_INPUT_MAX); st.truncated = true; }
+    // 탭과 \n 만 남기고 BAD_CHARS 에 드는 문자를 지운다. 줄 구분 문자(U+2028/2029)는 \n 으로 바꾼다
+    clean = text.replace(/\r\n/g, '\n').replace(BAD_CHARS_G, (c) => (c === '\t' || c === '\n' ? c : c === ' ' || c === ' ' ? '\n' : ''));
+    const lines = clean.split('\n');
+    const nl = lines.length;
+    const add = (b) => { if (blocks.length >= MD_BLOCK_MAX) { st.truncated = true; return false; } blocks.push(b); return !st.full; };
+    let i = 0;
+    while (i < nl) {
+      const line = lines[i];
+      if (line.trim() === '') { i++; continue; }
+      let m = MD_FENCE_RE.exec(line);
+      if (m && !(m[2][0] === '`' && m[3].includes('`'))) { // 코드 펜스
+        const ind = m[1].length; const ch = m[2][0]; const len = m[2].length; const lang = m[3].trim().split(/\s/)[0].slice(0, MD_LANG_MAX);
+        const body = []; let cut = false; i++;
+        while (i < nl) {
+          const cl = lines[i]; const cm = MD_FENCE_RE.exec(cl);
+          if (cm && cm[2][0] === ch && cm[2].length >= len && cm[3].trim() === '') { i++; break; }
+          if (body.length < MD_CODE_LINES) { let k = 0; while (k < ind && (cl[k] === ' ' || cl[k] === '\t')) k++; body.push(cl.slice(k)); } else cut = true; // 여는 펜스의 들여쓰기만큼만 걷는다
+          i++;
+        }
+        let code = body.join('\n');
+        if (code.length > MD_PIECE_MAX) { code = mdCut(code, MD_PIECE_MAX); cut = true; }
+        const b = { t: 'code', lang, text: code };
+        if (cut) { b.cut = true; st.truncated = true; }
+        if (!add(b)) break;
+        continue;
+      }
+      m = MD_HEAD_RE.exec(line);
+      if (m) { if (!add({ t: 'h', level: Math.min(m[1].length, 3), inl: mdInline(m[2].trim(), st) })) break; i++; continue; }
+      if (mdIsHr(line)) { if (!add({ t: 'hr' })) break; i++; continue; }
+      const pipeless = !mdIsTable(line) && line.includes('|') && mdSepCells(lines[i + 1]) !== null && !MD_LIST_RE.test(line) && !mdIsQuote(line); // 첫 칸 앞 | 가 없는 표: 다음 줄이 구분 줄일 때만
+      if (mdTableStart(line) || pipeless) { // 표
+        const rowsRaw = [lines[i++]];
+        if (pipeless) { rowsRaw.push(lines[i++]); while (i < nl && lines[i].trim() !== '' && lines[i].includes('|') && !mdIsStart(lines[i])) rowsRaw.push(lines[i++]); } else while (i < nl && mdIsTable(lines[i])) rowsRaw.push(lines[i++]);
+        const headCells = mdCells(rowsRaw[0]); let align = []; let from = 1;
+        if (rowsRaw.length > 1) {
+          const sc = mdSepCells(rowsRaw[1]);
+          if (sc) { align = sc.map(mdAlignOf); from = 2; }
+        }
+        const width = Math.min(headCells.length, MD_TABLE_COLS); let cut = headCells.length > MD_TABLE_COLS;
+        const fit = (cells) => { // 칸 총수 상한을 넘기면 null
+          if (st.cells + width > MD_CELLS_MAX) { st.truncated = true; st.full = true; return null; }
+          st.cells += width; const r = []; for (let k = 0; k < width; k++) r.push(mdInline(cells[k] === undefined ? '' : cells[k], st)); return r;
+        };
+        const head = fit(headCells);
+        if (!head) break;
+        const rows = [];
+        for (let k = from; k < rowsRaw.length && !st.full; k++) {
+          if (rows.length >= MD_TABLE_ROWS) { cut = true; break; }
+          const r = fit(mdCells(rowsRaw[k]));
+          if (!r) { cut = true; break; }
+          rows.push(r);
+        }
+        const al = []; for (let k = 0; k < width; k++) al.push(align[k] === undefined ? null : align[k]);
+        const b = { t: 'table', align: al, head, rows };
+        if (cut) { b.cut = true; st.truncated = true; }
+        if (!add(b)) break;
+        continue;
+      }
+      if (mdIsQuote(line)) { // 인용
+        const parts = []; while (i < nl && mdIsQuote(lines[i])) { const q = lines[i++].replace(/^ {0,3}>[ \t]?/, '').trim(); if (q) parts.push(q); }
+        if (!add({ t: 'quote', inl: mdInline(parts.join(' '), st) })) break;
+        continue;
+      }
+      const first = mdListItem(line);
+      if (first) { // 목록: 첫 항목 들여쓰기보다 2칸 이상 깊으면 하위 항목
+        const items = []; let cur = null; let last = null;
+        while (i < nl) {
+          const ln = lines[i];
+          if (ln.trim() === '') { let k = i; while (k < nl && lines[k].trim() === '') k++; if (k < nl && !mdIsHr(lines[k]) && mdListItem(lines[k])) { i = k; continue; } break; }
+          if (mdIsHr(ln)) break;
+          const li = mdListItem(ln);
+          if (li) {
+            if (li.indent >= first.indent + 2 && cur) {
+              if (!cur.sub) cur.sub = { t: li.type, start: li.num, items: [] };
+              last = { raw: li.text }; cur.sub.items.push(last);
+            } else if (li.type !== first.type) break;
+            else { cur = { raw: li.text }; items.push(cur); last = cur; }
+          } else if (/^[ \t]{2,}/.test(ln) && !mdIsStart(ln) && last) last.raw += ' ' + ln.trim();
+          else break;
+          i++;
+        }
+        const b = { t: first.type, items: items.map((it) => {
+          const o = { inl: mdInline(it.raw, st) };
+          if (it.sub) { o.sub = { t: it.sub.t, items: it.sub.items.map((x) => ({ inl: mdInline(x.raw, st) })) }; if (it.sub.t === 'ol') o.sub.start = it.sub.start; }
+          return o;
+        }) };
+        if (first.type === 'ol') b.start = first.num;
+        if (!add(b)) break;
+        continue;
+      }
+      const para = [line.trim()]; i++; // 문단(모르는 모양도 여기로 온다)
+      while (i < nl && lines[i].trim() !== '' && !mdIsStart(lines[i], true)) para.push(lines[i++].trim());
+      if (!add({ t: 'p', inl: mdInline(para.join(' '), st) })) break;
+    }
+  } catch { // 예외가 나도 답변을 지우지 않는다: 정리한 원문 앞부분을 문단 하나로 낸다
+    try {
+      const v = mdCut(clean.trim(), MD_PIECE_MAX);
+      return { blocks: v ? [{ t: 'p', inl: [{ s: 'text', v }] }] : [], truncated: true };
+    } catch { return { blocks: [], truncated: true }; }
+  }
+  return { blocks, truncated: st.truncated };
+}
+
+// ---- 대화 기록(읽기 화면용). data/state/app/<세션 값>.talk.jsonl 의 글 -> 최근 항목 목록 ----
+const TALK_MAX_DEFAULT = 80; // 돌려줄 항목 수 기본값(최근 것부터)
+const TALK_USER_MAX = 20000; // 질문 글 길이 상한(UTF-16 단위, 넘으면 자르고 cut)
+const TALK_BLOCKS_MAX = 3000; // 결과 전체의 블록 수 상한(질문 하나는 블록 1개로 센다)
+const TALK_FILE_MAX = 16 * 1024 * 1024; // 이보다 큰 기록 파일은 읽지 않는다(훅이 8MB 근처에서 줄인다)
+const TALK_USER_TOTAL_MAX = 200000; // 결과 전체의 질문 글 길이 합계 상한(UTF-16 단위). 넘으면 오래된 항목부터 버린다
+// 읽기 결과의 key: <세션 값>:<mtimeMs>-<size>. 세션 값이 다르면 파일 시각·크기가 같아도 key 가 다르다
+function talkKey(sid, mtimeMs, size) { return String(sid) + ':' + mtimeMs + '-' + size; }
+// 호출자가 가진 key 가 지금 key 와 같은가(빈 key 는 같지 않다). 호출자마다 자기 key 로 판정한다
+function talkSame(callerKey, key) { return typeof callerKey === 'string' && callerKey !== '' && callerKey === key; }
+// 질문 글 정리: mdParse 와 같은 규칙(탭·\n 만 남기고 BAD_CHARS 를 지운다, \r\n·U+2028·U+2029 는 줄바꿈으로). 마크다운은 해석하지 않는다
+function talkCleanText(s) {
+  return s.replace(/\r\n/g, '\n').replace(BAD_CHARS_G, (c) => (c === '\t' || c === '\n' ? c : c === ' ' || c === ' ' ? '\n' : ''));
+}
+// 한 줄을 항목 후보로 바꾼다. 모양이 틀리면 null. 필요한 필드만 뽑아 새 객체를 만든다(__proto__ 등 다른 키는 옮기지 않는다)
+function talkLine(line) {
+  let o;
+  try { o = JSON.parse(line); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  const has = (k) => Object.prototype.hasOwnProperty.call(o, k);
+  const role = has('role') ? o.role : null; const at = has('at') ? o.at : null; const text = has('text') ? o.text : null;
+  if (role !== 'user' && role !== 'assistant') return null;
+  if (typeof text !== 'string') return null;
+  if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0) return null;
+  const lost = has('lost') && o.lost === true; const cut = has('cut') && o.cut === true;
+  if (!lost && text === '') return null; // 보일 글이 없다
+  return { role, at, text: lost ? '' : text, cut, lost };
+}
+// 기록 파일의 글 -> { items, more }. 끝에서부터 훑어 max 개만 해석한다(옛 줄은 해석하지 않는다). 예외를 던지지 않는다
+function talkParse(text, opts) {
+  try {
+    if (typeof text !== 'string') return { items: [], more: false };
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const max = Number.isInteger(o.max) && o.max >= 1 ? Math.min(o.max, 1000) : TALK_MAX_DEFAULT;
+    const lines = text.split('\n'); const got = []; let more = false;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const ln = lines[i]; if (!ln.trim()) continue;
+      const c = talkLine(ln); if (!c) continue;
+      if (got.length >= max) { more = true; break; }
+      got.push(c);
+    }
+    // got 는 최근 것부터. 끝에서부터 항목을 만들다가 블록 수·질문 글자 수 상한에 닿으면 더 오래된 것은 해석하지 않고 멈춘다(가장 최근 하나는 남긴다)
+    const blocksMax = Number.isInteger(o.blocksMax) && o.blocksMax >= 1 ? o.blocksMax : TALK_BLOCKS_MAX;
+    const userTotalMax = Number.isInteger(o.userTotalMax) && o.userTotalMax >= 1 ? o.userTotalMax : TALK_USER_TOTAL_MAX;
+    const items = []; let blocks = 0; let userChars = 0;
+    for (const c of got) {
+      let it; let nb = 0; let nc = 0;
+      if (c.role === 'user') {
+        let t = c.text; let cut = c.cut;
+        if (t.length > TALK_USER_MAX) { t = mdCut(t, TALK_USER_MAX); cut = true; }
+        it = { role: 'user', at: c.at, text: talkCleanText(t) };
+        if (cut) it.cut = true;
+        if (c.lost) it.lost = true;
+        nb = 1; nc = it.text.length;
+        if (items.length && userChars + nc > userTotalMax) { more = true; break; }
+      } else {
+        if (items.length && blocks >= blocksMax) { more = true; break; } // 이미 상한: 답변을 해석하지 않고 멈춘다
+        const m = c.lost ? { blocks: [], truncated: false } : mdParse(c.text);
+        it = { role: 'assistant', at: c.at, blocks: m.blocks, truncated: m.truncated };
+        if (c.cut) it.cut = true;
+        if (c.lost) it.lost = true;
+        nb = m.blocks.length || 1;
+      }
+      if (items.length && blocks + nb > blocksMax) { more = true; break; }
+      items.push(it); blocks += nb; userChars += nc;
+    }
+    items.reverse(); // 오래된 것 -> 최근 것
+    return { items, more };
+  } catch { return { items: [], more: false }; }
+}
+
 const api = {
   CHILD_MAX, CHILD_RATE_MAX, CHILD_RATE_MS, CHILD_DAY_MAX, REQ_MAX_BYTES, REQ_STALE_MS, REQ_NAME_RE, REPORT_NAME_RE, REPORT_MAX_BYTES, cleanPromptText, validAbsDir, childMacMessage, childMac, childMacOk, maruEligible, requesterOf, parseChildRequest, budgetOk, recordLaunch, validateBudget, readBudgetFile, saveBudgetFile, decideChildRequest, childLaunchCheck, parentUsable, childWindowReady, expandParent, consentAnswer, consentView, consentChoice, squadChoices, cleanSquadAsk, SQUAD_ASK_MAX, childReasonKey, childReasonCode, reqDirOk, takeChildRequests, purgeChildRequests,
   macSeen, rememberMac, noticeOk, logGate, CHILD_HEADER, PROMPT_FILE_MAX, childPromptText, CHILD_HEADER_USER, parseSubOpen, subDraftAdd, subDraftCheck, subDraftUse, subLimitCheck, subNoticeLine, cleanNoticePart, SUB_TITLE_MAX, SUB_BRIEF_MAX, SUB_DRAFT_MS, SUB_DRAFT_MAX, promptHandoff, childBriefPlan, briefAtSpawn, isMaruRootDir, writeChildPromptFile, cleanStalePromptFiles, childEnvVars, ptyEnv,
@@ -4220,6 +4722,9 @@ const api = {
   MEMV_FILES_MAX, MEMV_FILE_MAX_BYTES, MEMV_TOTAL_MAX_BYTES, MEMV_TYPES, MEMV_TAG_EDGE_MEMBERS_MAX, MEMV_EDGES_MAX, parseMemoryFile, buildMemoryModel, readMemoryFiles, buildMemoryGraph, simulateGraph, fitGraph, layoutGraph, graphDrift, graphStep, graphSettle, graphLabelCount, graphLabelOrder, GRAPH_LABEL_ALL_MAX, graphLabelOpacity, graphEaseView, GRAPH_DRIFT_AMP, GRAPH_DT_MAX_MS, filterMemories, memorySearchText, memoryDisplay, MEMV_CACHE_TTL_MS, MEMV_DIR_SCAN_MAX, MEM_FILE_RE, MEM_LINE_MAX,
   PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
   PANEL_DEFAULT, PANEL_RANGE, PANEL_CENTER_MIN, PANEL_STORE_KEY, panelRange, clampPanelWidths, parsePanelWidths, parseColsEnv, panelKeyDelta,
+  talkParse, talkCleanText, talkKey, talkSame, TALK_MAX_DEFAULT, TALK_USER_MAX, TALK_USER_TOTAL_MAX, TALK_BLOCKS_MAX, TALK_FILE_MAX,
+  READ_TERM_DEFAULT, READ_TERM_MIN, READ_MAIN_MIN, READ_STORE_KEY, READ_STORE_MAX, readIsNarrow, readTermMax, readTermWidth, readIsNumText, readTableAligns, readParseStore, readStoreSet, READ_SEND_MAX, readCleanSend, readCanSend, isClaudeFront, isTermReply, talkLast, READ_TALK_SLACK_MS, READ_STATS_KEEP_DAYS, READ_STATS_MAX, readDayKey, readStatsParse, readStatsBump, readStatsLoad, readStatsSave,
+  mdParse, MD_INPUT_MAX, MD_BLOCK_MAX, MD_TABLE_COLS, MD_TABLE_ROWS, MD_CODE_LINES, MD_PIECE_MAX, MD_CELLS_MAX, MD_PIECES_MAX,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.MaruLib = api; // 렌더러(번들러 없음)에서는 전역으로 노출

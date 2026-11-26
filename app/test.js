@@ -4542,9 +4542,10 @@ t('원격 토글 연결: main 은 고정 문장만 쓰고, 렌더러·메뉴·i1
   assert.ok(main.includes("const RC_COMMAND = '\\x1b[200~/remote-control\\x1b[201~\\r';"), '고정 문장');
   const fn = main.slice(main.indexOf('function rcToggle('), main.indexOf("ipcMain.handle('rc:toggle'"));
   assert.strictEqual((fn.match(/term\.write\(/g) || []).length, 1); assert.ok(fn.includes('w.term.write(RC_COMMAND)'));
-  assert.ok(/picking \|\| closing \|\| quitAsking \|\| restarting/.test(fn) && /w\.id !== activeId/.test(fn) && /L\.rcCanSend\(/.test(fn) && /view,/.test(fn));
+  assert.ok(/picking \|\| closing \|\| quitAsking \|\| restarting/.test(fn) && /w\.id !== activeId/.test(fn) && /L\.rcCanSend\(/.test(fn) && /sendCtxOf\(w, now\), view \}/.test(fn));
   assert.ok(!/typedN/.test(fn.replace(/\/\/.*/g, '')), 'typedN 은 올리지 않는다');
-  assert.ok(/L\.fillStep\(/.test(fn) && /claudeUpNow\(w\)/.test(fn), 'none 의 준비 판정은 prefillChild 와 같은 fillStep');
+  const ctx = main.slice(main.indexOf('function sendCtxOf('), main.indexOf('function rcToggle(')); // rcToggle 과 읽기 화면 입력창이 같이 쓰는 입력 모음
+  assert.ok(/L\.fillStep\(/.test(ctx) && /claudeUpNow\(w\)/.test(ctx), 'none 의 준비 판정은 prefillChild 와 같은 fillStep');
   assert.ok(/L\.rcMarkerOk\(/.test(main), '마커는 rcMarkerOk 를 거친다');
   assert.ok(/ipcMain\.handle\('rc:toggle', \(e, id\) => \{\n  const w = wsFrom\(e, id\);/.test(main), '발신자·작업 공간 검사');
   assert.ok(/rc: rcViewOf\(w, rec, now\)/.test(main) && /L\.rcScan\(w\.rcTail, d\)/.test(main) && /L\.draftStep\(w\.draft, data\)/.test(main));
@@ -4616,6 +4617,603 @@ t('usage i18n ko/en 키 일치 + 하단 띠 마크업', () => {
   assert.ok(/const \{ usage: \w+, \.\.\.rest \} = p;[^]*?const key = JSON\.stringify\(rest\);/.test(rdj) && !/JSON\.stringify\(p\)/.test(rdj.slice(rdj.indexOf('async function poll()'), rdj.indexOf('async function poll()') + 600)), 'usage 는 패널 키에서 제외');
   assert.strictEqual((html.match(/role="meter"/g) || []).length, 2);
   assert.ok(!/aria-live/.test(html.slice(html.indexOf('id="usage"'), html.indexOf('</footer>'))));
+});
+
+// ---- mdParse ----
+const mdTxt = (inl) => inl.map((p) => p.v).join('');
+const mdB = (s) => L.mdParse(s).blocks;
+t('mdParse 제목 단계와 #### 는 3단계', () => {
+  const b = mdB('# 하나\n## 둘\n### 셋\n#### 넷\n####### 일곱');
+  assert.deepStrictEqual(b.map((x) => x.t + (x.level || '')), ['h1', 'h2', 'h3', 'h3', 'p']);
+  assert.deepStrictEqual(b[0].inl, [{ s: 'text', v: '하나' }]);
+});
+t('mdParse 이어진 줄은 한 문단, 빈 줄은 문단 나눔', () => {
+  assert.deepStrictEqual(mdB('첫째 줄\n둘째 줄\n\n다음 문단'), [{ t: 'p', inl: [{ s: 'text', v: '첫째 줄 둘째 줄' }] }, { t: 'p', inl: [{ s: 'text', v: '다음 문단' }] }]);
+});
+t('mdParse 순서 없는 목록과 순서 있는 목록', () => {
+  const b = mdB('- 가\n* 나\n\n3. 다\n4. 라');
+  assert.strictEqual(b.length, 2);
+  assert.deepStrictEqual([b[0].t, b[0].items.map((i) => mdTxt(i.inl))], ['ul', ['가', '나']]);
+  assert.deepStrictEqual([b[1].t, b[1].start, b[1].items.map((i) => mdTxt(i.inl))], ['ol', 3, ['다', '라']]);
+});
+t('mdParse 하위 목록: 한 단계, 깊은 들여쓰기도 한 단계', () => {
+  const b = mdB('- 상위\n  - 하위1\n      - 깊은\n- 둘째\n  1. 번호');
+  assert.strictEqual(b.length, 1);
+  assert.deepStrictEqual(b[0].items[0].sub, { t: 'ul', items: [{ inl: [{ s: 'text', v: '하위1' }] }, { inl: [{ s: 'text', v: '깊은' }] }] });
+  assert.strictEqual(b[0].items[1].sub.t, 'ol'); assert.strictEqual(b[0].items[1].sub.start, 1);
+  assert.ok(!('sub' in b[0].items[1].sub.items[0]));
+});
+t('mdParse 목록 이어 쓴 줄은 항목에 붙고, **굵게** 줄은 목록이 아니다', () => {
+  const b = mdB('- 가\n  이어서\n**굵게** 문단');
+  assert.strictEqual(mdTxt(b[0].items[0].inl), '가 이어서');
+  assert.strictEqual(b[1].t, 'p'); assert.strictEqual(b[1].inl[0].s, 'b');
+});
+t('mdParse 표: 구분 줄 있음, 정렬만 뽑고 버린다', () => {
+  const b = mdB('| 이름 | 값 | 수 | 끝 |\n|---|:--:|--:|:--|\n| a | b | c | d |\n| e | f | g | h |');
+  assert.strictEqual(b.length, 1);
+  assert.strictEqual(b[0].t, 'table');
+  assert.deepStrictEqual(b[0].align, [null, 'center', 'right', 'left']);
+  assert.deepStrictEqual(b[0].head.map(mdTxt), ['이름', '값', '수', '끝']);
+  assert.deepStrictEqual(b[0].rows.map((r) => r.map(mdTxt)), [['a', 'b', 'c', 'd'], ['e', 'f', 'g', 'h']]);
+});
+t('mdParse 표: 구분 줄 없어도 첫 줄이 머리줄', () => {
+  const b = mdB('| a | b |\n| c | d |');
+  assert.deepStrictEqual(b[0].head.map(mdTxt), ['a', 'b']);
+  assert.deepStrictEqual(b[0].align, [null, null]);
+  assert.deepStrictEqual(b[0].rows.map((r) => r.map(mdTxt)), [['c', 'd']]);
+});
+t('mdParse 표: 칸 수가 다른 행은 채우거나 버린다, \\| 는 글자', () => {
+  const b = mdB('| a | b | c |\n|---|---|---|\n| 1 |\n| 1 | 2 | 3 | 4 | 5 |\n| x \\| y | `z` | w |');
+  assert.deepStrictEqual(b[0].rows.map((r) => r.map(mdTxt)), [['1', '', ''], ['1', '2', '3'], ['x | y', 'z', 'w']]);
+  assert.deepStrictEqual(b[0].rows[0][1], []);
+  assert.deepStrictEqual(b[0].rows[2][1], [{ s: 'c', v: 'z' }]);
+});
+t('mdParse 코드 펜스: 언어 이름, 안의 #·|·** 는 해석하지 않는다', () => {
+  const b = mdB('```js\n# 제목 아님\n| a | b |\n**x**\n```\n뒤 문단\n~~~\n물결\n~~~');
+  assert.deepStrictEqual(b[0], { t: 'code', lang: 'js', text: '# 제목 아님\n| a | b |\n**x**' });
+  assert.strictEqual(b[1].t, 'p');
+  assert.deepStrictEqual(b[2], { t: 'code', lang: '', text: '물결' });
+  assert.strictEqual(b.length, 3);
+});
+t('mdParse 닫히지 않은 펜스는 글 끝까지 코드, 짧은 닫는 줄은 닫지 못한다', () => {
+  assert.deepStrictEqual(mdB('```py\nprint(1)\n\n# 끝'), [{ t: 'code', lang: 'py', text: 'print(1)\n\n# 끝' }]);
+  const b = mdB('````\n```\n안\n````');
+  assert.strictEqual(b[0].text, '```\n안'); assert.strictEqual(b.length, 1);
+});
+t('mdParse 인용: 이어진 > 줄을 하나로', () => {
+  const b = mdB('> 첫째\n> 둘째\n>\n> 셋째\n문단');
+  assert.deepStrictEqual(b[0], { t: 'quote', inl: [{ s: 'text', v: '첫째 둘째 셋째' }] });
+  assert.strictEqual(b[1].t, 'p');
+});
+t('mdParse 구분선과 표 구분 줄의 구별', () => {
+  assert.deepStrictEqual(mdB('---\n***\n___\n- - -').map((x) => x.t), ['hr', 'hr', 'hr', 'hr']);
+  assert.deepStrictEqual(mdB('글\n\n---\n\n글').map((x) => x.t), ['p', 'hr', 'p']);
+  const b = mdB('| a | b |\n|---|---|\n| 1 | 2 |');
+  assert.deepStrictEqual(b.map((x) => x.t), ['table']);
+  assert.strictEqual(mdB('|---|').length, 1); assert.strictEqual(mdB('|---|')[0].t, 'table');
+  assert.strictEqual(mdB('--').length, 1); assert.strictEqual(mdB('--')[0].t, 'p');
+});
+t('mdParse 굵게·코드, 코드 안의 **, 닫히지 않은 표시', () => {
+  assert.deepStrictEqual(mdB('가 **나** 다 `라` 마')[0].inl, [{ s: 'text', v: '가 ' }, { s: 'b', v: '나' }, { s: 'text', v: ' 다 ' }, { s: 'c', v: '라' }, { s: 'text', v: ' 마' }]);
+  assert.deepStrictEqual(mdB('`a **b** c`')[0].inl, [{ s: 'c', v: 'a **b** c' }]);
+  assert.deepStrictEqual(mdB('열림 **굵게 안닫힘')[0].inl, [{ s: 'text', v: '열림 **굵게 안닫힘' }]);
+  assert.deepStrictEqual(mdB('열림 `코드 안닫힘')[0].inl, [{ s: 'text', v: '열림 `코드 안닫힘' }]);
+  assert.deepStrictEqual(mdB('**')[0].inl, [{ s: 'text', v: '**' }]);
+});
+t('mdParse 기울임 표시는 글자 그대로', () => {
+  assert.deepStrictEqual(mdB('a*b*c _d_')[0].inl, [{ s: 'text', v: 'a*b*c _d_' }]);
+});
+t('mdParse 링크와 이미지는 글자로', () => {
+  assert.deepStrictEqual(mdB('보기 [문서](https://example.com/a) 끝')[0].inl, [{ s: 'text', v: '보기 문서 (https://example.com/a) 끝' }]);
+  assert.deepStrictEqual(mdB('![그림](img.png)')[0].inl, [{ s: 'text', v: '그림 (img.png)' }]);
+  assert.deepStrictEqual(mdB('[깨진](링크 [또')[0].inl, [{ s: 'text', v: '[깨진](링크 [또' }]);
+  assert.deepStrictEqual(mdB('**[굵](u)**')[0].inl, [{ s: 'b', v: '굵 (u)' }]);
+  assert.deepStrictEqual(mdB('[**링크**](x)')[0].inl, [{ s: 'b', v: '링크' }, { s: 'text', v: ' (x)' }]);
+});
+t('mdParse 굵게 안의 코드와 링크는 한 겹으로 편다', () => {
+  assert.deepStrictEqual(mdB('**`lib.js`** 수정')[0].inl, [{ s: 'c', v: 'lib.js' }, { s: 'text', v: ' 수정' }]);
+  assert.deepStrictEqual(mdB('**고쳐서 `a.js` 와 [문서](u)**')[0].inl, [{ s: 'b', v: '고쳐서 ' }, { s: 'c', v: 'a.js' }, { s: 'b', v: ' 와 문서 (u)' }]);
+  assert.deepStrictEqual(mdB('**a `b**` c')[0].inl, [{ s: 'text', v: '**a ' }, { s: 'c', v: 'b**' }, { s: 'text', v: ' c' }]);
+  assert.deepStrictEqual(mdB('**a `b**` c**')[0].inl, [{ s: 'b', v: 'a ' }, { s: 'c', v: 'b**' }, { s: 'b', v: ' c' }]);
+});
+t('mdParse 들여쓴 코드 펜스: 목록 아래, 하위 항목 아래, 목록 뒤 빈 줄 다음', () => {
+  let b = mdB('1. 가\n    ```\n    x\n    ```\n2. 나');
+  assert.deepStrictEqual(b.map((x) => x.t), ['ol', 'code', 'ol']);
+  assert.strictEqual(b[1].text, 'x'); assert.strictEqual(b[2].start, 2);
+  b = mdB('- a\n  - b\n    ```js\n    y\n      z\n    ```\n- c');
+  assert.deepStrictEqual(b.map((x) => x.t), ['ul', 'code', 'ul']);
+  assert.deepStrictEqual([b[1].lang, b[1].text], ['js', 'y\n  z']);
+  b = mdB('- a\n\n        ```\n        q\n        ```');
+  assert.deepStrictEqual(b.map((x) => x.t), ['ul', 'code']); assert.strictEqual(b[1].text, 'q');
+});
+t('mdParse 3칸 들여쓴 펜스는 코드 줄 앞 공백을 그만큼만 걷는다', () => {
+  assert.strictEqual(mdB('   ```\n   a\n  b\n     c\n   ```')[0].text, 'a\nb\n  c');
+  assert.strictEqual(mdB('  ```\nx\n  ```\n뒤')[0].text, 'x');
+});
+t('mdParse 목록: 항목 사이 빈 줄, ul 뒤 같은 들여쓰기의 ol', () => {
+  const b = mdB('- 가\n\n- 나');
+  assert.strictEqual(b.length, 1); assert.strictEqual(b[0].items.length, 2);
+  const c = mdB('- 가\n1. 나');
+  assert.deepStrictEqual(c.map((x) => x.t), ['ul', 'ol']); assert.strictEqual(c[1].start, 1);
+});
+t('mdParse 문단 도중에는 1. 만 번호 목록을 연다', () => {
+  assert.deepStrictEqual(mdB('작성일\n2024. 11. 26. 기준'), [{ t: 'p', inl: [{ s: 'text', v: '작성일 2024. 11. 26. 기준' }] }]);
+  assert.deepStrictEqual(mdB('작성일\n1. 하나').map((x) => x.t), ['p', 'ol']);
+  const b = mdB('# 제목\n2. 둘\n3. 셋'); assert.strictEqual(b[1].start, 2);
+  assert.strictEqual(mdB('2024. 11. 26. 기준')[0].t, 'ol');
+});
+t('mdParse 표: 첫 칸 앞 | 없는 표, | 하나뿐인 줄은 문단', () => {
+  let b = mdB('a | b\n---|---\n1 | 2');
+  assert.strictEqual(b.length, 1); assert.strictEqual(b[0].t, 'table');
+  assert.deepStrictEqual(b[0].head.map(mdTxt), ['a', 'b']);
+  assert.deepStrictEqual(b[0].rows.map((r) => r.map(mdTxt)), [['1', '2']]);
+  b = mdB('x | y\n:--|--:');
+  assert.deepStrictEqual(b[0].align, ['left', 'right']);
+  assert.deepStrictEqual(mdB('a | b\n다음 줄').map((x) => x.t), ['p']);
+  assert.deepStrictEqual(mdB('|'), [{ t: 'p', inl: [{ s: 'text', v: '|' }] }]);
+});
+t('mdParse 지우는 문자는 BAD_CHARS 범위, 탭·\\n 은 남기고 줄 구분 문자는 \\n', () => {
+  assert.strictEqual(mdB('a\u0085b\u202Ec\u200Bd\u009Fe')[0].inl[0].v, 'abcde');
+  assert.strictEqual(mdB('가\u2028나\u2029다').map((x) => mdTxt(x.inl)).join('/'), '가 나 다');
+  assert.strictEqual(mdB('a\tb')[0].inl[0].v, 'a\tb');
+});
+t('mdParse 제한: 표 칸·조각 총수 상한', () => {
+  const head = '|' + Array.from({ length: 12 }, () => 'h').join('|') + '|';
+  const one = [head, ...Array.from({ length: 100 }, () => '|')].join('\n');
+  const r = L.mdParse(Array.from({ length: 400 }, () => one).join('\n\n'));
+  const cells = r.blocks.reduce((a, x) => a + (x.t === 'table' ? (x.rows.length + 1) * x.head.length : 0), 0);
+  assert.ok(cells > 0 && cells <= L.MD_CELLS_MAX, 'cells ' + cells); assert.strictEqual(r.truncated, true);
+  const pc = L.mdParse(Array.from({ length: 300 }, () => Array.from({ length: 100 }, (_, i) => '**a** b `c` d' + i).join(' ')).join('\n\n'));
+  const pieces = pc.blocks.reduce((a, x) => a + (x.inl ? x.inl.length : 0), 0);
+  assert.ok(pieces <= L.MD_PIECES_MAX); assert.strictEqual(pc.truncated, true);
+});
+t('mdParse 자른 끝이 짝 없는 높은 서로게이트면 한 칸 더 줄인다', () => {
+  const r = L.mdParse('a'.repeat(L.MD_INPUT_MAX - 1) + '😀');
+  assert.strictEqual(r.truncated, true);
+  assert.ok(!/[\uD800-\uDBFF]$/.test(r.blocks[0].inl[0].v));
+  const p = L.mdParse('a'.repeat(L.MD_PIECE_MAX - 1) + '😀');
+  assert.strictEqual(p.blocks[0].inl[0].v, 'a'.repeat(L.MD_PIECE_MAX - 1));
+  const c = L.mdParse('```\n' + 'a'.repeat(L.MD_PIECE_MAX - 1) + '😀\n```');
+  assert.strictEqual(c.blocks[0].text.length, L.MD_PIECE_MAX - 1);
+});
+t('mdParse 예외가 나면 정리한 원문 앞부분을 문단 하나로 낸다', () => {
+  const orig = String.prototype.split;
+  String.prototype.split = function () { throw new Error('시험용'); };
+  let r;
+  try { r = L.mdParse('# 가\u0000나\n\n다'); } finally { String.prototype.split = orig; }
+  assert.deepStrictEqual(r, { blocks: [{ t: 'p', inl: [{ s: 'text', v: '# 가나\n\n다' }] }], truncated: true });
+});
+t('mdParse 문자열이 아닌 입력과 빈 입력', () => {
+  for (const x of [undefined, null, 42, {}, [], Buffer.from('a')]) assert.deepStrictEqual(L.mdParse(x), { blocks: [], truncated: false });
+  assert.deepStrictEqual(L.mdParse(''), { blocks: [], truncated: false });
+  assert.deepStrictEqual(L.mdParse('\n  \n'), { blocks: [], truncated: false });
+});
+t('mdParse 제어 문자 제거, 탭은 남기고 \\r\\n 은 \\n', () => {
+  const b = mdB('a\u0000b\u0007c\u007Fd\te\r\nf\rg\u001b[0m');
+  assert.deepStrictEqual(b, [{ t: 'p', inl: [{ s: 'text', v: 'abcd\te fg[0m' }] }]);
+  assert.strictEqual(mdB('# 제\r\n목\r\n')[0].inl[0].v, '제');
+  assert.strictEqual(mdB('```\r\n가\r\n나\r\n```')[0].text, '가\n나');
+});
+t('mdParse 한글 섞인 글', () => {
+  const b = mdB('## 결과 요약\n\n- **완료**: 설치 `npm i` 끝\n- 남은 일\n\n| 항목 | 상태 |\n|:--|--:|\n| 시험 | 통과 |');
+  assert.deepStrictEqual(b.map((x) => x.t), ['h', 'ul', 'table']);
+  assert.deepStrictEqual(b[1].items[0].inl, [{ s: 'b', v: '완료' }, { s: 'text', v: ': 설치 ' }, { s: 'c', v: 'npm i' }, { s: 'text', v: ' 끝' }]);
+  assert.deepStrictEqual(b[2].align, ['left', 'right']);
+});
+t('mdParse 제한: 블록 400개', () => {
+  const r = L.mdParse(Array.from({ length: 400 }, (_, i) => '문단' + i).join('\n\n'));
+  assert.strictEqual(r.blocks.length, 400); assert.strictEqual(r.truncated, false);
+  const r2 = L.mdParse(Array.from({ length: 401 }, (_, i) => '문단' + i).join('\n\n'));
+  assert.strictEqual(r2.blocks.length, 400); assert.strictEqual(r2.truncated, true);
+  assert.strictEqual(mdTxt(r2.blocks[399].inl), '문단399');
+});
+t('mdParse 제한: 표 12열 100행', () => {
+  const row = (n, v) => '|' + Array.from({ length: n }, () => v).join('|') + '|';
+  const r = L.mdParse([row(13, 'h'), row(13, '-'), ...Array.from({ length: 101 }, () => row(13, 'x'))].join('\n'));
+  const b = r.blocks[0];
+  assert.strictEqual(b.head.length, 12); assert.strictEqual(b.align.length, 12);
+  assert.strictEqual(b.rows.length, 100); assert.ok(b.rows.every((x) => x.length === 12));
+  assert.strictEqual(b.cut, true); assert.strictEqual(r.truncated, true);
+  const ok = L.mdParse([row(12, 'h'), ...Array.from({ length: 100 }, () => row(12, 'x'))].join('\n'));
+  assert.ok(!('cut' in ok.blocks[0])); assert.strictEqual(ok.truncated, false);
+  assert.strictEqual(ok.blocks[0].rows.length, 100);
+});
+t('mdParse 제한: 코드 400줄', () => {
+  const r = L.mdParse('```\n' + Array.from({ length: 401 }, (_, i) => 'L' + i).join('\n') + '\n```\n뒤');
+  assert.strictEqual(r.blocks[0].text.split('\n').length, 400); assert.strictEqual(r.blocks[0].cut, true);
+  assert.strictEqual(r.truncated, true); assert.strictEqual(r.blocks[1].t, 'p');
+  const ok = L.mdParse('```\n' + Array.from({ length: 400 }, (_, i) => 'L' + i).join('\n') + '\n```');
+  assert.ok(!('cut' in ok.blocks[0])); assert.strictEqual(ok.truncated, false);
+});
+t('mdParse 제한: 입력 256KB, 조각·코드 20000자', () => {
+  const r = L.mdParse('가\n\n' + 'a'.repeat(300 * 1024));
+  assert.strictEqual(r.truncated, true); assert.strictEqual(r.blocks.length, 2);
+  assert.ok(r.blocks[1].inl[0].v.length <= L.MD_PIECE_MAX);
+  const c = L.mdParse('```\n' + 'x'.repeat(30000) + '\n```');
+  assert.strictEqual(c.blocks[0].text.length, 20000); assert.strictEqual(c.truncated, true);
+  const p = L.mdParse('y'.repeat(30000));
+  assert.strictEqual(p.blocks[0].inl.length, 1); assert.strictEqual(p.blocks[0].inl[0].v.length, 20000);
+  assert.strictEqual(L.mdParse('a'.repeat(L.MD_PIECE_MAX)).truncated, false);
+});
+t('mdParse 나쁜 입력은 2초 안에 끝나고, 입력을 두 배로 해도 시간이 크게 늘지 않는다', () => {
+  const gens = [(k) => '*'.repeat(k), (k) => '|'.repeat(k), (k) => '`'.repeat(k), (k) => '['.repeat(k), (k) => '[]('.repeat(k / 2.5 | 0), (k) => '**a '.repeat(k / 4 | 0), (k) => '**a `'.repeat(k / 5 | 0), (k) => '**`a** '.repeat(k / 7 | 0), (k) => '- '.repeat(k / 2 | 0), (k) => '> '.repeat(k / 2 | 0), (k) => '| a '.repeat(k / 4 | 0), (k) => ' '.repeat(2 * k) + 'x', (k) => '#'.repeat(k), (k) => '-'.repeat(k), (k) => '\\|'.repeat(k / 2 | 0), (k) => '![a]'.repeat(k / 4 | 0), (k) => '\n'.repeat(2 * k), (k) => '|\n'.repeat(k / 2 | 0), (k) => '- a\n  - b\n'.repeat(k / 10 | 0), (k) => 'a | b\n'.repeat(k / 6 | 0), (k) => '[**a**](b) '.repeat(k / 11 | 0)];
+  const time = (s) => { let best = Infinity; for (let r = 0; r < 3; r++) { const t0 = process.hrtime.bigint(); const x = L.mdParse(s); const ms = Number(process.hrtime.bigint() - t0) / 1e6; assert.ok(Array.isArray(x.blocks)); best = Math.min(best, ms); } return best; };
+  for (const g of gens) {
+    const s1 = g(40000); const s2 = g(80000);
+    const t1 = time(s1); const t2 = time(s2);
+    assert.ok(t1 < 2000 && t2 < 2000, s1.slice(0, 8) + ' ' + t1 + '/' + t2 + 'ms');
+    if (t1 >= 30) assert.ok(t2 <= t1 * 8, s1.slice(0, 8) + ' 두 배 입력에 ' + (t2 / t1).toFixed(1) + '배');
+  }
+});
+
+// ---- talkParse ----
+const tl = (role, text, extra) => JSON.stringify(Object.assign({ v: 1, at: 1700000000, role, text }, extra || {}));
+t('talkParse 정상 왕복: 질문은 글 그대로, 답변은 블록', () => {
+  const r = L.talkParse([tl('user', '안녕 **그대로**'), tl('assistant', '# 제목\n\n본문 **굵게**')].join('\n') + '\n');
+  assert.strictEqual(r.more, false); assert.strictEqual(r.items.length, 2);
+  assert.deepStrictEqual(r.items[0], { role: 'user', at: 1700000000, text: '안녕 **그대로**' });
+  assert.strictEqual(r.items[1].role, 'assistant'); assert.strictEqual(r.items[1].truncated, false);
+  assert.ok(r.items[1].blocks.length >= 2);
+  assert.strictEqual(r.items[1].text, undefined);
+});
+t('talkParse 깨진 줄·객체 아닌 줄은 건너뛴다', () => {
+  const r = L.talkParse(['{깨짐', '[1]', '"x"', '5', 'null', '', tl('user', 'ok')].join('\n'));
+  assert.strictEqual(r.items.length, 1); assert.strictEqual(r.items[0].text, 'ok');
+});
+t('talkParse 잘못된 role·text·at 은 건너뛴다', () => {
+  const bad = [tl('system', 'a'), tl('user', 5), tl('user', 'a', { at: 0 }), tl('user', 'a', { at: -3 }), tl('user', 'a', { at: '5' }), tl('user', 'a', { at: null }), '{"role":"user","text":"no at"}', '{"role":"user","at":1}', tl('user', '')];
+  assert.strictEqual(L.talkParse(bad.join('\n')).items.length, 0);
+  assert.strictEqual(L.talkParse(JSON.stringify({ role: 'user', text: 'x', at: 1e999 })).items.length, 0);
+});
+t('talkParse cut·lost 표지', () => {
+  const r = L.talkParse([tl('user', 'a', { cut: true }), tl('assistant', '', { lost: true }), tl('user', 'zzz', { lost: true }), tl('assistant', 'b', { cut: true, lost: 'yes' })].join('\n'));
+  assert.strictEqual(r.items[0].cut, true);
+  assert.deepStrictEqual(r.items[1], { role: 'assistant', at: 1700000000, blocks: [], truncated: false, lost: true });
+  assert.deepStrictEqual(r.items[2], { role: 'user', at: 1700000000, text: '', lost: true });
+  assert.strictEqual(r.items[3].lost, undefined); assert.strictEqual(r.items[3].cut, true);
+});
+t('talkParse 질문 글은 마크다운으로 해석하지 않고 정리·상한을 지킨다', () => {
+  const r = L.talkParse(tl('user', '| a | b |\n|---|---|\n# x\u0007y​z\r\n끝'));
+  assert.strictEqual(r.items[0].text, '| a | b |\n|---|---|\n# xyz\n끝'); assert.strictEqual(r.items[0].blocks, undefined);
+  const long = L.talkParse(tl('user', 'ㄱ'.repeat(L.TALK_USER_MAX + 5))).items[0];
+  assert.strictEqual(long.text.length, L.TALK_USER_MAX); assert.strictEqual(long.cut, true);
+  assert.strictEqual(L.talkCleanText('a b c\u0000'), 'a\nb\nc');
+});
+t('talkParse 답변의 표가 블록으로 나온다', () => {
+  const it = L.talkParse(tl('assistant', '| 이름 | 수 |\n|---|---:|\n| 가 | 1 |\n')).items[0];
+  assert.ok(it.blocks.some((b) => b.t === 'table'), JSON.stringify(it.blocks));
+});
+t('talkParse max 와 more: 뒤에서부터 남긴다', () => {
+  const ls = []; for (let i = 1; i <= 10; i++) ls.push(tl('user', 'q' + i));
+  const r = L.talkParse(ls.join('\n'), { max: 3 });
+  assert.deepStrictEqual(r.items.map((x) => x.text), ['q8', 'q9', 'q10']); assert.strictEqual(r.more, true);
+  assert.strictEqual(L.talkParse(ls.join('\n'), { max: 10 }).more, false);
+  assert.strictEqual(L.talkParse(ls.join('\n')).items.length, 10);
+  assert.strictEqual(L.talkParse(ls.join('\n'), { max: 'x' }).items.length, 10);
+  const many = []; for (let i = 0; i < 100; i++) many.push(tl('user', 'q' + i));
+  const d = L.talkParse(many.join('\n')); assert.strictEqual(d.items.length, 80); assert.strictEqual(d.items[0].text, 'q20'); assert.strictEqual(d.more, true);
+});
+t('talkParse 블록 수 상한: 오래된 것부터 버리고 최근 하나는 남긴다', () => {
+  const para = Array.from({ length: 300 }, (_, i) => '문단' + i).join('\n\n'); // 블록 300개(상한 400 이하)
+  const ls = []; for (let i = 0; i < 15; i++) ls.push(tl('assistant', para));
+  const r = L.talkParse(ls.join('\n'));
+  const total = r.items.reduce((a, x) => a + x.blocks.length, 0);
+  assert.ok(total <= L.TALK_BLOCKS_MAX && r.items.length === 10 && r.more === true, total + '/' + r.items.length);
+  assert.strictEqual(L.talkParse(tl('assistant', para)).items.length, 1);
+});
+const blk = (n, tag) => Array.from({ length: n }, (_, i) => (tag || 'p') + i).join('\n\n'); // 문단 n 개 = 블록 n 개
+t('talkParse 블록 상한 경계: 정확히 상한이면 more:false, 하나 넘으면 more:true', () => {
+  const o = { blocksMax: 10 };
+  const exact = [tl('assistant', blk(5, 'a')), tl('assistant', blk(5, 'b'))].join('\n');
+  const r1 = L.talkParse(exact, o);
+  assert.strictEqual(r1.items.length, 2); assert.strictEqual(r1.more, false);
+  assert.strictEqual(r1.items.reduce((x, i) => x + i.blocks.length, 0), 10);
+  const over = [tl('assistant', blk(5, 'a')), tl('assistant', blk(6, 'b'))].join('\n');
+  const r2 = L.talkParse(over, o);
+  assert.strictEqual(r2.items.length, 1); assert.strictEqual(r2.more, true); assert.strictEqual(r2.items[0].blocks.length, 6);
+  assert.strictEqual(L.talkParse([tl('assistant', blk(5, 'a')), tl('assistant', blk(5, 'b')), tl('assistant', blk(1, 'c'))].join('\n'), o).more, true);
+});
+t('talkParse 질문·답변이 섞여도 순서(오래된 것 -> 최근 것)를 지키고 상한이 오래된 쪽을 버린다', () => {
+  const ls = [tl('user', 'q1'), tl('assistant', blk(4, 'a')), tl('user', 'q2'), tl('assistant', blk(4, 'b')), tl('user', 'q3')];
+  const all = L.talkParse(ls.join('\n'));
+  assert.deepStrictEqual(all.items.map((x) => x.role + ':' + (x.text || x.blocks[0].v || '')).map((x) => x.slice(0, 4)), ['user', 'assi', 'user', 'assi', 'user']);
+  assert.deepStrictEqual(all.items.filter((x) => x.role === 'user').map((x) => x.text), ['q1', 'q2', 'q3']); assert.strictEqual(all.more, false);
+  const cut = L.talkParse(ls.join('\n'), { blocksMax: 6 }); // q3(1) + b(4) + q2(1) = 6, 그 앞은 버림
+  assert.deepStrictEqual(cut.items.map((x) => x.role), ['user', 'assistant', 'user']); assert.strictEqual(cut.items[0].text, 'q2'); assert.strictEqual(cut.items[2].text, 'q3'); assert.strictEqual(cut.more, true);
+});
+t('talkParse 블록 상한을 넘는 단일 최근 항목은 남는다', () => {
+  const r = L.talkParse([tl('user', 'old'), tl('assistant', blk(30, 'z'))].join('\n'), { blocksMax: 10 });
+  assert.strictEqual(r.items.length, 1); assert.strictEqual(r.items[0].role, 'assistant'); assert.strictEqual(r.items[0].blocks.length, 30); assert.strictEqual(r.more, true);
+  const one = L.talkParse(tl('assistant', blk(30, 'z')), { blocksMax: 10 });
+  assert.strictEqual(one.items.length, 1); assert.strictEqual(one.more, false);
+});
+t('talkParse 상한에 닿으면 멈춘다(오래된 답변 40개 중 일부만 남고 빨리 끝남)', () => {
+  // 오래된 답변 40개 + 최근 답변 하나(블록 400). 기본 상한 3000 이므로 최근 7개 안팎에서 멈춘다
+  const ls = []; for (let i = 0; i < 40; i++) ls.push(tl('assistant', blk(400, 'x' + i + '_')));
+  const t0 = Date.now(); const r = L.talkParse(ls.join('\n'));
+  assert.ok(r.items.length <= 8 && r.more === true, String(r.items.length));
+  assert.ok(Date.now() - t0 < 5000);
+});
+t('talkParse 질문 글 합계 상한: 오래된 항목부터 버리고 more, 최근 하나는 남긴다', () => {
+  const q = (i) => tl('user', String(i).padStart(2, '0') + 'ㄱ'.repeat(L.TALK_USER_MAX - 2)); // 항목마다 TALK_USER_MAX 글자
+  const per = L.TALK_USER_MAX; const fit = Math.floor(L.TALK_USER_TOTAL_MAX / per);
+  const ls = []; for (let i = 0; i < fit + 3; i++) ls.push(q(i));
+  const r = L.talkParse(ls.join('\n'), { max: 1000 });
+  assert.strictEqual(r.items.length, fit); assert.strictEqual(r.more, true);
+  assert.strictEqual(r.items[r.items.length - 1].text.slice(0, 2), String(fit + 2).padStart(2, '0')); // 가장 최근이 마지막
+  assert.strictEqual(r.items[0].text.slice(0, 2), String(3).padStart(2, '0'));
+  assert.ok(r.items.reduce((a, x) => a + x.text.length, 0) <= L.TALK_USER_TOTAL_MAX);
+  const exact = []; for (let i = 0; i < fit; i++) exact.push(q(i));
+  assert.strictEqual(L.talkParse(exact.join('\n'), { max: 1000 }).more, false);
+  const tiny = L.talkParse([tl('user', 'a'.repeat(50)), tl('user', 'b'.repeat(50))].join('\n'), { userTotalMax: 10 }); // 합계 상한보다 큰 단일 최근 항목
+  assert.strictEqual(tiny.items.length, 1); assert.strictEqual(tiny.items[0].text[0], 'b'); assert.strictEqual(tiny.more, true);
+});
+t('talkKey·talkSame: 세션 값이 key 에 들어가고 호출자마다 자기 key 로 판정한다', () => {
+  const sid1 = '11111111-1111-1111-1111-111111111111'; const sid2 = '22222222-2222-2222-2222-222222222222';
+  assert.strictEqual(L.talkKey(sid1, 1700000000000.5, 42), sid1 + ':1700000000000.5-42');
+  assert.notStrictEqual(L.talkKey(sid1, 5, 6), L.talkKey(sid2, 5, 6)); // 시각·크기가 같아도 세션 값이 다르면 다르다
+  const k = L.talkKey(sid1, 5, 6);
+  assert.strictEqual(L.talkSame(k, k), true);
+  assert.strictEqual(L.talkSame('', k), false); assert.strictEqual(L.talkSame(undefined, k), false); assert.strictEqual(L.talkSame(null, k), false); assert.strictEqual(L.talkSame(5, k), false);
+  assert.strictEqual(L.talkSame(L.talkKey(sid2, 5, 6), k), false); assert.strictEqual(L.talkSame('', ''), false);
+  assert.ok(L.talkKey('f'.repeat(64), 1764151234567.8914, 16 * 1024 * 1024).length <= 160); // IPC key 길이 상한(160) 안
+});
+t('talkParse 빈 글·문자열 아님·한글·끝 줄바꿈 없음', () => {
+  for (const v of ['', null, undefined, 5, {}, []]) assert.deepStrictEqual(L.talkParse(v), { items: [], more: false });
+  assert.deepStrictEqual(L.talkParse('\n\n  \n'), { items: [], more: false });
+  const r = L.talkParse(tl('user', '질문입니다') + '\n' + tl('assistant', '답변입니다')); // 끝에 줄바꿈 없음
+  assert.strictEqual(r.items.length, 2); assert.strictEqual(r.items[0].text, '질문입니다');
+  assert.strictEqual(L.talkParse(tl('user', 'a'), null).items.length, 1);
+});
+t('talkParse __proto__ 키가 든 줄은 필요한 필드만 옮긴다', () => {
+  const r = L.talkParse('{"v":1,"at":5,"role":"user","text":"p","__proto__":{"polluted":1,"role":"assistant"},"constructor":{"x":1}}\n{"__proto__":{"role":"user","at":3,"text":"y"}}');
+  assert.strictEqual(r.items.length, 1); assert.deepStrictEqual(Object.keys(r.items[0]), ['role', 'at', 'text']);
+  assert.strictEqual({}.polluted, undefined); assert.strictEqual(Object.getPrototypeOf(r.items[0]), Object.prototype);
+});
+
+// ---- 읽기 화면 배치·표·저장 ----
+t('readIsNarrow: 1100px 이하만 좁다, 모르면 좁지 않다', () => {
+  assert.strictEqual(L.readIsNarrow(1100), true); assert.strictEqual(L.readIsNarrow(1101), false); assert.strictEqual(L.readIsNarrow(900), true);
+  for (const v of [undefined, null, NaN, '900', 0, -5]) assert.strictEqual(L.readIsNarrow(v), false);
+});
+t('readTermWidth: 최소 320, 읽기 영역 360 이상 남기기, 숫자 아니면 기본 420', () => {
+  assert.strictEqual(L.readTermMax(1440, 220), 1440 - 64 - 220 - 360); // 796
+  assert.strictEqual(L.readTermWidth(420, 1440, 220), 420);
+  assert.strictEqual(L.readTermWidth(100, 1440, 220), 320); assert.strictEqual(L.readTermWidth(5000, 1440, 220), 796);
+  assert.strictEqual(L.readTermWidth(undefined, 1440, 220), 420); assert.strictEqual(L.readTermWidth(NaN, 1440, 220), 420);
+  assert.strictEqual(L.readTermWidth(600, 1101, 220), 457); // 1101 - 64 - 220 - 360
+  assert.strictEqual(L.readTermWidth(600, 800, 220), 320); // 여유가 없으면 최소값이 이긴다
+  assert.strictEqual(L.readTermMax(900, 480), 326); // 좁은 창(1100 이하)의 왼쪽 열은 150: 900 - 64 - 150 - 360
+  assert.strictEqual(L.readTermMax(undefined, 220), 320);
+  assert.strictEqual(L.readTermWidth(420, 1500, undefined), 420); // 왼쪽 열 폭을 모르면 기본 220
+});
+t('readIsNumText: 숫자 모양만', () => {
+  for (const s of ['12', '-3', '+4.5', '1,234', '1,234,567.89', '38%', ' 7 ', '0.5%']) assert.strictEqual(L.readIsNumText(s), true, s);
+  for (const s of ['', '12원', '1,23', '1.', '.5', 'abc', '1 2', '12,34,56', '--1', '3%%', null, 5]) assert.strictEqual(L.readIsNumText(s), false, String(s));
+});
+t('readTableAligns: align 이 우선, 없으면 숫자 열만 오른쪽(빈 칸은 건너뜀)', () => {
+  const c = (v) => [{ s: 'text', v }];
+  const tb = { t: 'table', align: ['center', null, null, null, 'left'], head: [c('a'), c('b'), c('c'), c('d'), c('e')], rows: [
+    [c('x'), c('1'), c('가'), c(''), c('9')], [c('y'), c('2,000'), c('3'), c(''), c('8')], [c('z'), c(''), c('4'), c(''), c('7')],
+  ] };
+  assert.deepStrictEqual(L.readTableAligns(tb), ['center', 'right', null, null, 'left']); // c 열은 글자가 섞여서, d 열은 숫자 칸이 없어서 null
+  assert.deepStrictEqual(L.readTableAligns({ head: [c('a')], rows: [] }), [null]);
+  assert.deepStrictEqual(L.readTableAligns(null), []); assert.deepStrictEqual(L.readTableAligns({ head: 'x' }), []);
+  assert.deepStrictEqual(L.readTableAligns({ head: [c('a')], rows: [[c('5%')], 'x', null] }), ['right']); // 모양이 깨진 행도 던지지 않는다
+  const mb = L.mdParse('| 이름 | 값 |\n|---|---|\n| 가 | 1,000 |\n| 나 | 25% |').blocks[0];
+  assert.deepStrictEqual(L.readTableAligns(mb), [null, 'right']);
+});
+t('readParseStore·readStoreSet: 깨진 값은 버리고 상한을 지킨다', () => {
+  assert.deepStrictEqual(L.readParseStore('{{'), {}); assert.deepStrictEqual(L.readParseStore('[]'), {}); assert.deepStrictEqual(L.readParseStore(null), {});
+  const r = L.readParseStore(JSON.stringify({ a: { on: true, w: 500, rail: true }, b: { on: 'yes', w: 'x' }, c: 5, d: [], '': { on: true } }));
+  assert.deepStrictEqual(r, { a: { on: true, w: 500, rail: true }, b: { on: false, w: 420, rail: false } });
+  assert.strictEqual(Object.getPrototypeOf(L.readParseStore('{"__proto__":{"on":true}}')), Object.prototype);
+  let s = L.readStoreSet({}, 'w1', { on: true }); assert.deepStrictEqual(s, { w1: { on: true, w: 420, rail: false } });
+  s = L.readStoreSet(s, 'w1', { w: 350.4, rail: true }); assert.deepStrictEqual(s.w1, { on: true, w: 350, rail: true });
+  s = L.readStoreSet(s, 'w1', { w: 'x' }); assert.strictEqual(s.w1.w, 420);
+  let big = {}; for (let i = 0; i < 105; i++) big = L.readStoreSet(big, 'id' + i, { on: true });
+  assert.strictEqual(Object.keys(big).length, L.READ_STORE_MAX); assert.ok(big.id104 && !big.id0);
+});
+t('readIsNumText: 앞자리 0 은 하나까지만 숫자, -0 과 0 은 숫자', () => {
+  for (const s of ['0', '-0', '+0', '0.5', '-0.5', '0%', '10', '0,001', '01', '-01']) assert.strictEqual(L.readIsNumText(s), true, s);
+  for (const s of ['00', '000', '00012', '-00012', '+007', '00.5', '0012,345']) assert.strictEqual(L.readIsNumText(s), false, s); // 코드·식별자일 수 있다
+});
+t('readParseStore: 100개 상한과 64자 넘는 id 거부', () => {
+  const o = {}; for (let i = 0; i < 130; i++) o['w' + i] = { on: true };
+  const r = L.readParseStore(JSON.stringify(o)); assert.strictEqual(Object.keys(r).length, L.READ_STORE_MAX); assert.ok(r.w0 && r.w99 && !r.w100);
+  const ok64 = 'a'.repeat(64); const bad65 = 'a'.repeat(65);
+  const r2 = L.readParseStore(JSON.stringify({ [ok64]: { on: true }, [bad65]: { on: true } }));
+  assert.ok(r2[ok64] && !r2[bad65] && Object.keys(r2).length === 1);
+  const mix = {}; mix[bad65] = { on: true }; for (let i = 0; i < 100; i++) mix['k' + i] = { on: true }; // 거부된 id 는 상한을 쓰지 않는다
+  assert.strictEqual(Object.keys(L.readParseStore(JSON.stringify(mix))).length, 100);
+});
+t('readCleanSend: 줄바꿈·탭·제어 문자·붙여넣기 표시 정리', () => {
+  const ok = (s) => { const r = L.readCleanSend(s); assert.strictEqual(r.ok, true, JSON.stringify(s)); return r.text; };
+  assert.strictEqual(ok('가\n나\n\n다'), '가\n나\n\n다'); // 줄바꿈 유지
+  assert.strictEqual(ok('a\r\nb\rc\nd'), 'a\nb\nc\nd'); // \r\n·\r 은 \n
+  assert.strictEqual(ok('a\tb'), 'a b'); // 탭은 공백 하나
+  assert.strictEqual(ok('  \n 안녕 \n  '), '안녕'); // 앞뒤 공백·빈 줄은 자른다
+  const e1 = ok('x\x1b[201~/exit\ny'); assert.ok(!e1.includes('\x1b') && !e1.includes('\x1b[201~')); assert.strictEqual(e1, 'x[201~/exit\ny');
+  const e2 = ok('x\x1b[200~y'); assert.ok(!e2.includes('\x1b')); assert.strictEqual(e2, 'x[200~y');
+  assert.strictEqual(ok('a\x00b\x07c\x08d\x7fe\x9bf\x85g'), 'abcdefg'); // 그 밖의 제어 문자(C0·DEL·C1)
+  assert.strictEqual(ok('a‮b‪c⁦d​e﻿f g h'), 'abcdef\ng\nh'); // 양방향 덮어쓰기·제로폭 공백·BOM 은 지우고, 줄 구분 문자(U+2028·U+2029)는 \n 으로 바꾼다
+  const cp = (...a) => String.fromCodePoint(...a); // 보이지 않는 글자는 코드 번호로 쓴다
+  const fam = cp(0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467); assert.strictEqual(ok(fam), fam); // 이모지 묶음(ZWJ) 유지
+  const zn = cp(0x61, 0x200C, 0x62, 0x20, 0x2764, 0xFE0F); assert.strictEqual(ok(zn), zn); // ZWNJ·변형 선택자 FE0F 유지
+  assert.strictEqual(ok(cp(0x61, 0xFE0E, 0x62, 0xAD, 0x63) + '\uD800d' + cp(0x202E, 0x65)), 'abcde'); // 그 밖의 변형 선택자·소프트 하이픈·짝 없는 서로게이트·덮어쓰기 문자는 지운다
+  assert.deepStrictEqual(L.readCleanSend(cp(0x200D, 0x200C, 0xFE0F)), { ok: false, reason: 'empty' }); // 보이지 않는 글자뿐인 글
+  assert.strictEqual(ok('a\x1b]0;t\x07b'), 'a]0;tb'); // ESC 가 지워져 OSC 도 힘이 없다
+});
+t('readCleanSend: 길이 경계·빈 글·문자열 아님', () => {
+  assert.strictEqual(L.READ_SEND_MAX, 16000);
+  assert.deepStrictEqual(L.readCleanSend('a'.repeat(16000)), { ok: true, text: 'a'.repeat(16000) });
+  assert.deepStrictEqual(L.readCleanSend('a'.repeat(16001)), { ok: false, reason: 'toolong' });
+  assert.deepStrictEqual(L.readCleanSend('a'.repeat(70000)), { ok: false, reason: 'toolong' });
+  assert.deepStrictEqual(L.readCleanSend(' ' + 'a'.repeat(16000) + ' \n'), { ok: true, text: 'a'.repeat(16000) }); // 길이는 정리 뒤로 잰다
+  for (const s of ['', '   ', '\n\n', ' \t\r\n ', '\x1b', '\x00\x07', '​‮']) assert.deepStrictEqual(L.readCleanSend(s), { ok: false, reason: 'empty' }, JSON.stringify(s));
+  for (const s of [null, undefined, 5, {}, ['a'], true]) assert.deepStrictEqual(L.readCleanSend(s), { ok: false, reason: 'invalid' }, String(s));
+});
+t('isClaudeFront: 허용 목록(ssh·python3·vim·tmux·셸·빈 값은 거부, 기억한 이름·claude·node·버전 번호는 통과)', () => {
+  for (const p of ['ssh', 'python3', 'vim', 'tmux', 'zsh', '-zsh', '/bin/bash', 'login', 'less', 'sleep', '', '   ', undefined, null, 5, {}, 'a'.repeat(2000)]) assert.strictEqual(L.isClaudeFront(p, ''), false, String(p));
+  for (const p of ['claude', 'Claude', '/usr/local/bin/claude', '2.1.141', '10.0.3']) assert.strictEqual(L.isClaudeFront(p, ''), true, p);
+  for (const p of ['2.1', '2.1.x', 'v2.1.141', '2.1.141-beta', 'claude-code', 'node', 'nodejs', 'node2']) assert.strictEqual(L.isClaudeFront(p, ''), false, p); // 허용 목록은 이름 전체가 같을 때만. node 는 기억한 이름일 때만 통과한다
+  assert.strictEqual(L.isClaudeFront('node', 'node'), true);
+  assert.strictEqual(L.isClaudeFront('myclaude', 'myclaude'), true); // 기억한 이름과 같다
+  assert.strictEqual(L.isClaudeFront('ssh', 'claude'), false);
+  assert.strictEqual(L.isClaudeFront('node', '2.1.141'), false); // 기억한 이름이 있으면 그것과 같아야 한다(허용 목록으로 돌아가지 않는다)
+  assert.strictEqual(L.isClaudeFront('python3', 'python3'), true); // 기억한 이름이면 통과(앱이 Claude 화면을 확인한 때의 이름이다)
+  assert.strictEqual(L.isClaudeFront('zsh', 'zsh'), false); // 셸은 기억한 이름이어도 거부
+  assert.strictEqual(L.isClaudeFront('claude', 'zsh'), true); // 셸 이름은 기억으로 치지 않는다(허용 목록으로)
+  assert.strictEqual(L.isClaudeFront('ssh', 'zsh'), false);
+});
+t('readCanSend: 이유별 거부와 통과 조합은 하나뿐', () => {
+  const T = 1700000000000; // idle 기록 시각(밀리초)
+  const base = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', hooked: true, ux: 'idle', bg: 0, bracketed: true, quietMs: 1000, dirty: false,
+    rawState: 'idle', recAt: T, talkRole: 'assistant', talkAt: T + 2000, inAt: T - 5000, startAt: T - 60000 };
+  const r = (p) => L.readCanSend({ ...base, ...p });
+  const no = (p, reason, msg) => assert.deepStrictEqual(r(p), { ok: false, reason }, msg || JSON.stringify(p));
+  assert.deepStrictEqual(r({}), { ok: true });
+  assert.deepStrictEqual(r({ knownName: '', procName: '2.1.141' }), { ok: true }); // 기억 없음 + 버전 번호 이름
+  for (const p of ['ssh', 'python3', 'vim', 'tmux', 'zsh', '', undefined]) no({ procName: p }, 'notclaude', 'fg ' + p); // 1번: 다른 프로그램·셸·이름 없음
+  no({ procName: 'node' }, 'notclaude'); // 기억한 이름(claude)과 다르다
+  no({ knownName: '', procName: 'node' }, 'notclaude'); // 기억 없음 + node: 대화형 셸일 수 있어 거부한다
+  assert.deepStrictEqual(r({ knownName: 'node', procName: 'node' }), { ok: true }); // node 로 도는 설치는 기억한 이름으로 통과한다
+  no({ knownName: '', procName: 'ssh' }, 'notclaude');
+  no({ ux: 'busy' }, 'busy'); no({ ux: 'waiting' }, 'waiting');
+  no({ bg: 1 }, 'busy', 'bg>0'); no({ bg: 3 }, 'busy'); // 2번
+  no({ bg: undefined }, 'nosession'); no({ bg: -1 }, 'nosession'); no({ bg: NaN }, 'nosession');
+  no({ hooked: false }, 'nosession'); no({ hooked: undefined }, 'nosession'); // 3번: 훅이 붙지 않은 세션
+  for (const ux of ['none', 'unknown', 'turnEnded', 'pending', 'exited', 'unavailable', undefined, '']) no({ ux }, 'nosession', 'ux ' + ux);
+  no({ dirty: true }, 'draft'); no({ dirty: undefined }, 'draft');
+  no({ quietMs: 100 }, 'settling'); no({ quietMs: 399 }, 'settling'); no({ quietMs: NaN }, 'settling'); no({ quietMs: undefined }, 'settling');
+  assert.deepStrictEqual(r({ quietMs: 400 }), { ok: true });
+  no({ bracketed: false }, 'nosession'); no({ bracketed: undefined }, 'nosession');
+  no({ hasTerm: false }, 'nosession'); no({ cc: false }, 'nosession');
+  assert.deepStrictEqual(L.readCanSend(null), { ok: false, reason: 'nosession' });
+  assert.deepStrictEqual(L.readCanSend(undefined), { ok: false, reason: 'nosession' });
+  // 우선순위: 다른 프로그램이 앞이면 상태가 idle 이어도 notclaude, 답 기다림은 draft·settling 보다 먼저
+  no({ procName: 'ssh', ux: 'waiting' }, 'notclaude'); no({ ux: 'waiting', dirty: true, quietMs: 0 }, 'waiting'); no({ dirty: true, quietMs: 0 }, 'settling');
+  // 통과하는 조합은 모든 조건이 맞을 때 하나뿐이다: 조건마다 값 후보를 넣어 전수 조사
+  // 새 규칙(원래 기록·성공한 답변·입력 없음·pty 시작)
+  no({ rawState: 'busy' }, 'failed', '표시는 idle 인데 원래 기록은 busy: 중단된 턴(Esc)이거나 낮춘 상태. 거부는 그대로, 이유는 failed');
+  no({ rawState: 'waiting' }, 'failed'); no({ rawState: 'weird' }, 'failed');
+  no({ ux: 'busy', rawState: 'busy' }, 'busy'); no({ ux: 'waiting', rawState: 'busy' }, 'waiting'); no({ ux: 'none', rawState: 'busy' }, 'busy'); no({ ux: 'none', rawState: 'waiting' }, 'waiting'); // 표시가 idle 이 아니면 이유는 그대로
+  no({ rawState: null, ux: 'none' }, 'first', '훅 기록 없음'); no({ rawState: null }, 'failed'); no({ rawState: undefined, ux: 'none' }, 'first');
+  no({ talkRole: null }, 'first', '대화 기록 없음·읽지 못함'); no({ talkRole: undefined }, 'first');
+  no({ talkRole: 'user' }, 'failed', '마지막 줄이 질문: 실패로 끝난 턴');
+  no({ talkAt: T + 15001 }, 'failed'); no({ talkAt: T - 15001 }, 'failed'); no({ talkAt: T - 600000 }, 'failed', 'idle 보다 한참 앞'); no({ talkAt: NaN }, 'failed'); no({ talkAt: T / 1000 }, 'failed', '초 단위가 섞였다');
+  for (const d of [-15000, 0, 15000]) assert.deepStrictEqual(r({ talkAt: T + d }), { ok: true }, 'slack ' + d);
+  no({ inAt: T + 1 }, 'touched'); no({ inAt: T + 100000 }, 'touched'); no({ inAt: NaN }, 'touched'); no({ inAt: undefined }, 'touched');
+  // 입력 시각의 여유(2000ms): 기록 시각보다 2000ms 넘게 앞선 입력만 통과한다
+  assert.deepStrictEqual(r({ inAt: T - 2001 }), { ok: true }, '2001ms 앞'); assert.deepStrictEqual(r({ inAt: T - 2000 }), { ok: true }, '정확히 2000ms 앞');
+  no({ inAt: T - 1999 }, 'touched', '1999ms 앞'); no({ inAt: T }, 'touched', '같은 시각'); no({ inAt: T + 1 }, 'touched', '뒤');
+  assert.deepStrictEqual(r({ inAt: 0 }), { ok: true }); // 입력이 한 번도 없었다
+  no({ startAt: T + 1 }, 'first', 'pty 가 기록보다 늦게 떴다'); no({ startAt: NaN }, 'first'); no({ recAt: NaN }, 'first');
+  assert.deepStrictEqual(r({ startAt: T }), { ok: true });
+  // 우선순위: busy·waiting > first > failed > touched > settling > draft
+  no({ ux: 'busy', rawState: 'busy', talkRole: null, inAt: T + 1 }, 'busy'); no({ rawState: 'busy', talkRole: null, inAt: T + 1 }, 'failed'); no({ talkRole: null, inAt: T + 1, dirty: true }, 'first');
+  no({ talkRole: 'user', inAt: T + 1, quietMs: 0 }, 'failed'); no({ inAt: T + 1, quietMs: 0, dirty: true }, 'touched'); no({ quietMs: 0, dirty: true }, 'settling');
+  // 읽기 입력으로 한 번 보낸 뒤(마지막 입력이 T 뒤)에는 새 기록(T')과 새 assistant 줄이 올 때까지 거부, 오면 통과
+  no({ inAt: T + 3000 }, 'touched');
+  assert.deepStrictEqual(r({ recAt: T + 60000, talkAt: T + 61000, inAt: T + 3000 }), { ok: true });
+  const cand = { hasTerm: [true, false], cc: [true, false], procName: ['claude', 'ssh', ''], knownName: ['claude', 'other'], hooked: [true, false], ux: ['idle', 'busy', 'waiting', 'none', 'unknown'], bg: [0, 1], bracketed: [true, false], quietMs: [0, 1000], dirty: [false, true],
+    rawState: ['idle', 'busy', null], recAt: [T, NaN], talkRole: ['assistant', 'user'], talkAt: [T + 2000, T + 20000], inAt: [T - 5000, T + 1], startAt: [T - 60000, T + 1] };
+  const keys = Object.keys(cand); let oks = 0; let total = 0;
+  const walk = (i, c) => {
+    if (i === keys.length) { total++; if (L.readCanSend(c).ok) { oks++; assert.deepStrictEqual(c, base, JSON.stringify(c)); } return; }
+    for (const v of cand[keys[i]]) walk(i + 1, { ...c, [keys[i]]: v });
+  };
+  walk(0, {});
+  assert.strictEqual(oks, 1); assert.ok(total > 1000);
+});
+t('isTermReply: 터미널의 자동 응답만 true, 조금이라도 다르면 입력', () => {
+  for (const s of ['\x1b[I', '\x1b[O', '\x1b[24;80R', '\x1b[1;1R', '\x1b[?1;2c', '\x1b[?62;4c', '\x1b[>0;276;0c', '\x1b[>1;10;0c', '\x1b[0n', '\x1b[3n', '\x1b[1;9R', '\x1b[1;10R', '\x1b[1;20R', '\x1b[2;2R', '\x1b[11;2R', '\x1b[I\x1b[O', '\x1b[24;80R\x1b[?1;2c\x1b[I']) assert.strictEqual(L.isTermReply(s), true, JSON.stringify(s));
+  for (const s of ['', '\x1b[A', '\x1b[B', '\x1b[1;2R', '\x1b[1;3R', '\x1b[1;5R', '\x1b[1;8R', '\x1b[24;80R\x1b[1;2R', '\x1b[1;2R\x1b[I', '\x1b[I a', '\x1b[Ia', 'a\x1b[I', '\x1b[I\r', '\r', ' ', 'x', '\x1b[24;80', '\x1b[;R', '\x1b[R', '\x1b[24;80Rx', '\x1b[?1;2cx', '\x1b[?1;2;a c', '\x1b[4n', '\x1b[0n\n', '\x1b[200~x\x1b[201~', '\x1b]11;rgb:0/0/0\x07', '\x1b[1~', '\x1b[<0;1;1M', '\x1b']) assert.strictEqual(L.isTermReply(s), false, JSON.stringify(s));
+  for (const v of [undefined, null, 5, {}, [], '\x1b[I'.repeat(2000)]) assert.strictEqual(L.isTermReply(v), false);
+});
+t('talkLast: 마지막 줄의 role 과 시각(밀리초)', () => {
+  const a = '{"v":1,"at":1700000000,"role":"user","text":"질문"}'; const b = '{"v":1,"at":1700000005.5,"role":"assistant","text":"답"}';
+  assert.deepStrictEqual(L.talkLast(a + '\n' + b + '\n', true), { role: 'assistant', at: 1700000005500 }); // 초 -> 밀리초
+  assert.deepStrictEqual(L.talkLast(a + '\n', true), { role: 'user', at: 1700000000000 });
+  assert.deepStrictEqual(L.talkLast(a + '\n\n  \n' + b, true), { role: 'assistant', at: 1700000005500 });
+  assert.strictEqual(L.talkLast('', true), null); assert.strictEqual(L.talkLast('\n\n', true), null); assert.strictEqual(L.talkLast(undefined, true), null);
+  assert.strictEqual(L.talkLast(a + '\n{"v":1,"at":1,"role":"assistant"', true), null); // 마지막 줄이 깨졌다: 앞 줄로 대신하지 않는다
+  assert.strictEqual(L.talkLast('{"v":1,"at":1700000000,"role":"system","text":"x"}', true), null);
+  assert.strictEqual(L.talkLast('{"v":1,"at":"1700000000","role":"assistant","text":"x"}', true), null); // 시각이 숫자가 아니다
+  assert.strictEqual(L.talkLast('{"v":1,"at":1700000000,"role":"assistant","text":""}', true), null); // 보일 글이 없다
+  assert.strictEqual(L.talkLast(b, false), null); // 앞이 잘린 글에서 줄이 하나뿐이면 믿지 않는다
+  assert.deepStrictEqual(L.talkLast('토막' + a + '\n' + b, false), { role: 'assistant', at: 1700000005500 });
+});
+t('읽기 입력창: pty 에 쓰는 모든 자리가 markIn 을 부른다', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const lines = src.split('\n'); const writes = [];
+  lines.forEach((l, i) => { if (/\b(w\.term|self)\.write\(/.test(l) && !/^\s*\/\//.test(l)) writes.push(l + (i > 0 ? lines[i - 1] : '')); }); // 쓰는 줄과 바로 앞 줄
+  assert.ok(writes.length >= 10, 'pty 쓰기 줄 수 ' + writes.length);
+  for (const l of writes) assert.ok(/markIn\(w\)/.test(l) || /write\(cmd\)/.test(l), l.trim().slice(0, 80)); // 시작 명령(write(cmd))은 바로 앞 줄에서 markIn
+  assert.ok(/markIn\(w\); w\.watchProc = true|w\.watchProc = true; w\.sawUp = false; markIn\(w\);/.test(src));
+  assert.ok(/if \(!L\.isTermReply\(data\)\) markIn\(w\)/.test(src)); // pty:write 는 자동 응답만 뺀다
+});
+t('읽기 입력창 연결: IPC·preload·i18n 키 짝', () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  assert.ok(mainSrc.includes("ipcMain.handle('read:send'") && pre.includes("'read:send'") && pre.includes('readSend'));
+  for (const k of ['read.input.aria', 'read.input.ph', 'read.send', 'read.send.aria', 'read.input.busy', 'read.input.wait', 'read.input.shell', 'read.input.empty', 'read.input.toolong', 'read.input.rate', 'read.input.invalid', 'read.input.draft', 'read.input.settling', 'read.input.notclaude', 'read.input.first', 'read.input.touched', 'read.input.failed', 'read.drop.folded']) assert.ok(I.STR.ko[k] && I.STR.en[k], k);
+  assert.strictEqual(I.STR.ko['read.input.draft'], '터미널 입력줄에 쓰던 글이 있습니다. 터미널에서 지우거나 보낸 뒤 다시 시도하세요');
+  assert.strictEqual(I.STR.ko['read.input.settling'], '터미널 출력이 멈추면 다시 시도하세요');
+  assert.strictEqual(I.STR.ko['read.input.notclaude'], '세션이 실행 중일 때만 보낼 수 있습니다. 터미널을 확인하세요');
+  assert.strictEqual(I.STR.ko['read.input.ph'], '마루에게 보낼 글을 쓰세요. Enter로 보내고 Shift+Enter로 줄을 바꿉니다.');
+  assert.strictEqual(I.STR.en['read.input.ph'], 'Write a message. Press Enter to send. Press Shift+Enter for a new line.');
+  assert.strictEqual(I.STR.ko['read.input.wait'], '터미널에서 답하세요'); assert.strictEqual(I.STR.en['read.input.wait'], 'Answer in the terminal.');
+  for (const k of Object.keys(I.STR.ko).filter((x) => x.startsWith('read.'))) assert.ok(!/Claude/.test(I.STR.ko[k] + I.STR.en[k]), k); // 읽기 화면 문구에 제품 이름이 없다
+  assert.ok(!/(Enter|Shift\+Enter) 로/.test(I.STR.ko['read.input.ph']));
+  const mainSrc2 = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); // main 이 read:send 에서 새 판정(readCanSend)을 쓴다
+  assert.ok(/read:send[\s\S]*L\.readCanSend\(readCtxOf\(w, now\)\)/.test(mainSrc2));
+  assert.strictEqual(I.STR.ko['read.input.first'], '첫 메시지는 터미널에서 보내세요. 답변이 끝난 뒤부터 여기서 이어 쓸 수 있습니다');
+  assert.strictEqual(I.STR.ko['read.input.touched'], '마지막 답변 뒤에 입력이 있었습니다. 다음 답변이 끝날 때까지 터미널에서 이어 가세요');
+  assert.strictEqual(I.STR.ko['read.input.failed'], '마지막 턴이 답변으로 끝나지 않았습니다. 터미널에서 이어 가세요');
+  assert.strictEqual(I.STR.ko['read.fold'], '터미널 접기'); assert.strictEqual(I.STR.en['read.fold'], 'Collapse terminal');
+  assert.strictEqual(I.STR.ko['read.rail.aria'], '터미널 펼치기'); assert.strictEqual(I.STR.en['read.rail.aria'], 'Expand terminal');
+  assert.strictEqual(I.STR.ko['read.toggle.aria'], '읽기 화면'); assert.strictEqual(I.STR.en['read.toggle.aria'], 'Reading view');
+});
+t('읽기 화면 연결: 개발 모드 3개와 i18n 키 짝', () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  for (const m of ['read', 'readrail', 'readwait']) assert.ok(mainSrc.includes("'" + m + "'"), m);
+  assert.ok(/!app\.isPackaged && \['read', 'readrail', 'readwait'/.test(mainSrc)); // 패키징 빌드에서는 무시
+  const rk = Object.keys(I.STR.ko).filter((k) => k.startsWith('read.')); assert.ok(rk.length >= 15);
+  for (const k of rk) assert.ok(I.STR.en[k], k);
+});
+
+t('읽기 사용 횟수: readDayKey·Parse·Bump·저장', () => {
+  assert.strictEqual(L.readDayKey(new Date(2026, 0, 5, 23, 59)), '2026-01-05');
+  assert.match(L.readDayKey(), /^\d{4}-\d{2}-\d{2}$/);
+  const empty = { v: 1, days: {} };
+  for (const bad of [null, undefined, 5, '', '{', '[]', '{"v":2,"days":{}}', '{"v":1,"days":[]}', '{"v":1}']) assert.deepStrictEqual(L.readStatsParse(bad), empty, String(bad));
+  const p = L.readStatsParse('{"v":1,"days":{"2026-01-01":{"on":2,"sent":"3"},"bad":{"on":1,"sent":1},"2026-13-01":{"on":1,"sent":1},"2026-01-02":{"on":-1,"sent":1.5},"__proto__":{"on":9,"sent":9},"2026-01-03":[1]}}');
+  assert.deepStrictEqual(p, { v: 1, days: { '2026-01-01': { on: 2, sent: 0 }, '2026-01-02': { on: 0, sent: 0 } } });
+  assert.strictEqual(({}).on, undefined);
+  const a = { v: 1, days: { '2026-01-01': { on: 1, sent: 0 } } };
+  const snap = JSON.stringify(a);
+  const b = L.readStatsBump(a, '2026-01-01', 'on', 60);
+  assert.strictEqual(JSON.stringify(a), snap);
+  assert.deepStrictEqual(b.days['2026-01-01'], { on: 2, sent: 0 });
+  assert.deepStrictEqual(L.readStatsBump(a, '2026-01-02', 'sent', 60).days['2026-01-02'], { on: 0, sent: 1 });
+  for (const k of ['text', '__proto__', 'ON', '', undefined]) assert.deepStrictEqual(L.readStatsBump(a, '2026-01-01', k, 60), a);
+  assert.deepStrictEqual(L.readStatsBump(a, 'x', 'on', 60), a);
+  let s = { v: 1, days: {} };
+  for (let i = 1; i <= 70; i++) s = L.readStatsBump(s, '2026-02-' + String((i % 28) + 1).padStart(2, '0') + '', 'on', 3);
+  assert.ok(Object.keys(s.days).length <= 3);
+  let big = { v: 1, days: { '2026-01-01': { on: L.READ_STATS_MAX, sent: 0 } } };
+  assert.strictEqual(L.readStatsBump(big, '2026-01-01', 'on', 60).days['2026-01-01'].on, L.READ_STATS_MAX);
+  const days = {}; for (let i = 0; i < 70; i++) days[new Date(2026, 0, 1 + i).toISOString().slice(0, 10)] = { on: 1, sent: 0 };
+  const r = L.readStatsBump({ v: 1, days }, '2026-04-01', 'sent', 60);
+  assert.strictEqual(Object.keys(r.days).length, 60);
+  assert.ok(r.days['2026-04-01'] && !r.days['2026-01-01']);
+  const f = path.join(tmp, 'read-stats-test.json');
+  assert.strictEqual(L.readStatsSave(f, b), true);
+  assert.deepStrictEqual(L.readStatsLoad(f), b);
+  assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600);
+  assert.deepStrictEqual(L.readStatsLoad(path.join(tmp, 'none.json')), empty);
+  const lnk = path.join(tmp, 'read-stats-link.json'); fs.symlinkSync(f, lnk);
+  assert.deepStrictEqual(L.readStatsLoad(lnk), empty);
 });
 
 (async () => {

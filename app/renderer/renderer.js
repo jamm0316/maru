@@ -48,6 +48,7 @@
   function focusTerm() {
     if (modalOpen() || wsEdit) return; // 이름을 고치는 동안에는 터미널이 포커스를 가져가지 않는다(가져가면 입력칸이 포커스를 잃어 확정돼 버린다)
     if (detailOpen) { (detailMode === 'inbox' ? $('id-title') : detailMode === 'memory' ? $('mv-title') : detailMode === 'day' ? $('dv-title') : $('pd-title')).focus(); return; } // 상세가 터미널 자리를 차지하는 동안은 상세에 포커스를 둔다
+    if (readTermFolded) { readTa.focus(); return; } // 읽기 화면에서 터미널이 띠로 접혀 있으면 xterm 입력칸이 보이지 않는다: 입력창이 키 입력을 받는다
     const e = terms.get(activeId); if (e && e.opened) e.term.focus();
   }
   // Tab 순환(모달 안에서만)
@@ -171,7 +172,7 @@
   }
   function doFitNow() {
     const e = terms.get(activeId);
-    if (detailOpen || !e || !e.opened || e.host.hidden) return; // 상세가 터미널을 가리는 동안은 맞추지 않는다(크기 0 으로 pty 를 줄이지 않게)
+    if (detailOpen || !e || !e.opened || e.host.hidden || readTermFolded) return; // 상세가 터미널을 가리는 동안과 읽기 화면에서 띠로 접힌 동안은 맞추지 않는다(크기 0 으로 pty 를 줄이지 않게)
     try { e.fit.fit(); window.maru.ptyResize(e.id, e.term.cols, e.term.rows); } catch (x) { /* 레이아웃 전 */ }
   }
   // 활성 터미널만 보이고(나머지는 숨김, WebGL 해제), 보일 때 맞춤·재그리기. 처음 보일 때 open(숨겨진 채로 열면 글자 크기를 못 잼).
@@ -257,6 +258,7 @@
       const rg = Lib.panelRange(side, side === 'left' ? w.right : w.left, window.innerWidth); const h = colHandles[side];
       h.setAttribute('aria-valuemin', String(rg.min)); h.setAttribute('aria-valuemax', String(rg.max)); h.setAttribute('aria-valuenow', String(w[side]));
     }
+    if (readCurOn) applyReadLayout(); // 읽기 화면이 켜져 있으면 왼쪽 열 너비가 바뀌어도 읽기 영역이 360px 아래로 줄지 않게 터미널 폭 제한과 손잡이 aria 값을 다시 맞춘다
   }
   function saveCols() {
     if (!colsStore) return;
@@ -289,6 +291,7 @@
     if (!commit) { colsUser = d.user0; applyCols(); } else saveCols();
     clearTimeout(dragFitTimer); dragFitTimer = null;
     requestAnimationFrame(doFit); doFit(); // 놓은 뒤 최종 크기로 한 번 맞춘다(레이아웃 반영 뒤 한 번 더)
+    readFoldPass(); // 끄는 동안 건너뛴 읽기 화면 질문 접힘 재기를 끝난 뒤 한 번 돈다
     if (document.activeElement === colHandles[d.side]) { colHandles[d.side].blur(); focusTerm(); } // 마우스로 끌고 난 뒤 손잡이에 포커스가 남으면 이어서 친 글자가 터미널로 가지 않는다
   }
   function colDragKey(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); endColDrag(false); } }
@@ -324,6 +327,334 @@
   }
   window.addEventListener('resize', applyCols);
 
+  // ---- 읽기 화면: 가운데 읽기 영역 + 오른쪽 고정 폭 터미널(접으면 34px 띠). 켜짐·터미널 폭·접힘은 작업 공간별로 기억한다 ----
+  // 켜지면 #cols 에 read-on(오른쪽 카드 열·손잡이 숨김), 터미널 카드에 read-term(고정 폭)·rail(띠). 상세 화면이 열린 동안에는 읽기 배치를 적용하지 않는다.
+  let readTermFolded = false; // 읽기 배치에서 터미널이 띠로 접힌 상태(doFitNow 가 이 동안 맞추지 않는다)
+  let readStore = {}; // { 작업 공간 id: { on, w, rail } }. localStorage(Lib.READ_STORE_KEY)에는 colsStore 와 같은 조건에서만 쓴다(아니면 이번 실행 메모리에만)
+  let readDevDefault = null; let readDevWait = false; // 시험 전용(MARU_APP_UI=read|readrail|readwait): 저장값이 없는 작업 공간의 기본 상태 / 답 기다림 표시 흉내
+  let readTermOver = false; // 좁은 창에서 터미널이 읽기 영역을 덮고 있는가(저장하지 않는다)
+  let readCurId = null; let readCurOn = false; let readSig = '';
+  let readKey = ''; let readSeq = 0; let readFetching = false; let readLoaded = false; let readItems = []; let readMore = false; let readForceBottom = true;
+  const readExpanded = new Set(); // 펼쳐 둔 긴 질문(at:글 해시)
+  let readSaved = null; // 읽기 영역을 숨기기 직전의 스크롤({ id, near, top }). 다시 보일 때 되돌린다(숨은 동안은 스크롤 값이 0 이 된다)
+  let readResizing = false; let readResizeTimer = null; // 창 크기를 바꾸는 동안은 질문 접힘 재기를 건너뛴다
+  let readDevSend = false; // 시험 전용(MARU_APP_UI=read|readrail): 입력창이 보낼 수 있는 상태로 보인다(main 도 실제로 쓰지 않는다)
+  const readDrafts = new Map(); // 작업 공간 id -> 쓰던 글(렌더러 메모리에만 둔다)
+  let readSending = false; let readSendId = null; let readNoteKey = ''; // 보내는 중 / 마지막 보내기 거부 이유(i18n 키 끝 조각)
+  const readHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }; // 질문 글의 짧은 해시(펼침 상태 키용)
+  const termWrap = document.querySelector('.term-wrap');
+  const readEl = $('read'); const readBody = $('read-body'); const readList = $('read-list'); const readStatusEl = $('read-status'); const readHandle = $('read-h');
+  const readTa = $('read-ta'); const readSendBtn = $('read-send'); const readInputBox = $('read-input'); const readInputNote = $('read-input-note');
+  const readSt = (id) => readStore[id] || readDevDefault || { on: false, w: Lib.READ_TERM_DEFAULT, rail: false };
+  const readEffW = (st) => Lib.readTermWidth(st.w, window.innerWidth, colsApplied().left);
+  function readSave() {
+    if (!colsStore) return;
+    try {
+      if (wsList.length) { const ids = new Set(wsList.map((w) => w.id)); const keep = {}; for (const k of Object.keys(readStore)) if (ids.has(k)) keep[k] = readStore[k]; readStore = keep; } // 닫힌 작업 공간의 값은 지운다
+      localStorage.setItem(Lib.READ_STORE_KEY, JSON.stringify(readStore));
+    } catch (x) { /* 저장 실패해도 이번 실행에서는 그대로 동작 */ }
+  }
+  function readSet(patch, persist) {
+    if (!activeId) return;
+    readStore = Lib.readStoreSet(readStore, activeId, { ...readSt(activeId), ...patch });
+    applyReadLayout(); if (persist) readSave();
+  }
+  function readReset() { readSeq++; readKey = ''; readItems = []; readMore = false; readLoaded = false; readExpanded.clear(); readForceBottom = true; readSaved = null; readList.replaceChildren(); }
+  const readNearBottom = () => readBody.scrollHeight - readBody.scrollTop - readBody.clientHeight <= 80;
+  const readUx = () => { if (readDevWait) return 'waiting'; const w = wsList.find((x) => x.id === activeId); return w ? (w.ux || w.state) : ''; };
+  function renderReadStatus() { // 작업 중·답 기다림 표시(읽기 영역 맨 아래 줄)와 접힌 띠의 점·테두리
+    const ux = readCurOn ? readUx() : ''; const wait = ux === 'waiting'; const busy = ux === 'busy';
+    const txt = wait ? T('read.wait') : busy ? T('read.busy') : '';
+    const near = readNearBottom(); const was = readStatusEl.hidden;
+    readStatusEl.classList.toggle('wait', wait);
+    if (readStatusEl.textContent !== txt) readStatusEl.textContent = txt;
+    readStatusEl.hidden = txt === '';
+    if (was !== readStatusEl.hidden && near && !readEl.hidden) readBody.scrollTop = readBody.scrollHeight; // 맨 아래를 보고 있었으면 새 줄까지 따라간다
+    $('read-rail-dot').className = 'read-rail-dot' + (wait ? ' wait' : busy ? ' busy' : '');
+    termWrap.classList.toggle('read-wait', wait); // 접힌 띠의 테두리를 주황으로(펼치지는 않는다)
+    renderReadInput();
+  }
+  function placeReadHandle() {
+    if (readHandle.hidden) return;
+    const c = colsEl.getBoundingClientRect(); const t = termWrap.getBoundingClientRect(); const st = readSt(activeId);
+    readHandle.style.left = (t.left - 12) + 'px'; readHandle.style.top = (c.top + 16) + 'px'; readHandle.style.height = Math.max(0, c.height - 32) + 'px';
+    readHandle.setAttribute('aria-valuemin', String(Lib.READ_TERM_MIN)); readHandle.setAttribute('aria-valuemax', String(Lib.readTermMax(window.innerWidth, colsApplied().left))); readHandle.setAttribute('aria-valuenow', String(readEffW(st)));
+  }
+  new ResizeObserver(() => { placeReadHandle(); readFoldPass(); }).observe(colsEl); new ResizeObserver(placeReadHandle).observe(termWrap); new ResizeObserver(() => { readFoldPass(); readFitTa(); }).observe(readEl);
+  function applyReadLayout() { // 멱등: 켜짐·상세·창 폭·터미널 접힘이 바뀔 때마다 부른다
+    const id = activeId; const st = id ? readSt(id) : null; const wantOn = !!st && st.on === true;
+    const idChanged = id !== readCurId; const wasFolded = readTermFolded;
+    if (idChanged || wantOn !== readCurOn) { if (idChanged) readDraftSwap(readCurId, id); readCurId = id; readCurOn = wantOn; readTermOver = false; readReset(); if (wantOn) readTick(); } //작업 공간이 바뀌었거나 켜고 꺼졌다: 받아 둔 것을 비우고 새로 받는다
+    const on = wantOn && !detailOpen; const narrow = Lib.readIsNarrow(window.innerWidth);
+    if (!on || !narrow) readTermOver = false;
+    const over = on && readTermOver; const railed = on && !over && (narrow || st.rail === true); const eff = on ? readEffW(st) : 0;
+    readTermFolded = railed;
+    colsEl.classList.toggle('read-on', on);
+    if (on) colsEl.style.setProperty('--read-tw', eff + 'px'); else colsEl.style.removeProperty('--read-tw');
+    termWrap.classList.toggle('read-term', on && !over); termWrap.classList.toggle('rail', railed);
+    const hide = !on || over; const wasHidden = readEl.hidden;
+    if (hide && !wasHidden) readSaved = { id, near: readNearBottom(), top: readBody.scrollTop }; // 숨기면 스크롤 값이 0 이 된다: 숨기기 직전에 기억한다
+    readEl.hidden = hide; $('read-rail').hidden = !railed;
+    if (!hide && wasHidden) readRestoreScroll();
+    const tg = $('read-toggle'); tg.hidden = !id || detailOpen; tg.setAttribute('aria-pressed', String(wantOn));
+    $('read-fold').hidden = !(on && !narrow && !railed); $('read-back').hidden = !over;
+    readHandle.hidden = !(on && !railed && !over);
+    placeReadHandle(); renderReadStatus();
+    if (railed && (!wasFolded || idChanged)) { // 터미널이 띠로 접혔다(접을 때·좁은 창·접힌 작업 공간으로 전환·저장된 접힘으로 켤 때): 키 입력이 갈 곳을 입력창으로 옮긴다
+      const a = document.activeElement;
+      if (idChanged || !a || a === document.body || termWrap.contains(a)) focusTerm(); // 접힌 상태의 focusTerm 은 입력창에 포커스를 준다. 다른 입력칸에서 치는 중이면 뺏지 않는다
+    }
+    const sig = [on, railed, over, eff, narrow].join();
+    if (sig !== readSig) { readSig = sig; requestAnimationFrame(() => { placeReadHandle(); doFit(); readFoldPass(); }); } // 터미널 크기가 바뀌었다: xterm 을 다시 맞춘다(접힌 동안은 doFitNow 가 막는다)
+  }
+  window.addEventListener('resize', () => {
+    readResizing = true; clearTimeout(readResizeTimer); readResizeTimer = setTimeout(() => { readResizing = false; readFoldPass(); }, 150); // 크기를 바꾸는 동안은 질문 접힘을 재지 않고 멈춘 뒤 한 번만 잰다
+    applyReadLayout();
+  });
+  function readRestoreScroll() { // 숨었다가 다시 보일 때: 맨 아래를 보고 있었으면 맨 아래로, 아니면 가능한 한 원래 위치로
+    const s = readSaved; readSaved = null;
+    readFoldPass(); readFitTa(); // 접힘 단추와 입력창 높이를 먼저 맞춘 뒤 스크롤한다(높이가 바뀌므로)
+    if (readForceBottom && readLoaded) { readBody.scrollTop = readBody.scrollHeight; readForceBottom = false; return; } // 숨은 동안 처음 받은 대화
+    if (s && s.id === readCurId) readBody.scrollTop = s.near ? readBody.scrollHeight : s.top;
+  }
+  // ---- 읽기 화면 그리기: 모두 textContent 로만. 모르는 블록·조각은 글로 그리거나 건너뛴다 ----
+  function readInl(parent, inl) {
+    if (!Array.isArray(inl)) return;
+    for (const p of inl) {
+      if (!p || typeof p.v !== 'string') continue;
+      if (p.s === 'b') parent.append(el('strong', '', p.v));
+      else if (p.s === 'c') parent.append(el('code', 'read-c', p.v));
+      else parent.append(document.createTextNode(p.v));
+    }
+  }
+  function readListEl(b, depth) {
+    const ord = b.t === 'ol'; const l = el(ord ? 'ol' : 'ul', 'read-ul');
+    if (ord && Number.isInteger(b.start) && b.start >= 0 && b.start < 1e6) l.start = b.start;
+    for (const it of Array.isArray(b.items) ? b.items : []) {
+      if (!it || typeof it !== 'object') continue;
+      const li = el('li'); readInl(li, it.inl);
+      if (depth < 1 && it.sub && typeof it.sub === 'object' && Array.isArray(it.sub.items)) li.append(readListEl({ t: it.sub.t === 'ol' ? 'ol' : 'ul', start: it.sub.start, items: it.sub.items }, depth + 1)); // 하위 목록은 한 단계
+      l.append(li);
+    }
+    return l;
+  }
+  function readTable(b) {
+    const wrap = el('div', 'read-tw'); wrap.tabIndex = 0; wrap.setAttribute('role', 'region'); wrap.setAttribute('aria-label', T('read.table.aria')); // 가로로 넘치면 이 상자만 가로 스크롤
+    const tb = el('table', 'read-table'); const al = Lib.readTableAligns(b);
+    const cell = (tag, c, k) => { const e = el(tag, al[k] === 'right' ? 'read-al-r' : al[k] === 'center' ? 'read-al-c' : ''); readInl(e, c); return e; };
+    const head = Array.isArray(b.head) ? b.head : [];
+    const thead = el('thead'); const hr = el('tr');
+    head.forEach((c, k) => { const th = cell('th', c, k); th.scope = 'col'; hr.append(th); }); thead.append(hr); tb.append(thead);
+    const tbody = el('tbody');
+    for (const r of Array.isArray(b.rows) ? b.rows : []) {
+      if (!Array.isArray(r)) continue;
+      const tr = el('tr'); for (let k = 0; k < head.length; k++) tr.append(cell('td', r[k], k)); tbody.append(tr);
+    }
+    tb.append(tbody); wrap.append(tb);
+    return wrap;
+  }
+  function readCode(b) {
+    const lang = typeof b.lang === 'string' ? b.lang.trim().slice(0, 40) : '';
+    const w = el('div', 'read-code' + (lang ? ' has-lang' : ''));
+    if (lang) { const l = el('span', 'read-code-lang', lang); l.setAttribute('aria-hidden', 'true'); w.append(l); }
+    const pre = el('pre'); pre.tabIndex = 0; pre.setAttribute('role', 'group'); pre.setAttribute('aria-label', T('read.code.aria') + (lang ? ' ' + lang : ''));
+    pre.append(el('code', '', typeof b.text === 'string' ? b.text : '')); w.append(pre);
+    return w;
+  }
+  function readBlock(host, b) {
+    if (!b || typeof b !== 'object') return;
+    const t = b.t;
+    if (t === 'h') { const lv = b.level === 1 || b.level === 2 ? b.level : 3; const h = el('h' + (lv + 2), 'read-h read-h' + lv); readInl(h, b.inl); host.append(h); }
+    else if (t === 'ul' || t === 'ol') host.append(readListEl(b, 0));
+    else if (t === 'quote') { const q = el('blockquote', 'read-quote'); readInl(q, b.inl); host.append(q); }
+    else if (t === 'hr') host.append(el('hr', 'read-hr'));
+    else if (t === 'table') host.append(readTable(b));
+    else if (t === 'code') host.append(readCode(b));
+    else if (Array.isArray(b.inl)) { const p = el('p'); readInl(p, b.inl); host.append(p); } // 문단과 모르는 종류
+    else return;
+    if (b.cut === true) host.append(el('p', 'read-note', T('read.cut')));
+  }
+  function readItemEl(it, idx) {
+    if (!it || typeof it !== 'object') return null;
+    if (it.role === 'user') {
+      const wrap = el('div', 'read-item q'); const text = typeof it.text === 'string' ? it.text : '';
+      if (text) {
+        const q = el('div', 'read-q'); const k = String(it.at) + ':' + readHash(text); const open = readExpanded.has(k);
+        const tx = el('div', 'read-q-t' + (open ? '' : ' fold'), text);
+        const btn = el('button', 'read-q-more', T(open ? 'read.less' : 'read.more')); btn.type = 'button'; btn.hidden = true; btn.setAttribute('aria-expanded', String(open)); // 6줄을 넘을 때만 readFoldPass 가 보인다
+        btn.addEventListener('click', () => {
+          if (readExpanded.has(k)) readExpanded.delete(k); else readExpanded.add(k);
+          const o = readExpanded.has(k); tx.classList.toggle('fold', !o); btn.textContent = T(o ? 'read.less' : 'read.more'); btn.setAttribute('aria-expanded', String(o));
+        });
+        q.append(tx, btn); wrap.append(q);
+      }
+      if (it.lost === true) wrap.append(el('p', 'read-note', T('read.lost')));
+      if (it.cut === true) wrap.append(el('p', 'read-note', T('read.cut')));
+      return wrap;
+    }
+    if (it.role === 'assistant') {
+      const wrap = el('div', 'read-item'); const box = el('div', 'read-a');
+      for (const b of Array.isArray(it.blocks) ? it.blocks : []) { try { readBlock(box, b); } catch (x) { /* 이 블록만 건너뛴다 */ } }
+      if (it.lost === true) box.append(el('p', 'read-note', T('read.lost')));
+      if (it.cut === true) box.append(el('p', 'read-note', T('read.cut')));
+      if (it.truncated === true) box.append(el('p', 'read-note', T('read.trunc')));
+      wrap.append(box); return wrap;
+    }
+    return null;
+  }
+  function readFoldPass() { // 접힌 질문이 6줄을 넘치는지 재어 "더 보기"를 보인다. 읽기 영역이 숨어 있으면(크기 0)·손잡이를 끌거나 창 크기를 바꾸는 동안은 건너뛴다(끝난 뒤 한 번 돈다)
+    if (readEl.hidden || colDragging || readDrag || readResizing) return;
+    const todo = []; // 먼저 모두 재고(읽기) 나중에 한꺼번에 쓴다(질문마다 레이아웃을 다시 계산하지 않게)
+    for (const q of readList.querySelectorAll('.read-q')) {
+      const tx = q.firstElementChild; const btn = q.lastElementChild; if (!tx || !btn || tx === btn) continue;
+      if (!tx.classList.contains('fold')) { todo.push([btn, true]); continue; }
+      if (tx.clientHeight === 0) continue;
+      todo.push([btn, tx.scrollHeight > tx.clientHeight + 1]);
+    }
+    for (const [btn, show] of todo) if (btn.hidden === show) btn.hidden = !show;
+  }
+  function readRender() {
+    const hidden = readEl.hidden; // 숨은 동안은 크기가 0 이라 스크롤을 셈하지 않는다(다시 보일 때 readRestoreScroll 이 위치를 되돌린다)
+    const near = hidden ? false : readNearBottom(); const top = hidden ? 0 : readBody.scrollTop; const force = readForceBottom;
+    const frag = document.createDocumentFragment();
+    if (readMore) frag.append(el('p', 'read-old', T('read.old')));
+    if (!readItems.length && readLoaded) frag.append(el('p', 'read-empty', T('read.empty')));
+    readItems.forEach((it, idx) => { try { const n = readItemEl(it, idx); if (n) frag.append(n); } catch (x) { /* 이 항목만 건너뛴다 */ } });
+    readList.replaceChildren(frag);
+    if (hidden) return;
+    readFoldPass();
+    readBody.scrollTop = near || force ? readBody.scrollHeight : top; // 맨 아래 근처(80px)를 보고 있었으면 새 맨 아래로, 위로 올려 읽는 중이면 그 자리를 지킨다
+    readForceBottom = false;
+  }
+  async function readTick() { // 1초 poll 에서 부른다. 켜진 활성 작업 공간에 대해서만 받는다
+    try {
+      renderReadStatus();
+      if (!activeId || readCurId !== activeId || !readCurOn || readFetching || detailOpen) return; // 상세 화면이 열려 읽기 배치가 풀린 동안은 받지 않는다
+      const id = activeId; const my = readSeq; readFetching = true;
+      let res = null;
+      try { res = await window.maru.talkGet(id, readKey); } catch (x) { res = null; } finally { readFetching = false; }
+      if (my !== readSeq || id !== activeId || !readCurOn) return; // 그 사이 작업 공간이 바뀌었거나 꺼졌다
+      if (!res || typeof res !== 'object' || typeof res.key !== 'string' || res.same === true || !Array.isArray(res.items)) return;
+      readKey = res.key; readItems = res.items; readMore = res.more === true; readLoaded = true;
+      readRender();
+    } catch (x) { /* 읽기 화면 오류가 앱을 멈추지 않게 한다 */ }
+  }
+  $('read-toggle').addEventListener('click', () => { if (modalOpen() || !activeId) return; const on = readSt(activeId).on !== true; readSet({ on }, true); if (on) window.maru.readMark('on'); if (!on) focusTerm(); });
+  $('read-close').addEventListener('click', () => { if (modalOpen() || !activeId) return; readSet({ on: false }, true); focusTerm(); });
+  $('read-fold').addEventListener('click', () => { if (modalOpen()) return; readSet({ rail: true }, true); focusTerm(); }); // 접히면 포커스는 입력창으로 간다(applyReadLayout 도 옮기지만 단추에 남은 포커스를 확실히 걷는다)
+  $('read-rail').addEventListener('click', () => {
+    if (modalOpen()) return;
+    if (Lib.readIsNarrow(window.innerWidth)) { readTermOver = true; applyReadLayout(); } else readSet({ rail: false }, true); // 좁은 창에서는 저장 없이 읽기 영역을 덮는다
+    doFit(); focusTerm();
+  });
+  $('read-back').addEventListener('click', () => { readTermOver = false; applyReadLayout(); focusTerm(); }); // 다시 접힌 터미널 대신 입력창에 포커스가 간다
+  // 읽기 영역과 터미널 사이 손잡이: 끌기(Esc 로 취소)·키보드·더블클릭(기본 폭). 폭은 놓을 때 저장한다
+  let readDrag = null; // { id, x0, w0, w00 }
+  function readSetW(px, persist) { readSet({ w: Lib.readTermWidth(px, window.innerWidth, colsApplied().left) }, persist); }
+  function endReadDrag(commit) {
+    if (!readDrag) return;
+    const d = readDrag; readDrag = null; colDragging = false;
+    document.body.classList.remove('col-drag'); readHandle.classList.remove('active');
+    document.removeEventListener('keydown', readDragKey, true);
+    try { if (readHandle.hasPointerCapture(d.id)) readHandle.releasePointerCapture(d.id); } catch (x) { /* 무시 */ }
+    if (!commit) readSet({ w: d.w00 }, false); else readSave();
+    clearTimeout(dragFitTimer); dragFitTimer = null;
+    requestAnimationFrame(doFit); doFit(); readFoldPass(); // 끄는 동안 건너뛴 질문 접힘 재기를 끝난 뒤 한 번 돈다
+    if (document.activeElement === readHandle) { readHandle.blur(); focusTerm(); }
+  }
+  function readDragKey(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); endReadDrag(false); } }
+  readHandle.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || readDrag || modalOpen() || !activeId) return;
+    e.preventDefault();
+    const st = readSt(activeId); readDrag = { id: e.pointerId, x0: e.clientX, w0: readEffW(st), w00: st.w };
+    colDragging = true; document.body.classList.add('col-drag'); readHandle.classList.add('active');
+    try { readHandle.setPointerCapture(e.pointerId); } catch (x) { /* 무시 */ }
+    document.addEventListener('keydown', readDragKey, true);
+  });
+  readHandle.addEventListener('pointermove', (e) => { if (readDrag && readDrag.id === e.pointerId) readSetW(readDrag.w0 - (e.clientX - readDrag.x0), false); });
+  readHandle.addEventListener('pointerup', (e) => { if (readDrag && readDrag.id === e.pointerId) endReadDrag(true); });
+  readHandle.addEventListener('pointercancel', (e) => { if (readDrag && readDrag.id === e.pointerId) endReadDrag(false); });
+  readHandle.addEventListener('lostpointercapture', (e) => { if (readDrag && readDrag.id === e.pointerId) endReadDrag(true); });
+  readHandle.addEventListener('dblclick', (e) => { e.preventDefault(); if (!modalOpen()) readSetW(Lib.READ_TERM_DEFAULT, true); });
+  readHandle.addEventListener('keydown', (e) => {
+    if (modalOpen() || readDrag || e.isComposing || e.altKey || e.ctrlKey || e.metaKey || !activeId) return;
+    const d = Lib.panelKeyDelta('right', e.key, e.shiftKey); if (d === null) return; // 오른쪽 열 손잡이와 같은 키: ← 가 터미널을 넓힌다
+    e.preventDefault(); e.stopPropagation();
+    const cur = readEffW(readSt(activeId));
+    readSetW(d === 'default' ? Lib.READ_TERM_DEFAULT : d === 'min' ? Lib.READ_TERM_MIN : d === 'max' ? Lib.readTermMax(window.innerWidth, colsApplied().left) : cur + d, true);
+  });
+  // ---- 읽기 화면 입력창: 쉬는 중일 때만 보낼 수 있다(main 이 다시 검사한다). 잠겨 있어도 글은 쓸 수 있다 ----
+  function readLock() { // '' (보낼 수 있다) | 'busy' | 'wait' | 'draft' | 'settling' | 'notclaude' | 'first' | 'touched' | 'failed' | 'shell'. 미리 보이는 이유일 뿐이고 최종 판단은 main(read:send)이다
+    if (readDevWait) return 'wait';
+    if (readDevSend) return '';
+    const w = wsList.find((x) => x.id === activeId); if (!w) return 'shell';
+    const ux = w.ux || w.state;
+    if (ux === 'waiting') return 'wait';
+    if (ux === 'busy') return 'busy';
+    if (typeof w.sr !== 'string') return 'shell'; // main 이 판정을 보내지 않았다: 잠근다
+    const sr = w.sr; // main 의 L.readCanSend 결과(''=통과)
+    return sr === '' ? '' : sr === 'busy' ? 'busy' : sr === 'waiting' ? 'wait' : sr === 'draft' || sr === 'settling' || sr === 'notclaude' || sr === 'first' || sr === 'touched' || sr === 'failed' ? sr : 'shell';
+  }
+  function readFitTa() { // 내용에 따라 1줄에서 8줄까지 늘어난다. 숨어 있으면(크기 0) 건너뛴다
+    if (readEl.hidden) return;
+    readTa.style.height = 'auto';
+    const lh = parseFloat(getComputedStyle(readTa).lineHeight) || 21; const max = Math.round(lh * 8 + 10);
+    const h = readTa.scrollHeight; if (h > 0) readTa.style.height = Math.min(h, max) + 'px';
+  }
+  function renderReadInput() {
+    const lock = readLock(); const wait = lock === 'wait';
+    const noteKey = lock || readNoteKey; // 잠긴 이유가 보내기 거부 이유보다 먼저다
+    const txt = noteKey ? T('read.input.' + noteKey) : '';
+    readInputBox.classList.toggle('wait', wait); readInputNote.classList.toggle('wait', wait);
+    if (readInputNote.textContent !== txt) readInputNote.textContent = txt;
+    readInputNote.hidden = txt === '';
+    readSendBtn.disabled = readSending || lock !== '' || readTa.value.trim() === ''; // 보내는 중에는 잠가 두 번 보내지 않게 한다
+    const ro = readSending && readSendId === readCurId; if (readTa.readOnly !== ro) readTa.readOnly = ro; // 보내는 동안 그 글이 든 입력창은 읽기 전용: 보낸 글과 그 사이에 쓴 글이 섞이지 않는다
+    const ph = T('read.input.ph'); if (readTa.placeholder !== ph) readTa.placeholder = ph;
+  }
+  function readDraftSwap(from, to) { // 작업 공간을 바꿀 때 쓰던 글을 맡기고 새 작업 공간의 글을 꺼낸다(디스크에는 쓰지 않는다)
+    if (from) { if (readTa.value !== '') readDrafts.set(from, readTa.value); else readDrafts.delete(from); }
+    const ids = new Set(wsList.map((x) => x.id)); for (const k of [...readDrafts.keys()]) if (!ids.has(k)) readDrafts.delete(k); // 닫힌 작업 공간의 글은 버린다
+    readTa.value = to && readDrafts.has(to) ? readDrafts.get(to) : ''; readNoteKey = ''; readFitTa();
+  }
+  async function readSendNow() {
+    if (readSending || !activeId || modalOpen()) return;
+    if (activeId !== readCurId) { applyReadLayout(); return; } // 입력창의 글은 readCurId 작업 공간의 것이다. 다르면 보내지 않고 입력창을 지금 작업 공간에 맞춘 뒤 멈춘다
+    const id = activeId; const raw = readTa.value;
+    if (raw.trim() === '') return;
+    if (readLock() !== '') { renderReadInput(); return; }
+    readSending = true; readSendId = id; readNoteKey = ''; renderReadInput();
+    let res = null;
+    try { res = await window.maru.readSend(id, raw); } catch (x) { res = null; }
+    readSending = false; readSendId = null;
+    if (res && res.ok === true) {
+      if (id === activeId) { if (readTa.value === raw) { readTa.value = ''; readFitTa(); } } else if (readDrafts.get(id) === raw) readDrafts.delete(id); // 보내는 사이 작업 공간을 바꿨으면 맡겨 둔 글을 지운다
+    } else if (id === activeId) {
+      const r = res && typeof res.reason === 'string' ? res.reason : '';
+      readNoteKey = r === 'busy' ? 'busy' : r === 'waiting' ? 'wait' : r === 'draft' || r === 'settling' || r === 'notclaude' || r === 'first' || r === 'touched' || r === 'failed' ? r : r === 'shell' || r === 'nosession' ? 'shell' : r === 'toolong' || r === 'empty' || r === 'rate' ? r : 'invalid'; // 글은 그대로 둔다
+    }
+    renderReadInput();
+    if (id === activeId && !readEl.hidden) readTa.focus();
+  }
+  let readComposing = false; let readComposeEnd = 0;
+  readTa.addEventListener('compositionstart', () => { readComposing = true; });
+  readTa.addEventListener('compositionend', () => { readComposing = false; readComposeEnd = Date.now(); });
+  readTa.addEventListener('input', () => { readNoteKey = ''; readFitTa(); renderReadInput(); });
+  readTa.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return; // Shift+Enter 는 줄바꿈(기본 동작)
+    if (e.isComposing || e.keyCode === 229 || readComposing || Date.now() - readComposeEnd < 50) return; // 한글 등 조합 중의 Enter 는 조합 확정용이다(터미널 입력과 같은 판단)
+    e.preventDefault();
+    readSendNow();
+  });
+  readSendBtn.addEventListener('click', () => { readSendNow(); });
+  function initRead(init) {
+    if (colsStore) { try { readStore = Lib.readParseStore(localStorage.getItem(Lib.READ_STORE_KEY)); } catch (x) { readStore = {}; } } // 스모크·가짜 화면(colsStore 거짓)에서는 읽지도 쓰지도 않는다
+    const m = init && typeof init.uiOpen === 'string' ? init.uiOpen : '';
+    if (m === 'read' || m === 'readrail' || m === 'readwait') readDevDefault = { on: true, w: Lib.READ_TERM_DEFAULT, rail: m !== 'read' }; // 시험 전용: 저장값이 없는 작업 공간은 켜진 채로
+    readDevWait = m === 'readwait'; readDevSend = m === 'read' || m === 'readrail';
+    applyReadLayout();
+  }
+
   // ---- 작업 공간 목록 ----
   let wsSeq = 0; let wsKey = null; const shownWsNotes = new Set();
   const stateKey = (s) => (['busy', 'idle', 'waiting', 'exited', 'pending', 'unavailable', 'unknown', 'turnEnded'].includes(s) ? s : 'none');
@@ -351,6 +682,7 @@
     for (const w of r.list) if (!terms.has(w.id)) { const e = createTerm(w.id); fresh.push(e); if (w.bp) e.term.write('\x1b[?2004h'); } // 화면 복구로 다시 붙을 때 붙여넣기 모드를 되살린다
     for (const e of [...terms.values()]) if (!ids.has(e.id)) disposeTerm(e);
     wsList = r.list; activeId = ids.has(r.active) ? r.active : null;
+    if (activeId !== readCurId) applyReadLayout(); // renderWs 가 일찍 끝나는 경로(조합 중·끄는 중)에서도 입력창의 글을 맡기고 새 작업 공간의 글로 바꾼다
     wsCollapsedIds = Array.isArray(r.collapsed) ? r.collapsed.filter((x) => typeof x === 'string') : [];
     syncConsent(r.consent);
     renderWs(); sbParentGone();
@@ -924,6 +1256,7 @@
   // ---- 원격 제어 토글(터미널 위 막대): 상태는 main 이 정한 w.rc 를 그대로 그린다. 눌러도 main 이 문장을 보내고 확인된 증거가 올 때까지 표시가 바뀌지 않는다 ----
   const RC_STATES = ['off', 'on', 'turning-on', 'turning-off', 'unknown'];
   function renderRc() {
+    applyReadLayout(); // 상세 화면이 열리고 닫힐 때와 활성 작업 공간이 바뀔 때마다 여기를 지나므로, 읽기 배치도 같이 맞춘다
     const b = $('rc-toggle'); if (!b) return;
     const a = wsList.find((w) => w.id === activeId);
     b.hidden = !a || detailOpen; // 활성 작업 공간이 없거나 상세 화면이 터미널을 가리면 숨긴다
@@ -1771,6 +2104,7 @@
 
   let lastKey = null;
   async function poll() {
+    readTick(); // 읽기 화면이 켜진 활성 작업 공간만 대화를 받는다(끝을 기다리지 않는다)
     try {
       const p = await window.maru.getPanels();
       if (p) {
@@ -1787,6 +2121,7 @@
     applyStatic();
     if (lastPanels) renderStatic(lastPanels);
     wsKey = null; renderWs();
+    if (readCurOn) { readRender(); renderReadStatus(); } // 읽기 화면의 안내 문구도 새 언어로
     if (detailOpen && detailMode === 'project' && detail) renderDetail(false);
     if (detailOpen && detailMode === 'inbox' && inboxDet) renderInboxDetail(false);
     if (memView) memView.relabel();
@@ -2136,7 +2471,7 @@
   // 창 어디서든 파일 drop 이 페이지 이동을 일으키지 않게(터미널 밖은 무시). 텍스트 drag 는 건드리지 않는다.
   window.addEventListener('dragover', (e) => { if (hasFiles(e)) { e.preventDefault(); if (!dropZone.contains(e.target)) e.dataTransfer.dropEffect = 'none'; } });
   window.addEventListener('drop', (e) => { if (hasFiles(e)) e.preventDefault(); });
-  const canDrop = () => !!activeId && !modalOpen() && !detailOpen;
+  const canDrop = () => !!activeId && !modalOpen() && !detailOpen && !readTermFolded; // 접힌 띠에는 놓지 않는다(보이지 않는 터미널에 경로가 들어가면 안 된다)
   dropZone.addEventListener('dragover', (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
@@ -2151,6 +2486,7 @@
     dropZone.classList.remove('drop');
     const files = Array.prototype.slice.call(e.dataTransfer.files || []);
     if (!files.length) return;
+    if (readTermFolded) { note(T('read.drop.folded')); return; }
     if (!canDrop()) { note(T('drop.busy-ui')); return; }
     let res = null;
     try { res = await window.maru.dropFiles(activeId, files); } catch (x) { /* 무시 */ }
@@ -2639,7 +2975,7 @@
       if (init.uiDoneOpen === true) doneOpen = true; // 시험 전용(MARU_APP_DONE=open)
     }
     applyStatic();
-    initCols(init);
+    initCols(init); initRead(init);
     if (homeNotice) { $('home-warn').textContent = T('home.warn.' + homeNotice); $('home-warn').hidden = false; }
     renderBusy('none');
     tickClock(); setInterval(tickClock, 15000);

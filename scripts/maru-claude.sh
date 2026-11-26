@@ -70,15 +70,18 @@ if [ -n "$csq" ]; then
 fi
 # 앱 세션용 `--settings <JSON>`(전역 설정은 건드리지 않는다. 그 폴더의 자체 설정·훅과는 합쳐진다). 두 부분이 있고 둘 다 python3 가 없거나 JSON 을 못 만들면 붙이지 않고 그대로 실행한다.
 #  1) 상태 훅(마루 폴더 밖 세션): 앱이 띄운 세션(MARU_APP_SESSION)이 마루 저장소 밖 폴더에서 돌면 저장소의 프로젝트 설정(.claude/settings.json)이 실리지 않아
-#     앱이 상태를 알 수 없다. 그 세션에 agent-state.sh 훅을 붙인다. 저장소 루트 폴더에서는 프로젝트 설정의 훅이 이미 돌므로 붙이지 않는다. 그 밖의 모든 폴더(저장소의 하위 폴더 포함:
+#     앱이 상태를 알 수 없다. 그 세션에 agent-state.sh 훅을 붙인다(PreToolUse·PostToolUse·UserPromptSubmit 은 busy: 권한 확인 창은 도구 호출 때 뜨므로, Claude 가 스스로 시작한 턴에서도 창이 뜨기 전에 busy 가 된다). 저장소 루트 폴더에서는 프로젝트 설정의 훅이 이미 돌므로 붙이지 않는다. 그 밖의 모든 폴더(저장소의 하위 폴더 포함:
 #     Claude Code 는 시작한 폴더의 .claude/settings.json 만 읽는다)에 붙인다. 붙였으면 data/state/app/<id>.hooked 표지를 남겨 앱이 훅이 붙은 세션임을 알게 한다(표지가 없으면 앱은 예전처럼 상태 알 수 없음으로 본다).
+#     같은 조건에서 UserPromptSubmit·Stop 에 talk-log.sh 훅(timeout 5)도 붙여 질문·최종 답변을 data/state/app/<id>.talk.jsonl 에 남긴다(앱 읽기 화면용). MARU_NO_TALK_LOG=1 이면 붙이지 않는다.
 #  2) 플랜 사용량(어느 폴더든): statusLine 으로 usage-status.sh 를 붙인다(앱 하단 띠용 data/usage.json; 사용자의 기존 statusLine 은 그 스크립트가 통과시킨다). MARU_NO_USAGE_STATUS=1 이면 붙이지 않는다.
 sset=()
 if [ -n "${MARU_APP_SESSION:-}" ] && [ -n "$SCRIPTS" ]; then
   sroot=${SCRIPTS%/*}; shere=$(pwd -P 2>/dev/null) || shere=""
-  sh_arg=""; su_arg=""
+  sh_arg=""; su_arg=""; tk_arg=""
   if [ -f "$SCRIPTS/agent-state.sh" ] && [ ! -L "$SCRIPTS/agent-state.sh" ] && [ -x "$SCRIPTS/agent-state.sh" ] && [ -z "${MARU_NO_STATE_HOOKS:-}" ]; then
     case "$shere" in ""|"$sroot") ;; *) sh_arg="$SCRIPTS/agent-state.sh" ;; esac
+    # 읽기 화면 기록 훅은 상태 훅과 같은 조건에서만 붙인다(MARU_NO_TALK_LOG=1 이면 붙이지 않는다)
+    if [ -n "$sh_arg" ] && [ -f "$SCRIPTS/talk-log.sh" ] && [ ! -L "$SCRIPTS/talk-log.sh" ] && [ -x "$SCRIPTS/talk-log.sh" ] && [ "${MARU_NO_TALK_LOG:-}" != 1 ]; then tk_arg="$SCRIPTS/talk-log.sh"; fi
   fi
   if [ -f "$SCRIPTS/usage-status.sh" ] && [ ! -L "$SCRIPTS/usage-status.sh" ] && [ -x "$SCRIPTS/usage-status.sh" ] && [ -z "${MARU_NO_USAGE_STATUS:-}" ]; then su_arg="$SCRIPTS/usage-status.sh"; fi
   if [ -n "$sh_arg$su_arg" ]; then
@@ -96,9 +99,13 @@ if sys.argv[1]:
             e["matcher"] = m
         return [e]
     d["hooks"] = {
-        "UserPromptSubmit": h("busy"), "PostToolUse": h("busy"), "Stop": h("idle"), "StopFailure": h("idle"),
+        "UserPromptSubmit": h("busy"), "PreToolUse": h("busy"), "PostToolUse": h("busy"), "Stop": h("idle"), "StopFailure": h("idle"),
         "Notification": h("waiting", "permission_prompt|elicitation_dialog"),
         "SubagentStart": h("sub-start"), "SubagentStop": h("sub-stop")}
+    if sys.argv[3]:   # 읽기 화면 기록 훅: 상태 훅 뒤에 같은 항목으로 붙인다(timeout 5초)
+        q = shlex.quote(sys.argv[3])
+        for ev, a in (("UserPromptSubmit", "user"), ("Stop", "assistant")):
+            d["hooks"][ev][0]["hooks"].append({"type": "command", "command": q + " " + a, "timeout": 5})
 if sys.argv[2]:
     d["statusLine"] = {"type": "command", "command": shlex.quote(sys.argv[2])}
     # padding: usage-status.sh 가 통과시킬 사용자 statusLine 과 같은 파일(현재 폴더의 .claude/settings.local.json, settings.json, 사용자 설정 순)에서, 숫자(0~20 정수)일 때만 가져온다
@@ -118,7 +125,7 @@ if sys.argv[2]:
                 d["statusLine"]["padding"] = pd
             break
 print(json.dumps(d, separators=(",", ":")))
-' "$sh_arg" "$su_arg" 2>/dev/null) || sj=""
+' "$sh_arg" "$su_arg" "$tk_arg" 2>/dev/null) || sj=""
     case "$sj" in
       '{"hooks":{'*|'{"statusLine":{'*)
         sset=(--settings "$sj")
