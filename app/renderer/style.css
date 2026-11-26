@@ -693,6 +693,45 @@ body.col-drag #terminal,body.col-drag .proj-detail{pointer-events:none}
 .read-code pre{margin:0;padding:10px 12px;overflow-x:auto;white-space:pre;tab-size:2;font:12.5px/1.55 ui-monospace,'SF Mono',Menlo,monospace;color:var(--soft);scrollbar-width:thin;scrollbar-color:#3A2A1C transparent}
 .read-code.has-lang pre{padding-top:24px}
 .read-code-lang{position:absolute;top:4px;right:10px;font-size:11px;line-height:1.4;color:var(--mute);pointer-events:none}
+/* 화면 블록(에이전트가 만든 화면): 점선 테두리 상자 안에만 그린다. 색은 위 변수만 쓴다. 단추는 앱 단추(실선·주황 채움)와 모양이 다르다(점선·글자만) */
+.read-surf{margin:0;border:1px dashed var(--mute);border-radius:8px;padding:10px 14px 12px;display:flex;flex-direction:column;gap:10px;min-width:0;background:transparent}
+.read-surf-src{margin:0;display:flex;align-items:center;gap:6px;font-size:11px;letter-spacing:1px;color:var(--mute)}
+.read-surf-src::before{content:'';width:6px;height:6px;border:1px dashed var(--mute);border-radius:1px;flex:none}
+.read-a .read-surf-title{margin:0;font-size:16px;font-weight:700;line-height:1.35;color:var(--ink)}
+.read-surf-stats{display:grid;grid-template-columns:repeat(var(--n,4),minmax(0,1fr));gap:8px}
+.read-surf-stat{border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-width:0;display:flex;flex-direction:column;gap:2px;background:var(--bg)}
+.read-surf-stat-l{font-size:12px;line-height:1.4;color:var(--mute)}
+.read-surf-stat-v{font-size:24px;font-weight:700;line-height:1.2;color:var(--ink);font-variant-numeric:tabular-nums}
+.read-surf-stat-n{font-size:12px;line-height:1.4;color:var(--soft)}
+.read-surf-bars{display:flex;flex-direction:column;gap:6px}
+.read-surf-bar{display:grid;grid-template-columns:minmax(0,9em) minmax(0,1fr) minmax(0,auto);align-items:center;gap:10px;font-size:13px}
+.read-surf-bar-l{color:var(--soft);overflow-wrap:anywhere}
+.read-surf-bar-t{height:8px;border-radius:2px;background:var(--line);overflow:hidden}
+.read-surf-bar-f{display:block;height:8px;background:var(--soft)}
+.read-surf-bar-x{color:var(--mute);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.read-surf-kv{margin:0;display:grid;grid-template-columns:minmax(0,10em) minmax(0,1fr);gap:4px 14px;font-size:13px}
+.read-surf-kv dt{color:var(--mute);overflow-wrap:anywhere}
+.read-surf-kv dd{margin:0;color:var(--ink);overflow-wrap:anywhere}
+.read-surf-note{margin:0;border-left:4px solid var(--soft);padding:4px 0 4px 10px;font-size:13px;line-height:1.55;color:var(--soft)}
+.read-surf-note.sw{border-left:8px solid var(--ink);padding-left:8px;color:var(--ink);font-weight:700}
+.read-surf-tt{margin:0 0 4px;font-size:12px;color:var(--mute)}
+.read-surf-q{margin:0;font-size:13px;color:var(--soft)}
+.read-surf-opts{display:flex;flex-direction:column;align-items:stretch;gap:6px;margin-top:6px}
+.read-sb{font:inherit;cursor:pointer;color:var(--soft);background:transparent;border:1px dashed var(--mute);border-radius:6px;text-align:left;overflow-wrap:anywhere}
+.read-sb:hover:not(:disabled){color:var(--ink);border-color:var(--soft)}
+.read-sb:focus-visible{outline:2px solid var(--or);outline-offset:1px}
+.read-sb:disabled{opacity:.45;cursor:default}
+.read-sb.opt{font-size:13px;line-height:1.5;padding:6px 10px}
+.read-sb.opt::before{content:'\203A  ';color:var(--mute)}
+.read-sb.nx{font-size:12px;line-height:1.4;padding:3px 9px}
+.read-surf-next{display:flex;flex-wrap:wrap;align-items:center;gap:6px;border-top:1px dashed var(--line);padding-top:8px}
+.read-surf-next-l{font-size:11px;color:var(--mute);margin-right:2px}
+.read-first{margin:auto;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
+.read-first p{margin:0;color:var(--mute)}
+.read-first-b{font:inherit;font-size:13px;color:var(--ink);background:transparent;border:1px solid var(--or);border-radius:12px;padding:5px 14px;cursor:pointer}
+.read-first-b:hover{background:var(--sel)}
+.read-first-b:focus-visible{outline:2px solid var(--or);outline-offset:2px}
+@media (max-width:700px){.read-surf-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.read-surf-bar{grid-template-columns:minmax(0,6em) minmax(0,1fr) minmax(0,auto)}.read-surf-kv{grid-template-columns:minmax(0,7em) minmax(0,1fr)}}
 .read-status{flex:none;max-width:100%;font-size:13px;color:var(--mute)}
 .read-input-wrap{flex:none;padding:10px 24px 14px;border-top:1px solid var(--line)}
 .read-input{display:flex;align-items:flex-end;gap:8px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:8px 8px 8px 12px}
@@ -707,7 +746,7 @@ body.col-drag #terminal,body.col-drag .proj-detail{pointer-events:none}
 .read-input-note[hidden]{display:none}
 .read-status[hidden]{display:none}
 .read-status.wait{color:var(--or2);font-weight:700;background:var(--sel);border:1px solid var(--or);border-radius:8px;padding:8px 12px}
-.cols.read-on .right-col,.cols.read-on .col-handle.r{display:none}
+.cols.read-on:not(.read-side) .right-col,.cols.read-on:not(.read-side) .col-handle.r{display:none} /* 터미널이 접히고 읽기 영역이 360px 이상 남으면(read-side) 오른쪽 카드 열을 다시 보인다 */
 .term-wrap.read-term{flex:0 0 var(--read-tw,420px)}
 .cols.read-on .term-bar{flex-wrap:wrap;gap:6px 8px;padding:8px 12px}
 .cols.read-on #term-cwd{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

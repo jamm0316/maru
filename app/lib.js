@@ -10,7 +10,7 @@ const NAME_MAX = 64;
 
 // 제어문자, bidi, zero-width, 보이지 않는 서식·채움 문자, Tags, 변형 선택자, 한글 채움, 미할당·사설·서로게이트(u 플래그)
 const BAD_SRC = '[' + [
-  '\\u0000-\\u001F', '\\u007F-\\u009F', '\\u00AD', '\\u034F', '\\u061C', '\\u115F', '\\u1160', '\\u180E',
+  '\\u0000-\\u001F', '\\u007F-\\u009F', '\\u00AD', '\\u034F', '\\u061C', '\\u115F', '\\u1160', '\\u17B4', '\\u17B5', '\\u180B-\\u180F',
   '\\u200B-\\u200F', '\\u2028-\\u202E', '\\u2060-\\u206F', '\\u2800', '\\u3164', '\\uFE00-\\uFE0F', '\\uFEFF', '\\uFFA0',
   '\\uFFF9-\\uFFFB', '\\u{E0000}-\\u{E007F}', '\\u{E0100}-\\u{E01EF}', '\\p{Cf}', '\\p{Co}', '\\p{Cn}', '\\p{Cs}',
 ].join('') + ']';
@@ -4194,6 +4194,7 @@ function panelKeyDelta(side, key, shift) {
 const READ_TERM_DEFAULT = 420; // 읽기 화면을 켰을 때 터미널 기본 폭
 const READ_TERM_MIN = 320;
 const READ_MAIN_MIN = 360; // 읽기 영역이 항상 남겨야 할 폭
+const READ_RAIL_W = 34; // 접힌 터미널 띠의 폭(style.css 의 .term-wrap.rail 과 같아야 한다)
 const READ_STORE_KEY = 'maru.read.v1';
 const READ_STORE_MAX = 100; // 저장하는 작업 공간 수 상한
 // 좁은 창(읽기 영역만 보이고 터미널은 띠로 접힌다). 창 너비를 모르면 좁지 않다고 본다
@@ -4203,6 +4204,14 @@ function readTermMax(viewportWidth, leftWidth) {
   const v = panelVw(viewportWidth); if (v === null) return READ_TERM_MIN;
   const left = readIsNarrow(v) ? PANEL_LEFT_NARROW : panelNum(leftWidth, PANEL_DEFAULT.left);
   return Math.max(READ_TERM_MIN, v - 4 * PANEL_PAD - left - READ_MAIN_MIN);
+}
+// 터미널이 접힌 띠(READ_RAIL_W)일 때 오른쪽 카드 열을 같이 보일 수 있나: 창 - 여백 2개 - 간격 3개 - 왼쪽 열 - 띠 - 오른쪽 열 이 읽기 영역 최소 폭 이상이어야 한다
+// 오른쪽 열 폭은 화면에 적용된 값(clampPanelWidths 의 right)을 받는다. 창 너비를 모르면 보이지 않는다
+function readSideShown(viewportWidth, leftWidth, rightWidth) {
+  const v = panelVw(viewportWidth); if (v === null) return false;
+  const left = readIsNarrow(v) ? PANEL_LEFT_NARROW : panelNum(leftWidth, PANEL_DEFAULT.left);
+  const right = panelNum(rightWidth, PANEL_DEFAULT.right);
+  return v - 5 * PANEL_PAD - left - READ_RAIL_W - right >= READ_MAIN_MIN;
 }
 // 원하는 폭(숫자가 아니면 기본값) -> 화면에 적용할 폭
 function readTermWidth(want, viewportWidth, leftWidth) {
@@ -4237,9 +4246,11 @@ function readParseStore(text) {
   }
   return out;
 }
+// 저장된 상태가 없는 작업 공간의 기본값: 읽기 화면이 켜져 있고 터미널은 접힌 띠다. 저장된 상태가 있으면 그것을 따른다
+function readDefault() { return { on: true, w: READ_TERM_DEFAULT, rail: true }; }
 // store 에 id 의 상태 일부를 바꾼 새 객체. 상한을 넘으면 앞쪽(오래된) 것부터 뺀다
 function readStoreSet(store, id, patch) {
-  const base = store && typeof store === 'object' ? store : {}; const cur = base[id] || { on: false, w: READ_TERM_DEFAULT, rail: false }; const p = patch && typeof patch === 'object' ? patch : {};
+  const base = store && typeof store === 'object' ? store : {}; const cur = base[id] || readDefault(); const p = patch && typeof patch === 'object' ? patch : {};
   const next = { on: p.on === undefined ? cur.on === true : p.on === true, w: p.w === undefined ? panelNum(cur.w, READ_TERM_DEFAULT) : panelNum(p.w, READ_TERM_DEFAULT), rail: p.rail === undefined ? cur.rail === true : p.rail === true };
   const out = {}; for (const k of Object.keys(base)) if (k !== id) out[k] = base[k];
   out[id] = next;
@@ -4334,6 +4345,114 @@ function readCanSend(c) {
   return { ok: true };
 }
 
+// ---- 읽기 화면 입력창: 세션의 첫 메시지만 다루는 길(readCanSend 는 이 경우 'first' 로 거부한다. 거기에는 손대지 않는다) ----
+// 사전 판정(순수). 이 pty 를 띄운 뒤 훅 기록이 하나도 없고(rawState 없음·ux none), 앱이 claude 실행 줄을 쓴 뒤 pty 에 입력이 없고, 출력이 1초 이상 조용하고, claude 가 뜬 지 2초가 지났을 때만 ok.
+// c = readCanSend 의 c + { inN(pty 입력 횟수, markIn 마다 오른다), launchInN(앱이 claude 실행 줄을 쓴 직후의 inN; 없으면 0), claudeUp, claudeUpAt(claudeUp 이 참이 된 시각), now }  -> { ok:true } | { ok:false, reason }
+const READ_FIRST_QUIET_MS = 1000; const READ_FIRST_UP_MS = 2000; const READ_FIRST_LIVE_QUIET_MS = 150;
+// Enter 직전에도 쓰는 공통 조건(1~4번과 백그라운드 작업·붙여넣기 모드). 거부 이유 또는 null
+function readFirstBase(c) {
+  const { hasTerm, cc, procName, knownName, claudeUp, hooked, ux, bg, bracketed } = c;
+  if (hasTerm !== true || cc !== true) return 'nosession';
+  if (!procBase(knownName) || !isClaudeFront(procName, knownName)) return 'notclaude'; // 이름 허용 목록만으로는 통과시키지 않는다
+  if (ux === 'waiting') return 'waiting';
+  if (ux === 'busy') return 'busy';
+  if (typeof bg !== 'number' || !(bg >= 0)) return 'nosession';
+  if (bg > 0) return 'busy';
+  if (claudeUp !== true || hooked !== true) return 'nosession';
+  if (bracketed !== true) return 'nosession';
+  return null;
+}
+function readCanSendFirst(c) {
+  try {
+    if (!c || typeof c !== 'object') return { ok: false, reason: 'nosession' };
+    const bad = readFirstBase(c); if (bad) return { ok: false, reason: bad };
+    const { rawState, ux, inN, launchInN, quietMs, dirty, claudeUpAt, now } = c;
+    if ((rawState !== null && rawState !== undefined) || ux !== 'none') return { ok: false, reason: 'first' }; // 훅 기록이 이미 있다
+    if (!Number.isSafeInteger(launchInN) || launchInN <= 0 || !Number.isSafeInteger(inN)) return { ok: false, reason: 'first' };
+    if (inN !== launchInN) return { ok: false, reason: 'touched' }; // claude 실행 줄을 쓴 뒤 pty 에 입력이 있었다(밀리초 시각이 아니라 계속 오르는 횟수로 비교)
+    if (!(Number.isFinite(quietMs) && quietMs >= READ_FIRST_QUIET_MS)) return { ok: false, reason: 'settling' };
+    if (!Number.isFinite(claudeUpAt) || claudeUpAt <= 0 || !Number.isFinite(now) || now - claudeUpAt < READ_FIRST_UP_MS) return { ok: false, reason: 'settling' };
+    if (dirty !== false) return { ok: false, reason: 'draft' };
+    return { ok: true };
+  } catch { return { ok: false, reason: 'nosession' }; }
+}
+// 화면 판정(순수). snap = { lines:[문자열], plain:[문자열], cursorX, cursorY, rows, cols }. plain 은 lines 와 같은 줄 수이고 흐린 글자(안내 글) 칸을 공백으로 바꾼 글이다.
+// 경계선·커서·선택 창 흔적은 lines 로, 비어 있음과 글 비교는 plain 으로 본다. text 가 없으면 사전 확인(상자 안이 비어 있고 커서가 입력줄 표시 줄에 있어야 한다), 있으면 사후 확인(붙여넣은 글이 상자 안에 보여야 한다) -> { ok, why }
+const PB_MAX_LINES = 1000; const PB_MAX_LINE = 2000; const PB_BOX_MAX = 30; const PB_FOLD_MIN = 800;
+const pbNoWs = (s) => s.replace(/\s+/g, '');
+function promptBoxCheck(snap, text) {
+  const no = (why) => ({ ok: false, why });
+  try {
+    if (!snap || typeof snap !== 'object' || !Array.isArray(snap.lines)) return no('shape');
+    const { lines, cursorX, cursorY, rows, cols } = snap;
+    if (lines.length < 1 || lines.length > PB_MAX_LINES) return no('size');
+    if (!Number.isInteger(cursorX) || cursorX < 0 || !Number.isInteger(cursorY) || cursorY < 0 || cursorY >= lines.length) return no('shape');
+    if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) return no('shape');
+    for (const s of lines) { if (typeof s !== 'string') return no('shape'); if (s.length > PB_MAX_LINE) return no('size'); }
+    const plain = snap.plain; // 흐린 글자 칸을 공백으로 바꾼 같은 줄들. 비어 있음·글 비교는 이것으로 본다(안내 글은 흐리고 입력된 글은 흐리지 않다)
+    if (!Array.isArray(plain) || plain.length !== lines.length) return no('plain');
+    for (const s of plain) { if (typeof s !== 'string') return no('shape'); if (s.length > PB_MAX_LINE) return no('size'); }
+    const post = text !== undefined && text !== null;
+    if (post && typeof text !== 'string') return no('shape');
+    if (isPromptBorder(lines[cursorY])) return no('cursor');
+    let a = -1; let b = -1;
+    for (let i = cursorY - 1; i >= 0; i--) if (isPromptBorder(lines[i])) { a = i; break; }
+    for (let i = cursorY + 1; i < lines.length; i++) if (isPromptBorder(lines[i])) { b = i; break; }
+    if (a < 0 || b < 0) return no('border');
+    if (b - a - 1 > PB_BOX_MAX || b - a - 1 < 1) return no('border');
+    // 입력줄 표시: 위 경계선 바로 다음 줄이 > 또는 ❯ 로 시작한다(앞의 공백·│ 는 허용)
+    const first = lines[a + 1].replace(/^[\s│]+/, '');
+    if (!(first.startsWith('>') || first.startsWith('❯'))) return no('marker');
+    if (first.length > 1 && !/[  ]/.test(first[1])) return no('marker'); // 표시 뒤는 공백(U+00A0 포함)이거나 줄 끝
+    if (!post) { // 사전 확인: 상자 안은 정확히 한 줄이고, 커서는 입력줄 표시 바로 뒤(표시 칸 + 1 또는 + 2)에 있다
+      if (b - a - 1 !== 1) return no('box');
+      if (cursorY !== a + 1) return no('cursor');
+      const col = lines[a + 1].length - first.length; // 표시 앞은 공백·│ 뿐(한 칸 글자)이라 글자 위치가 칸 위치다
+      if (cursorX !== col + 1 && cursorX !== col + 2) return no('cursor');
+    }
+    // 상자 밖의 선택 창 흔적: 커서 표시가 붙은 번호 선택지, 숫자+쌍점 줄이 둘 이상 이어진 설문
+    let run = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (i >= a && i <= b) { run = 0; continue; }
+      const t = lines[i].replace(/^[\s│]+/, '');
+      if (/^[❯>]\s*\d+\s*[.)]/.test(t)) return no('choice');
+      if ((t.match(/(?:^|\s)\d+:\s/g) || []).length >= 2) return no('survey'); // 한 줄에 `숫자: ` 가 둘 이상
+      if (/^\d+:\s/.test(t)) { run++; if (run >= 2) return no('survey'); } else run = 0;
+    }
+    const parts = [];
+    for (let i = a + 1; i < b; i++) {
+      let t = plain[i].replace(/^[\s│]+/, '');
+      if (i === a + 1) t = (t.startsWith('>') || t.startsWith('❯')) ? t.slice(1) : '?' + t; // 입력줄 표시(plain 에 없으면 글이 남은 것으로 본다)
+      parts.push(t.replace(/[\s│]+$/, ''));
+    }
+    const inner = pbNoWs(parts.join('\n'));
+    if (!post) return inner === '' ? { ok: true, why: 'empty' } : no('notempty');
+    const tl = text.split('\n'); const l1 = pbNoWs(tl[0]); if (!l1) return no('text');
+    const oneLine = tl.length === 1;
+    if (/^\[Pastedtext#\d+/.test(inner) && (!oneLine || Array.from(text).length >= PB_FOLD_MIN)) return { ok: true, why: 'folded' }; // 접힘 표시는 여러 줄이거나 800자 이상인 글에만
+    if (oneLine) return inner === pbNoWs(text) ? { ok: true, why: 'same' } : no('mismatch'); // 한 줄 글: 공백을 뺀 전체가 같아야 한다(상자 안 줄바꿈은 이어 붙여 비교)
+    const pre = Array.from(l1).length < 8 ? l1 + pbNoWs(tl[1]) : l1; // 여러 줄 글: 첫 줄 전체(8자 미만이면 둘째 줄까지)로 시작해야 한다
+    return inner.startsWith(pre) ? { ok: true, why: 'prefix' } : no('mismatch');
+  } catch { return no('shape'); }
+}
+// 붙여넣은 뒤 Enter 를 보낼지 가리는 판단(순수). s = { elapsedMs, now, pasteAt, lastOutputAt, boxOk, ctx(readCtxOf 와 같은 모양), sameWs, sameTerm, ptyInN, firstPasteInN, snapAt(그 화면을 요청하기 직전 시각; 출력은 그보다 먼저여야 한다) }
+// -> { act:'send' } | { act:'wait' } | { act:'fail', why }. 실패 조건(작업 공간·pty 바뀜, 붙여넣기 뒤 다른 입력, 세션 조건 깨짐)이 먼저, 그다음 준비 여부, 마지막에 시간 초과
+const READ_FIRST_WAIT_MS = 1500; const READ_FIRST_POLL_MS = 50;
+function firstSendVerdict(s) {
+  try {
+    if (!s || typeof s !== 'object') return { act: 'fail', why: 'shape' };
+    if (s.sameWs !== true) return { act: 'fail', why: 'workspace' };
+    if (s.sameTerm !== true) return { act: 'fail', why: 'pty' };
+    if (!Number.isSafeInteger(s.ptyInN) || !Number.isSafeInteger(s.firstPasteInN) || s.ptyInN !== s.firstPasteInN) return { act: 'fail', why: 'input' }; // 붙여넣은 뒤 pty 입력이 없었다(횟수 비교)
+    const bad = s.ctx && typeof s.ctx === 'object' ? readFirstBase(s.ctx) : 'nosession'; // dirty 는 보지 않는다: 앱이 방금 붙여넣어 참이다
+    if (bad) return { act: 'fail', why: bad };
+    const ready = Number.isFinite(s.lastOutputAt) && Number.isFinite(s.pasteAt) && s.lastOutputAt > s.pasteAt && Number.isFinite(s.snapAt) && s.lastOutputAt < s.snapAt && Number.isFinite(s.now) && s.now - s.lastOutputAt >= READ_FIRST_LIVE_QUIET_MS && s.boxOk === true;
+    if (ready) return { act: 'send' };
+    if (!Number.isFinite(s.elapsedMs) || s.elapsedMs >= READ_FIRST_WAIT_MS) return { act: 'fail', why: 'timeout' };
+    return { act: 'wait' };
+  } catch { return { act: 'fail', why: 'shape' }; }
+}
+
 // ---- 읽기 화면 사용 횟수(내용 없이 날짜별 횟수만): { v:1, days: { 'YYYY-MM-DD': { on, sent } } } ----
 const READ_STATS_KEEP_DAYS = 60;
 const READ_STATS_MAX = 1000000; // 한 값의 상한
@@ -4356,15 +4475,16 @@ function readStatsParse(text) {
     if (!READ_STATS_DAY_RE.test(k)) continue;
     const e = o.days[k];
     if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
-    out.days[k] = { on: readStatsInt(e.on) ? Math.min(e.on, READ_STATS_MAX) : 0, sent: readStatsInt(e.sent) ? Math.min(e.sent, READ_STATS_MAX) : 0 };
+    const g = (v) => (readStatsInt(v) ? Math.min(v, READ_STATS_MAX) : 0);
+    out.days[k] = { on: g(e.on), sent: g(e.sent), surf: g(e.surf), fill: g(e.fill) };
   }
   return { v: 1, days: { ...out.days } };
 }
-// key 가 on|sent 일 때만 그날 값에 1 을 더하고 keepDays 보다 오래된 날을 지운 새 객체를 돌려준다(입력은 바꾸지 않는다)
+// key 가 on|sent|surf|fill 일 때만 그날 값에 1 을 더하고 keepDays 보다 오래된 날을 지운 새 객체를 돌려준다(입력은 바꾸지 않는다)
 function readStatsBump(stats, day, key, keepDays = READ_STATS_KEEP_DAYS) {
   const src = readStatsParse(JSON.stringify(stats));
-  if ((key !== 'on' && key !== 'sent') || typeof day !== 'string' || !READ_STATS_DAY_RE.test(day)) return src;
-  const cur = src.days[day] || { on: 0, sent: 0 };
+  if ((key !== 'on' && key !== 'sent' && key !== 'surf' && key !== 'fill') || typeof day !== 'string' || !READ_STATS_DAY_RE.test(day)) return src;
+  const cur = src.days[day] || { on: 0, sent: 0, surf: 0, fill: 0 };
   src.days[day] = { ...cur, [key]: Math.min(cur[key] + 1, READ_STATS_MAX) };
   const keep = Object.keys(src.days).sort().reverse().slice(0, Number.isSafeInteger(keepDays) && keepDays > 0 ? keepDays : READ_STATS_KEEP_DAYS);
   const days = {};
@@ -4513,6 +4633,33 @@ function mdAlignOf(cell) {
   const l = cell[0] === ':'; const r = cell[cell.length - 1] === ':';
   return l && r ? 'center' : l ? 'left' : r ? 'right' : null;
 }
+// 표 줄 목록(첫 줄이 머리줄, 둘째 줄이 구분 줄이면 정렬을 뽑는다) -> 표 블록. 칸 총수 상한이면 머리줄도 못 만들어 null.
+// inl(칸 글자) 은 칸 하나의 조각 배열을 낸다. mdParse 와 화면 블록(surfaceParse)이 같이 쓴다
+function mdTableBuild(rowsRaw, st, maxCols, maxRows, inl) {
+  const headCells = mdCells(rowsRaw[0]); let align = []; let from = 1;
+  if (rowsRaw.length > 1) {
+    const sc = mdSepCells(rowsRaw[1]);
+    if (sc) { align = sc.map(mdAlignOf); from = 2; }
+  }
+  const width = Math.min(headCells.length, maxCols); let cut = headCells.length > maxCols;
+  const fit = (cells) => { // 칸 총수 상한을 넘기면 null
+    if (st.cells + width > MD_CELLS_MAX) { st.truncated = true; st.full = true; return null; }
+    st.cells += width; const r = []; for (let k = 0; k < width; k++) r.push(inl(cells[k] === undefined ? '' : cells[k])); return r;
+  };
+  const head = fit(headCells);
+  if (!head) return null;
+  const rows = [];
+  for (let k = from; k < rowsRaw.length && !st.full; k++) {
+    if (rows.length >= maxRows) { cut = true; break; }
+    const r = fit(mdCells(rowsRaw[k]));
+    if (!r) { cut = true; break; }
+    rows.push(r);
+  }
+  const al = []; for (let k = 0; k < width; k++) al.push(align[k] === undefined ? null : align[k]);
+  const b = { t: 'table', align: al, head, rows };
+  if (cut) { b.cut = true; st.truncated = true; }
+  return b;
+}
 function mdParse(text) {
   const st = { truncated: false, full: false, pieces: 0, cells: 0 }; const blocks = []; let clean = '';
   try {
@@ -4530,16 +4677,17 @@ function mdParse(text) {
       let m = MD_FENCE_RE.exec(line);
       if (m && !(m[2][0] === '`' && m[3].includes('`'))) { // 코드 펜스
         const ind = m[1].length; const ch = m[2][0]; const len = m[2].length; const lang = m[3].trim().split(/\s/)[0].slice(0, MD_LANG_MAX);
-        const body = []; let cut = false; i++;
+        const body = []; let cut = false; let closed = false; i++;
         while (i < nl) {
           const cl = lines[i]; const cm = MD_FENCE_RE.exec(cl);
-          if (cm && cm[2][0] === ch && cm[2].length >= len && cm[3].trim() === '') { i++; break; }
+          if (cm && cm[2][0] === ch && cm[2].length >= len && cm[3].trim() === '') { i++; closed = true; break; }
           if (body.length < MD_CODE_LINES) { let k = 0; while (k < ind && (cl[k] === ' ' || cl[k] === '\t')) k++; body.push(cl.slice(k)); } else cut = true; // 여는 펜스의 들여쓰기만큼만 걷는다
           i++;
         }
         let code = body.join('\n');
         if (code.length > MD_PIECE_MAX) { code = mdCut(code, MD_PIECE_MAX); cut = true; }
         const b = { t: 'code', lang, text: code };
+        if (!closed) b.open = true; // 닫는 펜스 없이 끝났다(화면 블록은 이런 블록을 화면으로 바꾸지 않는다)
         if (cut) { b.cut = true; st.truncated = true; }
         if (!add(b)) break;
         continue;
@@ -4551,28 +4699,8 @@ function mdParse(text) {
       if (mdTableStart(line) || pipeless) { // 표
         const rowsRaw = [lines[i++]];
         if (pipeless) { rowsRaw.push(lines[i++]); while (i < nl && lines[i].trim() !== '' && lines[i].includes('|') && !mdIsStart(lines[i])) rowsRaw.push(lines[i++]); } else while (i < nl && mdIsTable(lines[i])) rowsRaw.push(lines[i++]);
-        const headCells = mdCells(rowsRaw[0]); let align = []; let from = 1;
-        if (rowsRaw.length > 1) {
-          const sc = mdSepCells(rowsRaw[1]);
-          if (sc) { align = sc.map(mdAlignOf); from = 2; }
-        }
-        const width = Math.min(headCells.length, MD_TABLE_COLS); let cut = headCells.length > MD_TABLE_COLS;
-        const fit = (cells) => { // 칸 총수 상한을 넘기면 null
-          if (st.cells + width > MD_CELLS_MAX) { st.truncated = true; st.full = true; return null; }
-          st.cells += width; const r = []; for (let k = 0; k < width; k++) r.push(mdInline(cells[k] === undefined ? '' : cells[k], st)); return r;
-        };
-        const head = fit(headCells);
-        if (!head) break;
-        const rows = [];
-        for (let k = from; k < rowsRaw.length && !st.full; k++) {
-          if (rows.length >= MD_TABLE_ROWS) { cut = true; break; }
-          const r = fit(mdCells(rowsRaw[k]));
-          if (!r) { cut = true; break; }
-          rows.push(r);
-        }
-        const al = []; for (let k = 0; k < width; k++) al.push(align[k] === undefined ? null : align[k]);
-        const b = { t: 'table', align: al, head, rows };
-        if (cut) { b.cut = true; st.truncated = true; }
+        const b = mdTableBuild(rowsRaw, st, MD_TABLE_COLS, MD_TABLE_ROWS, (c) => mdInline(c, st));
+        if (!b) break;
         if (!add(b)) break;
         continue;
       }
@@ -4621,6 +4749,135 @@ function mdParse(text) {
   return { blocks, truncated: st.truncated };
 }
 
+// ---- 화면 블록 해석(읽기 화면 2부). 언어 이름이 maru-surface 인 코드 블록의 글 -> 부품 목록. 규격은 docs/plans/surface-panel.md 11절 ----
+const SURF_LINES_MAX = 40; // 블록 줄 상한
+const SURF_CHARS_MAX = 4000; // 블록 글자 상한(정리 뒤, UTF-16 단위)
+const SURF_TITLE_MAX = 60;
+const SURF_STATS_MAX = 8; const SURF_STAT_LABEL_MAX = 30; const SURF_STAT_VALUE_MAX = 20; const SURF_STAT_NOTE_MAX = 40;
+const SURF_BARS_MAX = 8; const SURF_BAR_TEXT_MAX = 20; // 막대 이름은 SURF_STAT_LABEL_MAX 를 쓴다
+const SURF_KV_MAX = 12; const SURF_KV_KEY_MAX = 30; const SURF_KV_VALUE_MAX = 200;
+const SURF_NOTES_MAX = 4; const SURF_NOTE_TEXT_MAX = 300; // note 와 warn 을 합친 개수
+const SURF_TABLE_COLS = 6; const SURF_TABLE_ROWS = 20; const SURF_CELL_MAX = 200;
+const SURF_CHOICE_MIN = 2; const SURF_CHOICE_MAX = 5; const SURF_OPTION_MAX = 120; const SURF_QUESTION_MAX = 300;
+const SURF_NEXT_MAX = 3; const SURF_NEXT_TEXT_MAX = 120;
+const SURF_TEXT_MAX = 300; // 모르는 줄 한 줄의 글자 상한
+const SURF_KEYS = new Set(['title', 'stat', 'bar', 'kv', 'note', 'warn', 'table', 'choice', 'next']);
+const SURF_KEY_RE = /^ {0,4}([a-z]+) *:(.*)$/; // 앞 공백 4칸 이하, 콜론 앞 공백을 받는다
+const SURF_OPT_RE = /^[ \t]*[-*][ \t]+(.*)$/;
+const SURF_LSEP_RE = new RegExp('^[\\n\\r\\u2028\\u2029]$'); // 줄 구분 글자 하나
+const SURF_LAST_LINE_RE = new RegExp('[\\n\\r\\u2028\\u2029][^\\n\\r\\u2028\\u2029]*$'); // 마지막 줄(구분 글자부터)
+const SURF_CMD_RE =/^[!\/#]/; // 정리한 뒤 맨 앞이 이 글자인 글은 단추로 만들지 않는다(명령·슬래시 명령·주석처럼 보낼 수 있다)
+const SURF_NUM = '[0-9]+(?:\\.[0-9]+)?';
+const SURF_FRAC_RE = new RegExp('^(' + SURF_NUM + ')[ \\t]*/[ \\t]*(' + SURF_NUM + ')$');
+const SURF_PCT_RE = new RegExp('^(' + SURF_NUM + ')[ \\t]*%$');
+// 칸 나누기: | 로 나누고 \| 는 글자 |. 칸 앞뒤 공백은 지운다
+function surfCells(s) {
+  const cells = []; let cur = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\\' && s[i + 1] === '|') { cur += '|'; i++; } else if (ch === '|') { cells.push(cur.trim()); cur = ''; } else cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+function surfaceParse(text) {
+  const out = { ok: false, title: '', parts: [], next: [], truncated: false };
+  try {
+    if (typeof text !== 'string') return out;
+    let raw = text;
+    let tailCut = false; // 제한 때문에 뒤쪽 글을 읽지 않았다
+    if (raw.length > SURF_CHARS_MAX * 4) { // 정리 전의 터무니없는 크기는 훑지 않는다. 줄 끝이 아닌 곳에서 잘렸으면 마지막 줄 전체를 버린다
+      const e = mdCut(raw, SURF_CHARS_MAX * 4); const nx = raw.charAt(e.length);
+      raw = SURF_LSEP_RE.test(nx) ? e : e.slice(0, Math.max(e.search(SURF_LAST_LINE_RE), 0));
+      out.truncated = true; tailCut = true;
+    }
+    // mdParse 와 같은 정리: 탭·\n 만 남기고 BAD_CHARS 를 지운다. 줄 구분 문자는 \n 으로. 탭은 공백으로
+    let clean = raw.replace(/\r\n?/g, '\n').replace(BAD_CHARS_G, (c) => (c === '\t' || c === '\n' ? c : c === '\u2028' || c === '\u2029' ? '\n' : '')).replace(/\t/g, ' ').trimEnd();
+    if (clean.length > SURF_CHARS_MAX) { // 글자 상한: 잘린 곳이 줄 끝이 아니면 마지막 줄 전체를 버린다(잘린 문장이 단추가 되지 않게)
+      const e = mdCut(clean, SURF_CHARS_MAX);
+      clean = clean.charAt(e.length) === '\n' ? e : e.slice(0, Math.max(e.lastIndexOf('\n'), 0));
+      out.truncated = true; tailCut = true;
+    }
+    let lines = clean.split('\n');
+    if (lines.length > SURF_LINES_MAX) { lines = lines.slice(0, SURF_LINES_MAX); out.truncated = true; tailCut = true; }
+    const parts = out.parts;
+    const fit = (s, max) => { // 공백을 줄이고 max 로 자른다(자르면 truncated)
+      const v = s.replace(/\s+/g, ' ').trim();
+      if (v.length <= max) return v;
+      out.truncated = true; return mdCut(v, max).trim();
+    };
+    const full = (s) => { const r = readCleanSend(s); return r.ok ? r.text.replace(/\s+/g, ' ').trim() : ''; }; // 선택지·next: 입력창이 보낼 때와 같은 정리를 거친 한 줄. 자르지 않는다
+    const addText = (s) => { const v = fit(s, SURF_TEXT_MAX); if (v) parts.push({ t: 'text', text: v }); };
+    const cnt = { stats: 0, bars: 0, kv: 0, notes: 0 }; let haveTitle = false; let haveTable = false; let haveChoice = false;
+    const group = (kind, item) => { const l = parts[parts.length - 1]; if (l && l.t === kind) l.items.push(item); else parts.push({ t: kind, items: [item] }); };
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i]; i++;
+      if (!line.trim()) continue;
+      const m = SURF_KEY_RE.exec(line);
+      const key = m && SURF_KEYS.has(m[1]) ? m[1] : null;
+      if (!key) { addText(line); continue; }
+      const rest = m[2].trim();
+      if (key === 'title') {
+        if (!rest) addText(line); else if (!haveTitle) { out.title = fit(rest, SURF_TITLE_MAX); haveTitle = true; } else out.truncated = true; // 둘째 title 은 버린다
+      } else if (key === 'stat') {
+        const c = surfCells(rest);
+        if (c.length < 2 || !c[0] || !c[1]) addText(line);
+        else if (cnt.stats >= SURF_STATS_MAX) out.truncated = true;
+        else { cnt.stats++; group('stats', { label: fit(c[0], SURF_STAT_LABEL_MAX), value: fit(c[1], SURF_STAT_VALUE_MAX), note: fit(c[2] || '', SURF_STAT_NOTE_MAX) }); }
+      } else if (key === 'bar') {
+        const c = surfCells(rest); let value = NaN; let max = NaN;
+        if (c.length >= 2 && c[0] && c[1]) {
+          let b = SURF_FRAC_RE.exec(c[1]);
+          if (b) { value = Number(b[1]); max = Number(b[2]); } else { b = SURF_PCT_RE.exec(c[1]); if (b) { value = Number(b[1]); max = 100; } }
+        }
+        if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) addText(line);
+        else if (cnt.bars >= SURF_BARS_MAX) out.truncated = true;
+        else { cnt.bars++; group('bars', { label: fit(c[0], SURF_STAT_LABEL_MAX), value: Math.min(Math.max(value, 0), max), max, text: fit(c[1], SURF_BAR_TEXT_MAX) }); }
+      } else if (key === 'kv') {
+        const c = surfCells(rest);
+        if (c.length < 2 || !c[0]) addText(line);
+        else if (cnt.kv >= SURF_KV_MAX) out.truncated = true;
+        else { cnt.kv++; group('kv', { k: fit(c[0], SURF_KV_KEY_MAX), v: fit(c[1], SURF_KV_VALUE_MAX) }); }
+      } else if (key === 'note' || key === 'warn') {
+        if (!rest) addText(line);
+        else if (cnt.notes >= SURF_NOTES_MAX) out.truncated = true;
+        else { cnt.notes++; parts.push({ t: 'note', kind: key, text: fit(rest, SURF_NOTE_TEXT_MAX) }); }
+      } else if (key === 'table') {
+        const rows = []; while (i < lines.length && mdIsTable(lines[i])) rows.push(lines[i++]);
+        if (!rows.length || !mdTableStart(rows[0])) { addText(line); for (const r of rows) addText(r); } // 표 줄이 없다
+        else if (haveTable) out.truncated = true; // 표는 1개
+        else {
+          const st = { truncated: false, full: false, pieces: 0, cells: 0 };
+          const b = mdTableBuild(rows, st, SURF_TABLE_COLS, SURF_TABLE_ROWS, (c) => { const v = fit(c, SURF_CELL_MAX); return v ? [{ s: 'text', v }] : []; });
+          if (st.truncated) out.truncated = true;
+          if (b) { haveTable = true; const p = { t: 'table', title: fit(rest, SURF_TITLE_MAX), align: b.align, head: b.head, rows: b.rows }; if (b.cut) p.cut = true; parts.push(p); }
+        }
+      } else if (key === 'choice') {
+        if (i + 1 < lines.length && !lines[i].trim() && SURF_OPT_RE.test(lines[i + 1])) i++; // 질문과 첫 선택지 사이의 빈 줄 하나
+        const raws = []; while (i < lines.length && SURF_OPT_RE.test(lines[i])) raws.push(SURF_OPT_RE.exec(lines[i++])[1]);
+        if (haveChoice) { out.truncated = true; continue; } // 선택지 묶음은 1개
+        const opts = raws.map((o) => full(o)).filter(Boolean); // 자르지 않은 정리한 글
+        const toText = () => { if (rest) addText(rest); for (const o of opts) addText(o); };
+        if (opts.length < SURF_CHOICE_MIN) { toText(); continue; }
+        // 단추로 만들지 못하는 묶음은 통째로 글로 낸다(일부만 단추로 만들지 않는다)
+        if (opts.length > SURF_CHOICE_MAX || opts.some((o) => o.length > SURF_OPTION_MAX)) { out.truncated = true; toText(); continue; }
+        if (tailCut && i >= lines.length) { toText(); continue; } // 제한이 선택지 줄 바로 뒤나 중간을 잘랐을 수 있다
+        if (opts.some((o) => SURF_CMD_RE.test(o))) { toText(); continue; }
+        haveChoice = true; parts.push({ t: 'choice', q: fit(rest, SURF_QUESTION_MAX), options: opts });
+      } else if (key === 'next') {
+        const v = full(rest);
+        if (!v) continue;
+        if (v.length > SURF_NEXT_TEXT_MAX) { out.truncated = true; addText(rest); } // 120자를 넘으면 단추로 만들지 않는다
+        else if (SURF_CMD_RE.test(v)) addText(rest);
+        else if (out.next.length >= SURF_NEXT_MAX) out.truncated = true; else out.next.push(v);
+      }
+    }
+    out.ok = haveTitle || out.next.length > 0 || parts.some((p) => p.t !== 'text');
+    return out;
+  } catch { return { ok: false, title: '', parts: [], next: [], truncated: true }; }
+}
+
 // ---- 대화 기록(읽기 화면용). data/state/app/<세션 값>.talk.jsonl 의 글 -> 최근 항목 목록 ----
 const TALK_MAX_DEFAULT = 80; // 돌려줄 항목 수 기본값(최근 것부터)
 const TALK_USER_MAX = 20000; // 질문 글 길이 상한(UTF-16 단위, 넘으면 자르고 cut)
@@ -4648,6 +4905,16 @@ function talkLine(line) {
   const lost = has('lost') && o.lost === true; const cut = has('cut') && o.cut === true;
   if (!lost && text === '') return null; // 보일 글이 없다
   return { role, at, text: lost ? '' : text, cut, lost };
+}
+// 답변 블록 중 언어 이름이 정확히 maru-surface 인 코드 블록의 마지막 하나를 화면 블록으로 바꾼다(제자리). 잘린 코드 블록이거나 부품이 없으면 그대로 둔다
+// 닫는 펜스가 없는 블록(open)은 화면으로 바꾸지 않는다. 답변의 mdParse 결과가 잘렸으면(mdTruncated) 어떤 블록도 바꾸지 않는다(뒤가 잘려 선택지가 반쪽일 수 있다)
+function talkSurface(blocks, mdTruncated) {
+  if (mdTruncated) return;
+  let at = -1;
+  for (let i = blocks.length - 1; i >= 0; i--) { if (blocks[i].t === 'code' && blocks[i].lang === 'maru-surface') { at = i; break; } }
+  if (at < 0 || blocks[at].cut || blocks[at].open) return;
+  const s = surfaceParse(blocks[at].text);
+  if (s.ok) blocks[at] = { t: 'surface', title: s.title, parts: s.parts, next: s.next, truncated: s.truncated };
 }
 // 기록 파일의 글 -> { items, more }. 끝에서부터 훑어 max 개만 해석한다(옛 줄은 해석하지 않는다). 예외를 던지지 않는다
 function talkParse(text, opts) {
@@ -4683,6 +4950,7 @@ function talkParse(text, opts) {
         if (c.cut) it.cut = true;
         if (c.lost) it.lost = true;
         nb = m.blocks.length || 1;
+        if (!c.lost && !c.cut) talkSurface(m.blocks, m.truncated); // surface 는 코드 블록 자리에 들어가므로 블록 수는 그대로 1개
       }
       if (items.length && blocks + nb > blocksMax) { more = true; break; }
       items.push(it); blocks += nb; userChars += nc;
@@ -4723,8 +4991,9 @@ const api = {
   PROJ_TITLE_MAX, PROJ_LOG_MAX, PROJ_MEM_MAX, PROJ_REG_MAX_BYTES, PROJ_STATE_MAX_BYTES, PROJ_STATE_MAX_ENTRIES, CHECK_DAYS, validDay, ttlCache,
   PANEL_DEFAULT, PANEL_RANGE, PANEL_CENTER_MIN, PANEL_STORE_KEY, panelRange, clampPanelWidths, parsePanelWidths, parseColsEnv, panelKeyDelta,
   talkParse, talkCleanText, talkKey, talkSame, TALK_MAX_DEFAULT, TALK_USER_MAX, TALK_USER_TOTAL_MAX, TALK_BLOCKS_MAX, TALK_FILE_MAX,
-  READ_TERM_DEFAULT, READ_TERM_MIN, READ_MAIN_MIN, READ_STORE_KEY, READ_STORE_MAX, readIsNarrow, readTermMax, readTermWidth, readIsNumText, readTableAligns, readParseStore, readStoreSet, READ_SEND_MAX, readCleanSend, readCanSend, isClaudeFront, isTermReply, talkLast, READ_TALK_SLACK_MS, READ_STATS_KEEP_DAYS, READ_STATS_MAX, readDayKey, readStatsParse, readStatsBump, readStatsLoad, readStatsSave,
+  READ_TERM_DEFAULT, READ_TERM_MIN, READ_MAIN_MIN, READ_RAIL_W, READ_STORE_KEY, READ_STORE_MAX, readIsNarrow, readSideShown, readTermMax, readTermWidth, readIsNumText, readTableAligns, readParseStore, readStoreSet, readDefault, READ_SEND_MAX, readCleanSend, readCanSend, readCanSendFirst, promptBoxCheck, firstSendVerdict, READ_FIRST_WAIT_MS, READ_FIRST_POLL_MS, isClaudeFront, isTermReply, talkLast, READ_TALK_SLACK_MS, READ_STATS_KEEP_DAYS, READ_STATS_MAX, readDayKey, readStatsParse, readStatsBump, readStatsLoad, readStatsSave,
   mdParse, MD_INPUT_MAX, MD_BLOCK_MAX, MD_TABLE_COLS, MD_TABLE_ROWS, MD_CODE_LINES, MD_PIECE_MAX, MD_CELLS_MAX, MD_PIECES_MAX,
+  surfaceParse, SURF_LINES_MAX, SURF_CHARS_MAX, SURF_TITLE_MAX, SURF_STATS_MAX, SURF_STAT_LABEL_MAX, SURF_STAT_VALUE_MAX, SURF_STAT_NOTE_MAX, SURF_BARS_MAX, SURF_BAR_TEXT_MAX, SURF_KV_MAX, SURF_KV_KEY_MAX, SURF_KV_VALUE_MAX, SURF_NOTES_MAX, SURF_NOTE_TEXT_MAX, SURF_TABLE_COLS, SURF_TABLE_ROWS, SURF_CELL_MAX, SURF_CHOICE_MIN, SURF_CHOICE_MAX, SURF_OPTION_MAX, SURF_QUESTION_MAX, SURF_NEXT_MAX, SURF_NEXT_TEXT_MAX, SURF_TEXT_MAX,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.MaruLib = api; // 렌더러(번들러 없음)에서는 전역으로 노출

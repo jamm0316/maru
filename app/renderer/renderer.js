@@ -220,6 +220,30 @@
     startTerm(e);
   }
   window.maru.onPtyData((id, d) => { const e = terms.get(id); if (e) e.term.write(d); });
+  // 첫 메시지 길: main 이 요청하면 앞서 받은 출력이 모두 해석된 뒤(write 의 콜백) 보이는 화면을 읽어 돌려준다. 판정은 main 이 한다
+  window.maru.onReadSnapReq((id, nonce) => {
+    const e = terms.get(id);
+    if (!e || !e.term) { window.maru.readSnap(id, nonce, { lines: [], plain: [], cursorX: 0, cursorY: 0, rows: 0, cols: 0 }); return; }
+    const term = e.term;
+    term.write('', () => {
+      try {
+        const b = term.buffer.active; const lines = []; const plain = []; let cell;
+        for (let i = 0; i < term.rows; i++) {
+          const ln = b.getLine(b.baseY + i); const s = ln ? ln.translateToString(true) : ''; lines.push(s);
+          if (!ln || Math.abs(i - b.cursorY) > 40) { plain.push(s); continue; } // 커서 줄 위아래 40줄만 칸마다 본다. 나머지는 lines 와 같은 글
+          // plain: 흐린 글자(SGR 2) 칸을 공백으로 바꾼 같은 줄. 넓은 글자는 뒤 칸(폭 0)을 건너뛴다. 줄 끝 공백은 지운다
+          let out = '';
+          for (let x = 0; x < ln.length; x++) {
+            cell = ln.getCell(x, cell); if (!cell) break;
+            const w = cell.getWidth(); if (w === 0) continue;
+            out += cell.isDim() ? ' '.repeat(w) : (cell.getChars() || ' ');
+          }
+          plain.push(out.replace(/ +$/, ''));
+        }
+        window.maru.readSnap(id, nonce, { lines, plain, cursorX: b.cursorX, cursorY: b.cursorY, rows: term.rows, cols: term.cols });
+      } catch (x) { window.maru.readSnap(id, nonce, null); }
+    });
+  });
   window.maru.onPtyExit((id, code) => {
     const e = terms.get(id);
     if (e) e.term.write('\r\n\x1b[38;5;208m' + T(code === 127 ? 'term.noclaude' : 'term.exit', { code }) + '\x1b[0m\r\n');
@@ -341,11 +365,16 @@
   let readDevSend = false; // 시험 전용(MARU_APP_UI=read|readrail): 입력창이 보낼 수 있는 상태로 보인다(main 도 실제로 쓰지 않는다)
   const readDrafts = new Map(); // 작업 공간 id -> 쓰던 글(렌더러 메모리에만 둔다)
   let readSending = false; let readSendId = null; let readNoteKey = ''; // 보내는 중 / 마지막 보내기 거부 이유(i18n 키 끝 조각)
+  let readSide = false; // 터미널이 접혀 오른쪽 카드 열이 같이 보이는 중
+  let readSurfHold = false; // 입력창으로 보내기에 성공한 뒤 다음 기록 갱신(readRender)이 올 때까지 화면 블록 단추를 끈다
+  let readLastFill = ''; let readFillAt = 0; let readFillHeld = false; let readEnterDown = false; // 단추로 채운 글·시각·채울 때 Enter 가 눌려 있었나·지금 Enter 가 눌려 있나
+  let readDevTop = false; // 시험 전용(MARU_APP_UI=readsurftop): 마지막 화면 블록의 위쪽이 보이게 스크롤한다
   const readHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }; // 질문 글의 짧은 해시(펼침 상태 키용)
   const termWrap = document.querySelector('.term-wrap');
   const readEl = $('read'); const readBody = $('read-body'); const readList = $('read-list'); const readStatusEl = $('read-status'); const readHandle = $('read-h');
   const readTa = $('read-ta'); const readSendBtn = $('read-send'); const readInputBox = $('read-input'); const readInputNote = $('read-input-note');
-  const readSt = (id) => readStore[id] || readDevDefault || { on: false, w: Lib.READ_TERM_DEFAULT, rail: false };
+  const readSt = (id) => readStore[id] || readDevDefault || Lib.readDefault(); // 저장된 상태가 없는 작업 공간은 읽기 화면을 켜고 터미널은 접힌 띠로 시작한다
+  const readSurfSeen = new Set(); // 이미 센 화면 블록 답변(작업 공간 id:답변 시각). 같은 답변을 다시 그려도 한 번만 센다
   const readEffW = (st) => Lib.readTermWidth(st.w, window.innerWidth, colsApplied().left);
   function readSave() {
     if (!colsStore) return;
@@ -359,7 +388,7 @@
     readStore = Lib.readStoreSet(readStore, activeId, { ...readSt(activeId), ...patch });
     applyReadLayout(); if (persist) readSave();
   }
-  function readReset() { readSeq++; readKey = ''; readItems = []; readMore = false; readLoaded = false; readExpanded.clear(); readForceBottom = true; readSaved = null; readList.replaceChildren(); }
+  function readReset() { readSeq++; readKey = ''; readItems = []; readMore = false; readLoaded = false; readExpanded.clear(); readForceBottom = true; readSaved = null; readSurfHold = false; readList.replaceChildren(); }
   const readNearBottom = () => readBody.scrollHeight - readBody.scrollTop - readBody.clientHeight <= 80;
   const readUx = () => { if (readDevWait) return 'waiting'; const w = wsList.find((x) => x.id === activeId); return w ? (w.ux || w.state) : ''; };
   function renderReadStatus() { // 작업 중·답 기다림 표시(읽기 영역 맨 아래 줄)와 접힌 띠의 점·테두리
@@ -371,7 +400,8 @@
     readStatusEl.hidden = txt === '';
     if (was !== readStatusEl.hidden && near && !readEl.hidden) readBody.scrollTop = readBody.scrollHeight; // 맨 아래를 보고 있었으면 새 줄까지 따라간다
     $('read-rail-dot').className = 'read-rail-dot' + (wait ? ' wait' : busy ? ' busy' : '');
-    termWrap.classList.toggle('read-wait', wait); // 접힌 띠의 테두리를 주황으로(펼치지는 않는다)
+    const stripAlert = readTermFolded && (readNoteKey === 'first-screen' || readNoteKey === 'first-unsent'); // 첫 메시지 길이 거부했다: 접힌 터미널 안에 확인 창이 있을 수 있다
+    termWrap.classList.toggle('read-wait', wait || stripAlert); // 접힌 띠의 테두리를 주황으로(펼치지는 않는다)
     renderReadInput();
   }
   function placeReadHandle() {
@@ -381,6 +411,18 @@
     readHandle.setAttribute('aria-valuemin', String(Lib.READ_TERM_MIN)); readHandle.setAttribute('aria-valuemax', String(Lib.readTermMax(window.innerWidth, colsApplied().left))); readHandle.setAttribute('aria-valuenow', String(readEffW(st)));
   }
   new ResizeObserver(() => { placeReadHandle(); readFoldPass(); }).observe(colsEl); new ResizeObserver(placeReadHandle).observe(termWrap); new ResizeObserver(() => { readFoldPass(); readFitTa(); }).observe(readEl);
+  function readAnchor() { // 읽기 영역 스크롤 위치 기억: 맨 아래 근처면 그것만, 아니면 맨 위에 보이는 항목과 그 위치
+    if (readNearBottom()) return { near: true };
+    const top = readBody.getBoundingClientRect().top; const ch = readList.children;
+    for (let i = 0; i < ch.length; i++) { const r = ch[i].getBoundingClientRect(); if (r.bottom > top + 1) return { near: false, idx: i, off: r.top - top }; }
+    return { near: false, idx: -1, off: 0, st: readBody.scrollTop };
+  }
+  function readAnchorRestore(a) {
+    if (!a || readEl.hidden) return;
+    if (a.near) { readBody.scrollTop = readBody.scrollHeight; return; }
+    const c = a.idx >= 0 ? readList.children[a.idx] : null; if (!c) { if (typeof a.st === 'number') readBody.scrollTop = a.st; return; }
+    readBody.scrollTop += c.getBoundingClientRect().top - readBody.getBoundingClientRect().top - a.off;
+  }
   function applyReadLayout() { // 멱등: 켜짐·상세·창 폭·터미널 접힘이 바뀔 때마다 부른다
     const id = activeId; const st = id ? readSt(id) : null; const wantOn = !!st && st.on === true;
     const idChanged = id !== readCurId; const wasFolded = readTermFolded;
@@ -388,10 +430,12 @@
     const on = wantOn && !detailOpen; const narrow = Lib.readIsNarrow(window.innerWidth);
     if (!on || !narrow) readTermOver = false;
     const over = on && readTermOver; const railed = on && !over && (narrow || st.rail === true); const eff = on ? readEffW(st) : 0;
-    readTermFolded = railed;
-    colsEl.classList.toggle('read-on', on);
-    if (on) colsEl.style.setProperty('--read-tw', eff + 'px'); else colsEl.style.removeProperty('--read-tw');
+    const ap = colsApplied(); const side = railed && Lib.readSideShown(window.innerWidth, ap.left, ap.right); // 접힌 띠일 때만, 읽기 영역이 360px 이상 남을 때만 오른쪽 카드 열을 같이 보인다
+    const anchor = !readEl.hidden && !readResizing && (railed !== wasFolded || side !== readSide) ? readAnchor() : null; // 접고 펼 때 읽기 영역 폭이 바뀐다: 보던 자리를 기억해 둔다
+    readTermFolded = railed; readSide = side;
+    colsEl.classList.toggle('read-on', on); colsEl.classList.toggle('read-side', side);    if (on) colsEl.style.setProperty('--read-tw', eff + 'px'); else colsEl.style.removeProperty('--read-tw');
     termWrap.classList.toggle('read-term', on && !over); termWrap.classList.toggle('rail', railed);
+    if (anchor && on && !over) { readAnchorRestore(anchor); requestAnimationFrame(() => readAnchorRestore(anchor)); } // 레이아웃을 바로 다시 재서 한 번, 다음 프레임(크기 관찰자 처리 뒤)에 한 번 되돌린다
     const hide = !on || over; const wasHidden = readEl.hidden;
     if (hide && !wasHidden) readSaved = { id, near: readNearBottom(), top: readBody.scrollTop }; // 숨기면 스크롤 값이 0 이 된다: 숨기기 직전에 기억한다
     readEl.hidden = hide; $('read-rail').hidden = !railed;
@@ -404,7 +448,7 @@
       const a = document.activeElement;
       if (idChanged || !a || a === document.body || termWrap.contains(a)) focusTerm(); // 접힌 상태의 focusTerm 은 입력창에 포커스를 준다. 다른 입력칸에서 치는 중이면 뺏지 않는다
     }
-    const sig = [on, railed, over, eff, narrow].join();
+    const sig = [on, railed, over, eff, narrow, side].join();
     if (sig !== readSig) { readSig = sig; requestAnimationFrame(() => { placeReadHandle(); doFit(); readFoldPass(); }); } // 터미널 크기가 바뀌었다: xterm 을 다시 맞춘다(접힌 동안은 doFitNow 가 막는다)
   }
   window.addEventListener('resize', () => {
@@ -461,9 +505,70 @@
     pre.append(el('code', '', typeof b.text === 'string' ? b.text : '')); w.append(pre);
     return w;
   }
-  function readBlock(host, b) {
+  // ---- 화면 블록(에이전트가 만든 화면): 점선 상자 안에 정해진 부품만 그린다. 글은 모두 textContent, 막대 폭만 계산한 숫자 퍼센트 ----
+  function readSurfFill(btn, text) { // 단추: 입력창에 글을 넣고 포커스만 준다. 보내는 함수와 보내기 IPC 는 부르지 않는다
+    if (btn.disabled || btn.dataset.last !== '1' || modalOpen() || readSending || !activeId || activeId !== readCurId || readEl.hidden || readLock() !== '') return;
+    const c = Lib.readCleanSend(text); if (!c.ok || c.text !== text) return; // 입력창이 보낼 때와 같은 정리를 한 번 더 거친다. 비거나, 정리한 글이 단추의 글과 다르면 채우지 않는다(보이는 글과 채우는 글이 같아야 한다)
+    if (readTa.value.trim() !== '') {
+      if (readTa.value === readLastFill) { readTa.focus(); return; } // 방금 채운 글 그대로다: "채웠습니다" 안내를 "채우지 않았습니다"로 덮지 않는다
+      readNoteKey = 'fillno'; renderReadInput(); return; // 쓰던 글을 지우지 않는다
+    }
+    readTa.value = c.text; readLastFill = c.text; readNoteKey = 'fillok'; readFillAt = Date.now(); readFillHeld = readEnterDown; readFitTa(); renderReadInput(); // Enter 로 단추를 눌렀다면 그 Enter 의 keyup 이 올 때까지 입력창 Enter 는 보내지 않는다
+    readTa.focus(); const n = readTa.value.length; try { readTa.setSelectionRange(n, n); } catch (x) { /* 무시 */ }
+    window.maru.readMark('fill');
+  }
+  function readSurfBtn(text, cls, last) {
+    const b = el('button', 'read-sb ' + cls, text); b.type = 'button'; b.dataset.last = last ? '1' : '0'; b.disabled = true; // 켜짐 여부는 readSurfRefresh 가 맞춘다
+    b.addEventListener('click', () => readSurfFill(b, text));
+    return b;
+  }
+  function readSurfRefresh() { // 마지막 답변의 단추만, 입력창이 글을 받을 수 있을 때만 누를 수 있다
+    const ok = readCurOn && !readEl.hidden && !readSending && !readSurfHold && readLock() === '';
+    for (const b of readList.querySelectorAll('.read-sb')) { const d = !(ok && b.dataset.last === '1'); if (b.disabled !== d) b.disabled = d; }
+  }
+  function readSurfPart(box, p, last) {
+    if (!p || typeof p !== 'object') return;
+    const items = Array.isArray(p.items) ? p.items : [];
+    if (p.t === 'stats') {
+      const g = el('div', 'read-surf-stats'); g.style.setProperty('--n', String(Math.min(4, Math.max(1, items.length))));
+      for (const s of items) { const c = el('div', 'read-surf-stat'); c.append(el('span', 'read-surf-stat-l', String(s.label)), el('span', 'read-surf-stat-v', String(s.value))); if (s.note) c.append(el('span', 'read-surf-stat-n', String(s.note))); g.append(c); }
+      box.append(g);
+    } else if (p.t === 'bars') {
+      const g = el('div', 'read-surf-bars');
+      for (const s of items) {
+        const pct = Number.isFinite(s.value) && Number.isFinite(s.max) && s.max > 0 ? Math.round(Math.min(1, Math.max(0, s.value / s.max)) * 1000) / 10 : 0;
+        const r = el('div', 'read-surf-bar'); const tr = el('div', 'read-surf-bar-t'); const f = el('span', 'read-surf-bar-f'); f.style.width = pct + '%'; tr.append(f); tr.setAttribute('aria-hidden', 'true');
+        r.append(el('span', 'read-surf-bar-l', String(s.label)), tr, el('span', 'read-surf-bar-x', String(s.text))); g.append(r);
+      }
+      box.append(g);
+    } else if (p.t === 'kv') {
+      const d = el('dl', 'read-surf-kv'); for (const s of items) d.append(el('dt', '', String(s.k)), el('dd', '', String(s.v))); box.append(d);
+    } else if (p.t === 'note') {
+      box.append(el('p', 'read-surf-note' + (p.kind === 'warn' ? ' sw' : ''), String(p.text)));
+    } else if (p.t === 'table') {
+      const w = el('div', 'read-surf-tb'); if (p.title) w.append(el('p', 'read-surf-tt', String(p.title)));
+      w.append(readTable(p)); if (p.cut === true) w.append(el('p', 'read-note', T('read.cut'))); box.append(w); // 1부의 표 그리기 함수를 다시 쓴다
+    } else if (p.t === 'choice') {
+      const w = el('div', 'read-surf-ch'); w.append(el('p', 'read-surf-q', String(p.q)));
+      const o = el('div', 'read-surf-opts'); for (const s of Array.isArray(p.options) ? p.options : []) if (typeof s === 'string' && s) o.append(readSurfBtn(s, 'opt', last));
+      w.append(o); box.append(w);
+    } else if (p.t === 'text') box.append(el('p', '', String(p.text)));
+  }
+  function readSurface(host, b, ctx) {
+    const box = el('div', 'read-surf'); box.setAttribute('role', 'group'); box.setAttribute('aria-label', T('read.surf.aria'));
+    box.append(el('p', 'read-surf-src', T('read.surf.src'))); // 출처 표지: 항상 보인다
+    if (typeof b.title === 'string' && b.title) box.append(el('h3', 'read-surf-title', b.title));
+    for (const p of Array.isArray(b.parts) ? b.parts : []) { try { readSurfPart(box, p, ctx.last); } catch (x) { /* 이 부품만 건너뛴다 */ } }
+    const nx = (Array.isArray(b.next) ? b.next : []).filter((s) => typeof s === 'string' && s);
+    if (nx.length) { const r = el('div', 'read-surf-next'); r.append(el('span', 'read-surf-next-l', T('read.surf.next'))); for (const s of nx) r.append(readSurfBtn(s, 'nx', ctx.last)); box.append(r); }
+    if (b.truncated === true) box.append(el('p', 'read-note', T('read.trunc')));
+    host.append(box);
+    if (ctx.last && ctx.key && !readSurfSeen.has(ctx.key)) { if (readSurfSeen.size > 500) readSurfSeen.clear(); readSurfSeen.add(ctx.key); window.maru.readMark('surf'); } // 그린 횟수(답변마다 한 번, 내용은 보내지 않는다)
+  }
+  function readBlock(host, b, ctx) {
     if (!b || typeof b !== 'object') return;
     const t = b.t;
+    if (t === 'surface') { readSurface(host, b, ctx || { last: false, key: '' }); return; }
     if (t === 'h') { const lv = b.level === 1 || b.level === 2 ? b.level : 3; const h = el('h' + (lv + 2), 'read-h read-h' + lv); readInl(h, b.inl); host.append(h); }
     else if (t === 'ul' || t === 'ol') host.append(readListEl(b, 0));
     else if (t === 'quote') { const q = el('blockquote', 'read-quote'); readInl(q, b.inl); host.append(q); }
@@ -494,7 +599,8 @@
     }
     if (it.role === 'assistant') {
       const wrap = el('div', 'read-item'); const box = el('div', 'read-a');
-      for (const b of Array.isArray(it.blocks) ? it.blocks : []) { try { readBlock(box, b); } catch (x) { /* 이 블록만 건너뛴다 */ } }
+      const ctx = { last: idx === readItems.length - 1, key: readCurId + ':' + String(it.at) }; // 단추는 대화의 마지막 항목인 답변에서만 누를 수 있다
+      for (const b of Array.isArray(it.blocks) ? it.blocks : []) { try { readBlock(box, b, ctx); } catch (x) { /* 이 블록만 건너뛴다 */ } }
       if (it.lost === true) box.append(el('p', 'read-note', T('read.lost')));
       if (it.cut === true) box.append(el('p', 'read-note', T('read.cut')));
       if (it.truncated === true) box.append(el('p', 'read-note', T('read.trunc')));
@@ -518,13 +624,19 @@
     const near = hidden ? false : readNearBottom(); const top = hidden ? 0 : readBody.scrollTop; const force = readForceBottom;
     const frag = document.createDocumentFragment();
     if (readMore) frag.append(el('p', 'read-old', T('read.old')));
-    if (!readItems.length && readLoaded) frag.append(el('p', 'read-empty', T('read.empty')));
+    if (!readItems.length && readLoaded) { // 대화가 비었다: 세션의 첫 메시지는 입력창으로 보낼 수 없다(1부 규칙). 앱 자체 안내와 터미널을 펴는 단추
+      const f = el('div', 'read-first'); f.append(el('p', 'read-empty', T('read.empty')), el('p', '', T('read.first')));
+      const fb = el('button', 'read-first-b', T('read.first.btn')); fb.type = 'button'; fb.addEventListener('click', () => { if (modalOpen()) return; if (readTermFolded) readExpandTerm(); else focusTerm(); });
+      f.append(fb); frag.append(f);
+    }
     readItems.forEach((it, idx) => { try { const n = readItemEl(it, idx); if (n) frag.append(n); } catch (x) { /* 이 항목만 건너뛴다 */ } });
     readList.replaceChildren(frag);
+    readSurfHold = false; readSurfRefresh(); // 새 기록이 왔다: 보내기 뒤에 끈 단추를 다시 켠다(마지막 답변의 것만)
     if (hidden) return;
     readFoldPass();
     readBody.scrollTop = near || force ? readBody.scrollHeight : top; // 맨 아래 근처(80px)를 보고 있었으면 새 맨 아래로, 위로 올려 읽는 중이면 그 자리를 지킨다
     readForceBottom = false;
+    if (readDevTop) { const ss = readList.querySelectorAll('.read-surf'); const s = ss[ss.length - 1]; if (s) readBody.scrollTop += s.getBoundingClientRect().top - readBody.getBoundingClientRect().top - 8; } // 시험 전용: 마지막 화면 블록의 위쪽(표지·제목·수치 카드)이 보이게
   }
   async function readTick() { // 1초 poll 에서 부른다. 켜진 활성 작업 공간에 대해서만 받는다
     try {
@@ -535,6 +647,7 @@
       try { res = await window.maru.talkGet(id, readKey); } catch (x) { res = null; } finally { readFetching = false; }
       if (my !== readSeq || id !== activeId || !readCurOn) return; // 그 사이 작업 공간이 바뀌었거나 꺼졌다
       if (!res || typeof res !== 'object' || typeof res.key !== 'string' || res.same === true || !Array.isArray(res.items)) return;
+      if (readLoaded && res.key === '' && readKey === '' && !res.items.length && !readItems.length) return; // 빈 대화가 그대로면 다시 그리지 않는다(첫 메시지 안내의 단추가 매초 바뀌지 않게)
       readKey = res.key; readItems = res.items; readMore = res.more === true; readLoaded = true;
       readRender();
     } catch (x) { /* 읽기 화면 오류가 앱을 멈추지 않게 한다 */ }
@@ -542,11 +655,11 @@
   $('read-toggle').addEventListener('click', () => { if (modalOpen() || !activeId) return; const on = readSt(activeId).on !== true; readSet({ on }, true); if (on) window.maru.readMark('on'); if (!on) focusTerm(); });
   $('read-close').addEventListener('click', () => { if (modalOpen() || !activeId) return; readSet({ on: false }, true); focusTerm(); });
   $('read-fold').addEventListener('click', () => { if (modalOpen()) return; readSet({ rail: true }, true); focusTerm(); }); // 접히면 포커스는 입력창으로 간다(applyReadLayout 도 옮기지만 단추에 남은 포커스를 확실히 걷는다)
-  $('read-rail').addEventListener('click', () => {
-    if (modalOpen()) return;
+  function readExpandTerm() {
     if (Lib.readIsNarrow(window.innerWidth)) { readTermOver = true; applyReadLayout(); } else readSet({ rail: false }, true); // 좁은 창에서는 저장 없이 읽기 영역을 덮는다
     doFit(); focusTerm();
-  });
+  }
+  $('read-rail').addEventListener('click', () => { if (modalOpen()) return; readExpandTerm(); });
   $('read-back').addEventListener('click', () => { readTermOver = false; applyReadLayout(); focusTerm(); }); // 다시 접힌 터미널 대신 입력창에 포커스가 간다
   // 읽기 영역과 터미널 사이 손잡이: 끌기(Esc 로 취소)·키보드·더블클릭(기본 폭). 폭은 놓을 때 저장한다
   let readDrag = null; // { id, x0, w0, w00 }
@@ -603,7 +716,7 @@
   }
   function renderReadInput() {
     const lock = readLock(); const wait = lock === 'wait';
-    const noteKey = lock || readNoteKey; // 잠긴 이유가 보내기 거부 이유보다 먼저다
+    const noteKey = (readNoteKey === 'first-screen' || readNoteKey === 'first-unsent') && lock !== 'wait' ? readNoteKey : lock || readNoteKey; // 잠긴 이유가 보내기 거부 이유보다 먼저다. 단 첫 메시지 길의 거부는 더 알려 주므로(터미널 확인) 일반 잠금 문구(first·draft)보다 앞선다
     const txt = noteKey ? T('read.input.' + noteKey) : '';
     readInputBox.classList.toggle('wait', wait); readInputNote.classList.toggle('wait', wait);
     if (readInputNote.textContent !== txt) readInputNote.textContent = txt;
@@ -611,11 +724,12 @@
     readSendBtn.disabled = readSending || lock !== '' || readTa.value.trim() === ''; // 보내는 중에는 잠가 두 번 보내지 않게 한다
     const ro = readSending && readSendId === readCurId; if (readTa.readOnly !== ro) readTa.readOnly = ro; // 보내는 동안 그 글이 든 입력창은 읽기 전용: 보낸 글과 그 사이에 쓴 글이 섞이지 않는다
     const ph = T('read.input.ph'); if (readTa.placeholder !== ph) readTa.placeholder = ph;
+    readSurfRefresh();
   }
   function readDraftSwap(from, to) { // 작업 공간을 바꿀 때 쓰던 글을 맡기고 새 작업 공간의 글을 꺼낸다(디스크에는 쓰지 않는다)
     if (from) { if (readTa.value !== '') readDrafts.set(from, readTa.value); else readDrafts.delete(from); }
     const ids = new Set(wsList.map((x) => x.id)); for (const k of [...readDrafts.keys()]) if (!ids.has(k)) readDrafts.delete(k); // 닫힌 작업 공간의 글은 버린다
-    readTa.value = to && readDrafts.has(to) ? readDrafts.get(to) : ''; readNoteKey = ''; readFitTa();
+    readTa.value = to && readDrafts.has(to) ? readDrafts.get(to) : ''; readNoteKey = ''; readLastFill = ''; readFitTa();
   }
   async function readSendNow() {
     if (readSending || !activeId || modalOpen()) return;
@@ -628,21 +742,27 @@
     try { res = await window.maru.readSend(id, raw); } catch (x) { res = null; }
     readSending = false; readSendId = null;
     if (res && res.ok === true) {
+      readSurfHold = true; readLastFill = ''; // 다음 기록 갱신(readRender)이 올 때까지 화면 블록 단추를 끈다: 방금 보낸 답이 아직 지난 답변 위에 있다
       if (id === activeId) { if (readTa.value === raw) { readTa.value = ''; readFitTa(); } } else if (readDrafts.get(id) === raw) readDrafts.delete(id); // 보내는 사이 작업 공간을 바꿨으면 맡겨 둔 글을 지운다
     } else if (id === activeId) {
       const r = res && typeof res.reason === 'string' ? res.reason : '';
-      readNoteKey = r === 'busy' ? 'busy' : r === 'waiting' ? 'wait' : r === 'draft' || r === 'settling' || r === 'notclaude' || r === 'first' || r === 'touched' || r === 'failed' ? r : r === 'shell' || r === 'nosession' ? 'shell' : r === 'toolong' || r === 'empty' || r === 'rate' ? r : 'invalid'; // 글은 그대로 둔다
+      readNoteKey = r === 'busy' ? 'busy' : r === 'waiting' ? 'wait' : r === 'draft' || r === 'settling' || r === 'notclaude' || r === 'first' || r === 'touched' || r === 'failed' || r === 'first-screen' || r === 'first-unsent' ? r : r === 'shell' || r === 'nosession' ? 'shell' : r === 'toolong' || r === 'empty' || r === 'rate' ? r : 'invalid'; // 글은 그대로 둔다(first-screen·first-unsent 도: 띠 강조는 renderReadStatus 가 한다)
     }
-    renderReadInput();
+    renderReadStatus(); // 안에서 renderReadInput 도 부른다
     if (id === activeId && !readEl.hidden) readTa.focus();
   }
   let readComposing = false; let readComposeEnd = 0;
   readTa.addEventListener('compositionstart', () => { readComposing = true; });
   readTa.addEventListener('compositionend', () => { readComposing = false; readComposeEnd = Date.now(); });
   readTa.addEventListener('input', () => { readNoteKey = ''; readFitTa(); renderReadInput(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Enter') readEnterDown = true; }, true); // 지금 Enter 가 눌려 있나(단추를 Enter 로 눌러 채웠는지 알기 위해)
+  document.addEventListener('keyup', (e) => { if (e.key === 'Enter') { readEnterDown = false; readFillHeld = false; } }, true);
+  window.addEventListener('blur', () => { readEnterDown = false; readFillHeld = false; }); // 창을 떠나면 keyup 을 못 받을 수 있다
   readTa.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return; // Shift+Enter 는 줄바꿈(기본 동작)
     if (e.isComposing || e.keyCode === 229 || readComposing || Date.now() - readComposeEnd < 50) return; // 한글 등 조합 중의 Enter 는 조합 확정용이다(터미널 입력과 같은 판단)
+    if (e.repeat) { e.preventDefault(); return; } // 길게 눌러 반복되는 Enter 는 보내지 않는다
+    if (readFillHeld || Date.now() - readFillAt < 500) { e.preventDefault(); return; } // 단추로 채운 직후 500ms, 그리고 채울 때 눌려 있던 Enter 를 뗄 때까지는 조용히 무시한다
     e.preventDefault();
     readSendNow();
   });
@@ -650,8 +770,9 @@
   function initRead(init) {
     if (colsStore) { try { readStore = Lib.readParseStore(localStorage.getItem(Lib.READ_STORE_KEY)); } catch (x) { readStore = {}; } } // 스모크·가짜 화면(colsStore 거짓)에서는 읽지도 쓰지도 않는다
     const m = init && typeof init.uiOpen === 'string' ? init.uiOpen : '';
-    if (m === 'read' || m === 'readrail' || m === 'readwait') readDevDefault = { on: true, w: Lib.READ_TERM_DEFAULT, rail: m !== 'read' }; // 시험 전용: 저장값이 없는 작업 공간은 켜진 채로
-    readDevWait = m === 'readwait'; readDevSend = m === 'read' || m === 'readrail';
+    if (m === 'read' || m === 'readrail' || m === 'readwait' || m === 'readsurf' || m === 'readsurftop' || m === 'readempty') readDevDefault = { on: true, w: Lib.READ_TERM_DEFAULT, rail: m !== 'read' && m !== 'readsurf' && m !== 'readsurftop' }; // 시험 전용: 저장값이 없는 작업 공간은 켜진 채로
+    else if (!colsStore) readDevDefault = { on: false, w: Lib.READ_TERM_DEFAULT, rail: false }; // 스모크·다른 가짜 화면은 새 기본값(읽기 화면 켜짐)을 따르지 않고 예전 화면 그대로 둔다
+    readDevWait = m === 'readwait'; readDevSend = m === 'read' || m === 'readrail' || m === 'readsurf' || m === 'readsurftop' || m === 'readempty'; readDevTop = m === 'readsurftop';
     applyReadLayout();
   }
 

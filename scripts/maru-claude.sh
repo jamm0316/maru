@@ -73,8 +73,12 @@ fi
 #     앱이 상태를 알 수 없다. 그 세션에 agent-state.sh 훅을 붙인다(PreToolUse·PostToolUse·UserPromptSubmit 은 busy: 권한 확인 창은 도구 호출 때 뜨므로, Claude 가 스스로 시작한 턴에서도 창이 뜨기 전에 busy 가 된다). 저장소 루트 폴더에서는 프로젝트 설정의 훅이 이미 돌므로 붙이지 않는다. 그 밖의 모든 폴더(저장소의 하위 폴더 포함:
 #     Claude Code 는 시작한 폴더의 .claude/settings.json 만 읽는다)에 붙인다. 붙였으면 data/state/app/<id>.hooked 표지를 남겨 앱이 훅이 붙은 세션임을 알게 한다(표지가 없으면 앱은 예전처럼 상태 알 수 없음으로 본다).
 #     같은 조건에서 UserPromptSubmit·Stop 에 talk-log.sh 훅(timeout 5)도 붙여 질문·최종 답변을 data/state/app/<id>.talk.jsonl 에 남긴다(앱 읽기 화면용). MARU_NO_TALK_LOG=1 이면 붙이지 않는다.
+#     화면 블록 지시문: talk-log 훅이 실제로 `--settings` 에 들어갔을 때만(surf_want=1) prompts/read-surface.md 를 `--append-system-prompt` 로 더한다. MARU_NO_SURFACE=1 이거나, prompts 폴더나 파일이 링크이거나·파일이 보통 파일이 아니거나·비었거나·4096바이트 초과이거나,
+#     사용자 인자에 이미 --append-system-prompt/--system-prompt(-file 포함)가 있으면 붙이지 않고 지금과 똑같이 실행한다.
 #  2) 플랜 사용량(어느 폴더든): statusLine 으로 usage-status.sh 를 붙인다(앱 하단 띠용 data/usage.json; 사용자의 기존 statusLine 은 그 스크립트가 통과시킨다). MARU_NO_USAGE_STATUS=1 이면 붙이지 않는다.
 sset=()
+sysp=()
+surf_want=""; tk_arg=""   # 환경변수로 들어온 값이 쓰이지 않게 앱 세션 분기 밖에서 비워 둔다
 if [ -n "${MARU_APP_SESSION:-}" ] && [ -n "$SCRIPTS" ]; then
   sroot=${SCRIPTS%/*}; shere=$(pwd -P 2>/dev/null) || shere=""
   sh_arg=""; su_arg=""; tk_arg=""
@@ -129,6 +133,8 @@ print(json.dumps(d, separators=(",", ":")))
     case "$sj" in
       '{"hooks":{'*|'{"statusLine":{'*)
         sset=(--settings "$sj")
+        # talk-log 훅이 실제로 이 JSON 에 들어갔을 때만 화면 블록 지시문을 붙인다
+        case "$sj" in '{"hooks":{'*) [ -n "$tk_arg" ] && surf_want=1 ;; esac
         # 표지(훅을 붙였을 때만): id 형식(agent-state.sh 와 같은 규칙)이 맞고 폴더가 링크가 아닐 때만. 실패해도 세션은 그대로 뜬다
         sid=$MARU_APP_SESSION; sdir=$sroot/data/state/app
         case "$sid" in *[!A-Za-z0-9-]*) sid="" ;; esac
@@ -139,7 +145,25 @@ print(json.dumps(d, separators=(",", ":")))
     esac
   fi
 fi
+# 화면 블록 지시문: talk-log 훅이 실제로 --settings 에 들어갔을 때(surf_want=1)만, MARU_NO_SURFACE=1 이 아니고 사용자 인자에 시스템 프롬프트 옵션이 없을 때만
+# prompts/read-surface.md(prompts 폴더와 파일이 링크가 아닌 보통 파일, 1~4096바이트)를 `--append-system-prompt` 로 붙인다. 하나라도 어긋나면 붙이지 않는다.
+if [ "$surf_want" = 1 ] && [ "${MARU_NO_SURFACE:-}" != 1 ]; then
+  sdirp=${SCRIPTS%/*}/prompts; sfile=$sdirp/read-surface.md; surf_ok=1
+  for a in "$@"; do
+    case "$a" in --system-prompt|--system-prompt=*|--system-prompt-file|--system-prompt-file=*|--append-system-prompt|--append-system-prompt=*|--append-system-prompt-file|--append-system-prompt-file=*) surf_ok="" ;; esac
+  done
+  if [ -n "$surf_ok" ] && [ -d "$sdirp" ] && [ ! -L "$sdirp" ] && [ -f "$sfile" ] && [ ! -L "$sfile" ]; then
+    # 한 번만 읽는다(끝 x 로 개행 보존). 4097바이트까지 읽어 읽은 바이트 수가 1~4096 인지 다시 확인한다
+    stext=$(LC_ALL=C head -c 4097 "$sfile" 2>/dev/null; printf x); stext=${stext%x}
+    ssz=$(export LC_ALL=C; printf '%s' "${#stext}")
+    case "$ssz" in ''|*[!0-9]*) ;; *)
+      if [ "$ssz" -ge 1 ] && [ "$ssz" -le 4096 ]; then
+        stext=$(printf '%s' "$stext"); [ -n "$stext" ] && sysp=(--append-system-prompt "$stext")
+      fi ;;
+    esac
+  fi
+fi
 case "$json" in
-  "{\"sq-"*) exec claude --agents "$json" ${agent[@]+"${agent[@]}"} ${sset[@]+"${sset[@]}"} "$@" ${post[@]+"${post[@]}"} ;;
+  "{\"sq-"*) exec claude --agents "$json" ${agent[@]+"${agent[@]}"} ${sset[@]+"${sset[@]}"} ${sysp[@]+"${sysp[@]}"} "$@" ${post[@]+"${post[@]}"} ;;
 esac
-exec claude ${sset[@]+"${sset[@]}"} "$@" ${post[@]+"${post[@]}"}
+exec claude ${sset[@]+"${sset[@]}"} ${sysp[@]+"${sysp[@]}"} "$@" ${post[@]+"${post[@]}"}

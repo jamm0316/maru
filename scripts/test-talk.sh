@@ -360,6 +360,54 @@ wrap_in "$R"; check "MARU_APP_SESSION 없음: 인자 없음" [ ! -s "$SO" ]
 wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_NO_STATE_HOOKS=1; check "MARU_NO_STATE_HOOKS=1: talk-log 훅도 붙지 않음" sh -c '! tr "\0" "\n" < "$1" | grep -q talk-log' _ "$SO"
 rm -f "$R/data/state/app/"*.hooked
 
+echo "== maru-claude.sh: 화면 블록 지시문(--append-system-prompt)"
+mkdir -p "$R/prompts"; cp "$REPO/prompts/read-surface.md" "$R/prompts/read-surface.md"
+SP=$R/prompts/read-surface.md
+# 인자 개수(--append-system-prompt 가 몇 번 나오는지)와 그 값
+sp_count() { tr '\0' '\n' < "$SO" | grep -c -x -e '--append-system-prompt'; }
+sp_value() { "$REAL_PY" -I -c '
+import sys
+a = [x.decode() for x in open(sys.argv[1], "rb").read().split(b"\0")[:-1]]
+i = a.index("--append-system-prompt"); sys.stdout.write(a[i + 1])' "$SO"; }
+sp_none() { [ "$(sp_count)" = 0 ]; }
+want=$(cat "$SP")
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345
+checkall "앱 세션 + 훅 조건: --append-system-prompt 가 한 번 붙고 값이 prompts/read-surface.md 내용과 같음" [ "$(sp_count)" = 1 ] '&&' [ "$(sp_value)" = "$want" ] '&&' talk_check yes
+check "원본 파일이 비어 있지 않고 4096바이트 이하이며 코드 펜스가 없음" sh -c '[ -s "$1" ] && [ "$(wc -c < "$1")" -le 4096 ] && ! grep -qF "$2" "$1"' _ "$REPO/prompts/read-surface.md" "$(printf '\140\140\140')"
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_NO_SURFACE=1; checkall "MARU_NO_SURFACE=1: 안 붙음(훅은 그대로)" sp_none '&&' talk_check yes
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_NO_SURFACE=0; check "MARU_NO_SURFACE=0: 붙음" [ "$(sp_count)" = 1 ]
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_NO_TALK_LOG=1; check "MARU_NO_TALK_LOG=1: 안 붙음" sp_none
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_NO_STATE_HOOKS=1; check "MARU_NO_STATE_HOOKS=1(훅 없음): 안 붙음" sp_none
+wrap_in "$R" MARU_APP_SESSION=inroot-12345; check "저장소 루트(talk 훅 없음): 안 붙음" sp_none
+wrap_in "$T/out side"; check "앱 세션 아님(MARU_APP_SESSION 없음): 안 붙음" sp_none
+mv "$SP" "$SP.bak"; ln -s "$SP.bak" "$SP"
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "지시문 파일이 심볼릭 링크: 안 붙음" sp_none
+rm -f "$SP"; wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; checkall "지시문 파일 없음: 안 붙고 훅은 그대로" sp_none '&&' talk_check yes
+: > "$SP"; wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "지시문 파일이 비어 있음: 안 붙음" sp_none
+"$REAL_PY" -I -c 'import sys;sys.stdout.write("a"*4097)' > "$SP"; wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "지시문 파일 4097바이트: 안 붙음" sp_none
+"$REAL_PY" -I -c 'import sys;sys.stdout.write("a"*4096)' > "$SP"; wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "지시문 파일 4096바이트: 붙음" [ "$(sp_count)" = 1 ]
+rm -f "$SP"; mkdir "$SP"; wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "지시문 경로가 폴더: 안 붙음" sp_none
+rmdir "$SP"; rm -f "$SP.bak"; cp "$REPO/prompts/read-surface.md" "$SP"
+# 사용자가 넘긴 인자: wrap_in 은 "$@" 를 환경 앞부분에 쓰므로 여기서는 직접 실행한다
+wrap_args() { local d=$1; shift; rm -f "$SO"; ( cd "$d" && env -i HOME="$T/home" PATH="$T/stub:$BASEPATH" MARU_PATH_PREFIX= MARU_TOOL_DIRS="$PYDIR" MARU_DATA="$R/data" MARU_HOME="$R" MARU_NO_SQUADS=1 STUB_OUT="$SO" MARU_APP_SESSION=outside-12345 bash "$WR" "$@" ) >/dev/null 2>&1; }
+wrap_args "$T/out side" --append-system-prompt "내 지시"; checkall "사용자가 --append-system-prompt 를 줌: 한 번만(사용자 값) 나옴" [ "$(sp_count)" = 1 ] '&&' [ "$(sp_value)" = "내 지시" ]
+wrap_args "$T/out side" --append-system-prompt=내지시; check "--append-system-prompt=값 형태: 안 붙음" sh -c '! tr "\0" "\n" < "$1" | grep -q -x -e "--append-system-prompt"' _ "$SO"
+wrap_args "$T/out side" --system-prompt "전부 바꿈"; check "사용자가 --system-prompt 를 줌: 안 붙음" sp_none
+wrap_args "$T/out side" --resume 11111111-2222-3333-4444-555555555555; checkall "--resume 과 함께: 붙고 --resume 인자도 그대로" [ "$(sp_count)" = 1 ] '&&' sh -c 'tr "\0" "\n" < "$1" | grep -q -x -e "--resume"' _ "$SO"
+wrap_args "$T/out side" --system-prompt-file /x/sys.md; check "사용자가 --system-prompt-file 을 줌: 안 붙음" sp_none
+wrap_args "$T/out side" --append-system-prompt-file /x/app.md; check "사용자가 --append-system-prompt-file 을 줌: 안 붙음(값은 그대로 전달)" sp_none
+# python3 를 못 찾음: talk-log 훅이 --settings 에 못 들어가므로 지시문도 붙이지 않는다(회귀: 예전엔 tk_arg 만 보고 붙였다)
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_TOOL_DIRS= PATH="$T/stub:/bin"
+checkall "python3 를 찾지 못함: 지시문 없음, --settings 없음" sp_none '&&' [ -f "$SO" ] '&&' [ ! -s "$SO" ]
+# 환경에서 들어온 tk_arg·surf_want 는 앱 세션이 아닌 실행에서 쓰이지 않는다
+wrap_in "$T/out side" tk_arg=x surf_want=1; check "앱 세션 아님 + 환경 tk_arg=x surf_want=1: 안 붙음" sp_none
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345 MARU_NO_TALK_LOG=1 tk_arg=x surf_want=1; check "앱 세션 + 훅 없음 + 환경 tk_arg=x surf_want=1: 안 붙음" sp_none
+# prompts 폴더가 심볼릭 링크
+mv "$R/prompts" "$R/prompts.real"; ln -s "$R/prompts.real" "$R/prompts"
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; checkall "prompts 폴더가 심볼릭 링크: 안 붙고 훅은 그대로" sp_none '&&' talk_check yes
+rm -f "$R/prompts"; mv "$R/prompts.real" "$R/prompts"
+wrap_in "$T/out side" MARU_APP_SESSION=outside-12345; check "prompts 폴더를 되돌리면 다시 붙음" [ "$(sp_count)" = 1 ]
+
 echo "== .claude/settings.json"
 check "올바른 JSON 이고 두 항목에 timeout 5, 상태 훅이 먼저, 다른 이벤트엔 없음" "$REAL_PY" -I -c '
 import json, sys

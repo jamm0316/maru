@@ -62,13 +62,13 @@ const HOME_BLOCK = !found ? ({ foreign: 'not-managed', symlink: 'home-symlink', 
 const SMOKE = process.env.MARU_APP_SMOKE === '1';
 const REFRESH_MS = 30000;
 const VERSION = app.getVersion();
-const TEST_UI = !app.isPackaged && ['read', 'readrail', 'readwait', 'menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsdrag', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
+const TEST_UI = !app.isPackaged && ['read', 'readrail', 'readwait', 'readsurf', 'readsurftop', 'readempty', 'menu', 'settings', 'update', 'project', 'party', 'squadnew', 'inbox', 'memory', 'memgraph', 'setup', 'day', 'subnew', 'wsdrag', 'wsmenu', 'wsrename', 'hierarchy'].includes(process.env.MARU_APP_UI) ? process.env.MARU_APP_UI : null; // 시험 전용(패키징 빌드에서는 무시)
 const FAKE_DAY = TEST_UI === 'day'; // 시험 전용: 지어낸 일지·회고·일정(디스크·osascript 없음)
 const FAKE_HIER = TEST_UI === 'hierarchy' || TEST_UI === 'subnew' || TEST_UI === 'wsmenu' || TEST_UI === 'wsrename' || TEST_UI === 'wsdrag'; // 시험 전용: 지어낸 작업 공간 계층(subnew 는 거기에 "하위 세션 열기" 창을, wsmenu 는 둘째 행의 우클릭 메뉴를, wsrename 은 둘째 행의 이름 편집을 연 채로 둔다, wsdrag 는 끌어 놓기 표시를 화면에 보인다)
 const FAKE_RC = ['on', 'off', 'turning-on', 'turning-off', 'unknown'].includes(process.env.MARU_APP_RC || '') ? process.env.MARU_APP_RC : null; // 시험 전용: MARU_APP_UI=hierarchy 에서 모든 작업 공간의 원격 표시를 이 값으로 고정(화면 캡처용)
 const FAKE_USAGE = !app.isPackaged && ['1', 'high'].includes(process.env.MARU_APP_USAGE || '') ? process.env.MARU_APP_USAGE : null; // 시험 전용: 하단 플랜 사용량 띠의 지어낸 값(1: 39%·45분 / 24%·4일, high: 96% / 83%). 패키징 빌드에서는 무시
 const FAKE_PROJ = TEST_UI === 'project' || FAKE_DAY; // 시험 전용: 프로젝트 목록도 지어낸 데이터(실제 data 를 읽지 않는다)
-const FAKE_TALK = !app.isPackaged && (process.env.MARU_APP_TALK === '1' || TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait'); // 시험 전용: 읽기 화면의 지어낸 대화(질문 3·답변 3). 읽기 화면 모드(MARU_APP_UI=read|readrail|readwait)는 변수 없이도 켠다. 패키징 빌드에서는 무시
+const FAKE_TALK = !app.isPackaged && (process.env.MARU_APP_TALK === '1' || TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait' || TEST_UI === 'readsurf' || TEST_UI === 'readsurftop' || TEST_UI === 'readempty'); // 시험 전용: 읽기 화면의 지어낸 대화(질문 3·답변 3). 읽기 화면 모드(MARU_APP_UI=read|readrail|readwait)는 변수 없이도 켠다. 패키징 빌드에서는 무시
 const TEST_FX = !app.isPackaged && process.env.MARU_APP_FX === '1'; // 시험 전용: 가짜 작업 공간 3개(claude 대신 echo). 패키징 빌드에서는 무시
 const PERSIST = !SMOKE && !TEST_FX && !FAKE_HIER && !FAKE_PROJ; // 작업 공간 목록을 data/workspaces.json 에 저장·복원할지
 // 파티: 마루(지휘) + 저장소 .claude/agents/*.md 의 frontmatter(name, model). 읽기 실패·비면 기본 3개(lib.js)
@@ -546,14 +546,14 @@ function rememberClaudeProc(w) {
   if (p && !L.isShellProcessName(p)) w.claudeProc = p;
 }
 // 이 작업 공간의 pty 에 쓴 시각을 적는다(읽기 입력창의 "답변 뒤 터미널 입력 없음" 판정). pty 에 쓰는 모든 자리가 쓰기 직전에 부른다. 터미널의 자동 응답은 부르지 않는다(pty:write 처리기가 가린다)
-function markIn(w) { w.ptyInAt = Date.now(); }
+function markIn(w) { w.ptyInAt = Date.now(); w.ptyInN = (Number.isSafeInteger(w.ptyInN) ? w.ptyInN : 0) + 1; } // ptyInN: 시각과 함께 오르는 입력 횟수. 첫 메시지 길은 밀리초 시각의 같음이 아니라 이 횟수로 "입력이 없었다"를 본다
 const PROC_WATCH_MS = 30000; // 앱이 claude 를 띄운 뒤 이 안에서만 이름을 다시 시도한다(래퍼 스크립트가 exec 하기 전에 붙여넣기 모드 켬이 온 경우)
 function trackBracketed(w, d) { // 순서·청크 경계 처리는 lib.js 의 bpStep(순수 함수, 시험 대상)
   const wasUp = w.claudeUp === true;
   const n =L.bpStep({ tail: w.seqTail, bracketed: w.bracketed, awaitClaude: w.awaitClaude, sawOff: w.sawOff, claudeUp: w.claudeUp }, d);
   w.seqTail = n.tail; w.bracketed = n.bracketed; w.sawOff = n.sawOff; w.claudeUp = n.claudeUp;
   if (!w.claudeUp && w.awaitClaude && n.sawOn) w.claudeUp = L.claudeUpAfter({ claudeUp: false, awaitClaude: true, sawOn: true, procName: termProc(w) }); // 셸이 2004l 을 안 내도 포그라운드가 셸이 아니면 뜬 것(termProc 는 이때만 부른다)
-  if (!wasUp && w.claudeUp) rememberClaudeProc(w); // 방금 떴다고 판정했다: 이때만 이름을 읽는다
+  if (!wasUp && w.claudeUp) { w.claudeUpAt = Date.now(); rememberClaudeProc(w); } // 방금 떴다고 판정했다: 이때만 이름을 읽는다. claudeUpAt: 첫 메시지 길(readCanSendFirst)이 뜬 지 2초를 센다
   // 앱이 claude 를 띄운 모든 작업 공간(awaitClaude 가 아니어도): 붙여넣기 모드 켬을 본 뒤 포그라운드가 셸이 아니면 그 이름을 기억한다. 이름을 기억해야 node 로 도는 설치도 읽기 입력창을 쓸 수 있다.
   // 켬을 본 뒤 이름이 아직 셸(래퍼)이면 PROC_WATCH_MS 안에서 다음 출력에 다시 본다. 한 번 기억하면(또는 시간이 지나면) termProc 를 부르지 않는다
   if (w.watchProc && !w.claudeProc) {
@@ -565,7 +565,7 @@ function trackBracketed(w, d) { // 순서·청크 경계 처리는 lib.js 의 bp
 function claudeUpNow(w) {
   if (w.claudeUp === true) return true;
   if (!w.awaitClaude || w.bracketed !== true) return false;
-  if (L.claudeUpAfter({ claudeUp: false, awaitClaude: true, sawOn: true, procName: termProc(w) })) { w.claudeUp = true; rememberClaudeProc(w); return true; }
+  if (L.claudeUpAfter({ claudeUp: false, awaitClaude: true, sawOn: true, procName: termProc(w) })) { w.claudeUp = true; w.claudeUpAt = Date.now(); rememberClaudeProc(w); return true; }
   return false;
 }
 function sendToRenderer(ch, ...args) { if (win && !win.isDestroyed()) win.webContents.send(ch, ...args); }
@@ -602,7 +602,8 @@ function spawnPty(w, cols, rows) {
   if (resume) { w.claudeSid = resume; w.claudeSidAt = Date.now(); } else if (fresh) { w.claudeSid = fresh; w.claudeSidAt = Date.now(); saveWsLater(); } else if (!w.fx) { w.claudeSid = null; w.claudeSidAt = null; }
   if (w.startNote) { w.noteKind = w.startNote; w.noteShownAt = null; w.startNote = null; } // 이어 열었거나 새로 시작한 이유(탭 안내용): 처음 보일 때까지 남고, 보인 뒤 몇 초만 // 앱을 다시 켜며 이어 열었거나 새로 시작한 이유(탭 안내용, 몇 초만)
   w.awaitClaude = !!w.expectClaude || !!resume; w.expectClaude = false; w.sawOff = false; w.claudeUp = false; w.claudeProc = ''; w.typedN = 0; rcReset(w);
-  w.ptyStartAt = Date.now(); w.ptyInAt = 0; w.watchProc = false; w.sawUp = false; // 읽기 입력창의 판정용: pty 를 띄운 시각, 그 pty 에 마지막으로 쓴 시각(markIn), 앱이 claude 를 띄웠는가(이름 기억 대상), 붙여넣기 모드 켬을 봤는가
+  w.launchInAt = 0; w.launchInN = 0; w.firstPasteInAt = 0; w.firstPasteInN = 0; w.claudeUpAt = 0; // 첫 메시지 길: claude 실행 줄을 쓴 직후의 ptyInAt·ptyInN, 첫 붙여넣기 직후의 같은 값, claudeUp 이 참이 된 시각(새 pty 마다 지운다)
+  w.ptyStartAt = Date.now(); w.ptyInAt = 0; w.ptyInN = 0; w.watchProc = false; w.sawUp = false; // 읽기 입력창의 판정용: pty 를 띄운 시각, 그 pty 에 마지막으로 쓴 시각(markIn), 앱이 claude 를 띄웠는가(이름 기억 대상), 붙여넣기 모드 켬을 봤는가
   self.onData((d) => {
     if (w.term !== self) return;
     w.lastOutputAt = Date.now();
@@ -643,8 +644,8 @@ function spawnPty(w, cols, rows) {
       const bin = found || scanClaude([]); // 시간 안에 못 정했으면 고정 위치만 동기로 훑는다. 그래도 없으면 예전 형태
       const cmd = L.claudeLaunchCommand(sid, wrapper, resume, fresh, bin); if (!cmd) return;
       // 기다리는 동안 맨 셸에서 Enter 가 눌렸다면 셸의 붙여넣기 모드 끔→켬이 claudeUp 으로 잘못 셀 수 있다: 줄을 쓰기 직전에 되돌린다(awaitClaude·launchResumed 는 그대로)
-      w.claudeUp = false; w.claudeProc = ''; w.sawOff = false; w.typedN = 0; w.startedAt = Date.now(); // startedAt: 이어 열기 빠른 실패 판정(resumeFailureDecision)을 claude 를 실제로 띄운 때부터 센다
-      w.watchProc = true; w.sawUp = false; markIn(w); // 앱이 이 pty 에서 claude 를 띄운다: Claude 화면이 뜬 때 포그라운드 이름을 기억한다(trackBracketed)
+      w.claudeUp = false; w.claudeUpAt = 0; w.claudeProc = ''; w.sawOff = false; w.typedN = 0; w.startedAt = Date.now(); // startedAt: 이어 열기 빠른 실패 판정(resumeFailureDecision)을 claude 를 실제로 띄운 때부터 센다
+      w.watchProc = true; w.sawUp = false; markIn(w); w.launchInAt = w.ptyInAt; w.launchInN = w.ptyInN; // launchInAt·launchInN: 이 뒤 pty 입력이 없었는지 첫 메시지 길이 본다. 앱이 이 pty 에서 claude 를 띄운다: Claude 화면이 뜬 때 포그라운드 이름을 기억한다(trackBracketed)
       try { self.write(cmd); } catch { /* 이미 끝난 pty */ }
     }).catch(() => {});
   }
@@ -842,7 +843,7 @@ const wsView = () => {
       reports: own ? own.count : 0, reportAt, flash: !!w.flashUntil && w.flashUntil > now, auto: !!w.autoStart && !w.term && !w.exited && !w.unavailable,
       cnote: w.childNote && now - w.childNote.at < CNOTE_MS ? { kind: w.childNote.kind, reason: w.childNote.reason || null, title: w.childNote.title || null } : null,
       subs: w.parentId ? L.childSubNames(readSubs(w)) : [], unread: !!w.unread, rc: rcViewOf(w, rec, now),
-      sr: w.id === activeId && w.term ? (() => { const r = L.readCanSend(readCtxOf(w, now)); return r.ok ? '' : r.reason; })() : '' }; // sr: 읽기 화면 입력창의 미리 잠금용(활성 작업 공간만; 최종 판단은 read:send 가 다시 한다). rc 는 시간에 따라 바뀐다: 렌더러가 1초마다 ws:get 을 하므로 60초 진행 중 표시가 끝나는 순간도 따로 알릴 필요가 없다
+      sr: w.id === activeId && w.term ? (() => { const cx = readCtxOf(w, now); const r = L.readCanSend(cx); if (r.ok) return ''; return r.reason === 'first' && cx.rawState == null && cx.ux === 'none' && L.readCanSendFirst(cx).ok ? '' : r.reason; })() : '' }; // sr: 읽기 화면 입력창의 미리 잠금용(활성 작업 공간만; 최종 판단은 read:send 가 다시 한다). rc 는 시간에 따라 바뀐다: 렌더러가 1초마다 ws:get 을 하므로 60초 진행 중 표시가 끝나는 순간도 따로 알릴 필요가 없다
     if (FAKE_HIER && w.fakeView) return { ...v, ...(FAKE_RC ? { rc: FAKE_RC, cc: true } : {}), ...w.fakeView, state: w.fakeView.state || state }; // fakeView 에 rc 를 직접 줄 수도 있다
     return v;
   });
@@ -1825,19 +1826,85 @@ function readCtxOf(w, now) {
     rawState: rec ? rec.state : null, recAt: rec ? rec.atMs : NaN, talkRole: last ? last.role : null, talkAt: last ? last.at : NaN, inAt: Number.isFinite(w.ptyInAt) ? w.ptyInAt : NaN, startAt: Number.isFinite(w.ptyStartAt) ? w.ptyStartAt : NaN, // 새 규칙의 입력: 원래 기록(낮추지 않은 값)·시각(밀리초)·마지막 대화 줄·마지막 pty 입력·pty 시작
     hasTerm: !!w.term, cc: !!w.term && L.isClaudeUi({ launched: !!ROOT && !w.fx && !SMOKE, state, claudeFound: claudeFound() }),
     procName: termProc(w), knownName: w.claudeProc || '', hooked: !!ROOT && (w.isRoot === true || sessionHooked(w)), ux: derivedState(w, state),
-    bg: L.bgCount(rec, state, now, SUBS_TTL_MS), bracketed: w.bracketed === true, quietMs: now - (w.lastOutputAt || 0), dirty: w.draft === true };
+    bg: L.bgCount(rec, state, now, SUBS_TTL_MS), bracketed: w.bracketed === true, quietMs: now - (w.lastOutputAt || 0), dirty: w.draft === true,
+    inN: Number.isSafeInteger(w.ptyInN) ? w.ptyInN : 0, launchInN: Number.isSafeInteger(w.launchInN) ? w.launchInN : 0,
+    launchInAt: Number.isFinite(w.launchInAt) ? w.launchInAt : 0, claudeUpAt: Number.isFinite(w.claudeUpAt) ? w.claudeUpAt : 0, claudeUp: w.claudeUp === true, now }; // 뒤 셋은 첫 메시지 길(L.readCanSendFirst)만 쓴다
+}
+// 첫 메시지 길의 화면 읽기: 렌더러에 그 작업 공간 xterm 의 보이는 화면을 요청한다(nonce 가 맞는 답만 받는다). 300ms 안에 답이 없으면 null. 판정은 main 이 L.promptBoxCheck 로 한다
+const snapWait = new Map(); // nonce -> { id, res, timer }
+function readSnapOf(w) {
+  return new Promise((res) => {
+    if (!win || win.isDestroyed()) { res(null); return; }
+    const nonce = crypto.randomBytes(12).toString('hex');
+    const timer = setTimeout(() => { snapWait.delete(nonce); res(null); }, 300);
+    snapWait.set(nonce, { id: w.id, res, timer });
+    try { win.webContents.send('read:snap-req', w.id, nonce); } catch { clearTimeout(timer); snapWait.delete(nonce); res(null); }
+  });
+}
+ipcMain.on('read:snap', (e, id, nonce, snap) => {
+  if (!fromMain(e) || typeof nonce !== 'string') return;
+  const p = snapWait.get(nonce);
+  if (!p || p.id !== id) return;
+  snapWait.delete(nonce); clearTimeout(p.timer);
+  const strs = (a) => Array.isArray(a) && a.length <= 1000 && a.every((s) => typeof s === 'string' && s.length <= 2000); // lib 의 PB_MAX_LINES·PB_MAX_LINE 과 같은 제한
+  p.res(snap && typeof snap === 'object' && strs(snap.lines) && strs(snap.plain) && snap.plain.length === snap.lines.length ? snap : null); // plain(흐린 글자를 공백으로 바꾼 같은 줄들)이 lines 와 줄 수가 다르면 실패
+});
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+// 첫 메시지(훅 기록이 아직 없는 세션)를 입력창으로 보낸다. 붙여넣기만 쓰고 화면에서 글이 상자 안에 보이는 것을 확인한 뒤에야 Enter 를 보낸다.
+// 반환: { ok:true } | { ok:false, reason }. 이유 first-screen(화면 사전 확인 실패: 아무것도 쓰지 않았다), first-unsent(글은 넣었지만 Enter 는 보내지 않았다), 그 밖에는 L.readCanSendFirst 의 이유
+async function readSendFirst(w, text) {
+  if (w.readFirstBusy) return { ok: false, reason: 'rate' };
+  if (Date.now() - (w.readSendAt || 0) < READ_SEND_GAP_MS) return { ok: false, reason: 'rate' };
+  w.readFirstBusy = true;
+  const wsOk = () => w.id === activeId && !picking && !closing && !quitAsking && !restarting;
+  try {
+    const term = w.term;
+    if (!term) return { ok: false, reason: 'nosession' };
+    const p0 = L.readCanSendFirst(readCtxOf(w, Date.now()));
+    if (!p0.ok) return p0;
+    const snap = await readSnapOf(w);
+    if (!L.promptBoxCheck(snap).ok) return { ok: false, reason: 'first-screen' }; // 아무것도 쓰지 않았다
+    if (w.term !== term || !wsOk()) return { ok: false, reason: 'invalid' };
+    const p1 = L.readCanSendFirst(readCtxOf(w, Date.now())); // 화면을 읽는 사이에 바뀐 것이 없는지 쓰기 직전에 다시 본다
+    if (!p1.ok) return p1;
+    const paste = '\x1b[200~' + text + '\x1b[201~';
+    const pasteAt = Date.now();
+    markIn(w);
+    try { term.write(paste); } catch { return { ok: false, reason: 'nosession' }; }
+    w.draft = true; w.firstPasteInAt = w.ptyInAt; w.firstPasteInN = w.ptyInN; w.readSendAt = pasteAt; w.typedN = (w.typedN || 0) + 1;
+    const t0 = Date.now();
+    for (;;) {
+      await sleepMs(L.READ_FIRST_POLL_MS);
+      const live = w.term === term && wsOk();
+      const snapAt = Date.now(); // 화면을 요청하기 직전 시각: 그 뒤에 출력이 있었다면 화면이 낡았을 수 있다
+      const boxOk = live ? L.promptBoxCheck(await readSnapOf(w), text).ok : false;
+      const n = Date.now();
+      const v = L.firstSendVerdict({ elapsedMs: n - t0, now: n, pasteAt, lastOutputAt: w.lastOutputAt, snapAt, boxOk, ctx: readCtxOf(w, n), sameWs: live && wsOk(), sameTerm: w.term === term, ptyInN: w.ptyInN, firstPasteInN: w.firstPasteInN });
+      if (v.act === 'wait') continue;
+      if (v.act !== 'send') return { ok: false, reason: 'first-unsent' }; // 붙여넣은 글은 지우지 않는다. w.draft 는 참이라 다음 보내기는 draft 로 막힌다
+      if (!(w.lastOutputAt < snapAt)) return { ok: false, reason: 'first-unsent' }; // Enter 직전에 한 번 더: 그 화면을 요청한 뒤로 출력이 없어야 한다
+      markIn(w);
+      try { term.write('\r'); } catch { return { ok: false, reason: 'first-unsent' }; }
+      const data = paste + '\r';
+      bumpReadStat('sent');
+      if (L.shouldDropPrev({ data, typedN: w.typedN, hasPrev: !!w.prevSid })) { w.prevSid = null; saveWsLater(); }
+      w.draft = L.draftStep(w.draft, data);
+      return { ok: true };
+    }
+  } finally { w.readFirstBusy = false; }
 }
 // 읽기 화면을 사용자가 단추로 켰다는 표지. 같은 창에서 2초 안의 반복은 한 번만 센다
-let readMarkAt = 0;
+// 화면 블록을 그렸다('surf')·단추로 입력창을 채웠다('fill') 표지도 받는다. 횟수만 세고 내용은 받지 않는다
+const readMarkAt = { on: 0, surf: 0, fill: 0 }; const READ_MARK_GAP = { on: 2000, surf: 1000, fill: 300 };
 ipcMain.on('read:mark', (e, kind) => {
-  if (!fromMain(e) || kind !== 'on') return;
+  if (!fromMain(e) || (kind !== 'on' && kind !== 'surf' && kind !== 'fill')) return;
   const now = Date.now();
-  if (now - readMarkAt < 2000) return;
-  readMarkAt = now;
-  bumpReadStat('on');
+  if (now - readMarkAt[kind] < READ_MARK_GAP[kind]) return;
+  readMarkAt[kind] = now;
+  bumpReadStat(kind);
 });
-const FAKE_READ_SEND = !!TEST_UI && (TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait'); // 시험 전용: 실제로 쓰지 않고 성공만 돌려준다
-ipcMain.handle('read:send', (e, arg) => {
+const FAKE_READ_SEND = !!TEST_UI && (TEST_UI === 'read' || TEST_UI === 'readrail' || TEST_UI === 'readwait' || TEST_UI === 'readsurf' || TEST_UI === 'readsurftop' || TEST_UI === 'readempty'); // 시험 전용: 실제로 쓰지 않고 성공만 돌려준다
+ipcMain.handle('read:send', async (e, arg) => {
   const w = arg && typeof arg === 'object' ? wsFrom(e, arg.id) : null;
   if (!w) return { ok: false, reason: 'invalid' };
   const c = L.readCleanSend(arg.text);
@@ -1846,7 +1913,11 @@ ipcMain.handle('read:send', (e, arg) => {
   if (w.id !== activeId || picking || closing || quitAsking || restarting) return { ok: false, reason: 'invalid' };
   const now = Date.now();
   const can = L.readCanSend(readCtxOf(w, now));
-  if (!can.ok) return can;
+  if (!can.ok) {
+    const ctx = readCtxOf(w, now);
+    if (can.reason === 'first' && ctx.rawState == null && ctx.ux === 'none') return readSendFirst(w, c.text); // 훅 기록이 하나도 없는 세션의 첫 메시지: 화면을 확인하는 따로의 길. 다른 first(낡은 기록·대화 기록 없음)는 그대로 거부한다
+    return can;
+  }
   if (now - (w.readSendAt || 0) < READ_SEND_GAP_MS) return { ok: false, reason: 'rate' };
   const data = '\x1b[200~' + c.text + '\x1b[201~\r';
   markIn(w); // 읽기 입력도 터미널 입력이다: 다음 답변(새 idle 기록 + 새 assistant 줄)이 올 때까지 다시 보낼 수 없다(쓰기가 실패해도 적는다: 안전한 쪽)
@@ -2136,8 +2207,28 @@ function startChildChannel() {
 // ---- 대화 기록 읽기(읽기 화면): <세션 값>.talk.jsonl -> { key, items, more }. mtime·size 가 같으면 캐시. 읽기는 비동기(최대 16MB) ----
 let fakeTalk = null;
 function fakeTalkRes() {
-  if (!fakeTalk) {
+  if (!fakeTalk && TEST_UI === 'readempty') fakeTalk = { key: 'fake', items: [], more: false }; // 시험 전용: 대화가 빈 읽기 화면
+  if (!fakeTalk && (TEST_UI === 'readsurf' || TEST_UI === 'readsurftop')) { // 시험 전용: 화면 블록이 든 답변 둘(지난 답변 하나, 마지막 답변 하나). 데이터는 모두 가상이다
     const t0 = Math.floor(Date.now() / 1000) - 3600; const row = (i, role, text) => JSON.stringify({ v: 1, at: t0 + i * 60, role, text });
+    const fence = (lines) => '```maru-surface\n' + lines.join('\n') + '\n```\n';
+    const prior = '가상 점검을 끝냈습니다. 요약을 화면으로 남깁니다.\n\n' + fence([
+      'title: 지난 점검 요약', 'stat: 항목 수 | 12 | 점검함', 'stat: 오류 | 0', 'bar: 진행 | 3 / 4', 'kv: 구역 | 가', 'note: 나머지는 다음에 봅니다.',
+      'choice: 지난 선택지입니다.', '- 지난 선택지 하나', '- 지난 선택지 둘', 'next: 지난 다음 질문']);
+    const last = '이번 점검 결과입니다. 숫자와 결정할 일을 화면으로 정리했습니다.\n\n' + fence([
+      'title: 가상 점검 결과',
+      'stat: 시험 | 448 | 실패 0', 'stat: 스크립트 | 6 | 모두 통과', 'stat: 소요 | 12분', 'stat: 경고 | 2 | 확인 필요', 'stat: 열린 일 | 5',
+      'bar: 구현 단계 | 6 / 6', 'bar: 실제 사용 확인 | 1 / 7', 'bar: 문서 | 40%',
+      'kv: 구역 | 나', 'kv: 번호 | 0a1b2c3', 'kv: 상태 | 점검 중',
+      'note: 시험 환경이 가상입니다.', 'warn: 새 상자는 아직 적용 전입니다.',
+      'table: 남은 확인', '| 항목 | 상태 |', '|---|---|', '| 첫째 확인 | 확인 전 |', '| 둘째 확인 | 확인 전 |',
+      'choice: 다음에 무엇을 할까요?', '- 다음 단계로 넘어가 줘', '- 남은 확인만 먼저 해 줘', '- 지금은 멈춰 줘',
+      'next: 남은 위험을 자세히 알려 줘', 'next: 다음 범위를 다시 보여 줘']);
+    const lines = [row(0, 'user', '이번 구역을 점검해 줘.'), row(1, 'assistant', prior), row(2, 'user', '결과를 한 화면으로 보여 줘.'), row(3, 'assistant', last)];
+    const r = L.talkParse(lines.join('\n'));
+    fakeTalk = { key: 'fake', items: r.items, more: r.more };
+  }
+  if (!fakeTalk) {
+    const t0 =Math.floor(Date.now() / 1000) - 3600; const row = (i, role, text) => JSON.stringify({ v: 1, at: t0 + i * 60, role, text });
     const lines = [
       row(0, 'user', '이번 주 독서 모임 준비 상황을 정리해 줘.'),
       row(1, 'assistant', '## 준비 현황\n\n**진행 중**인 일은 세 가지입니다. 먼저 `모임표.txt` 를 확인했습니다.\n\n- 장소 예약: 완료\n- 간식 주문: 대기\n- 발제문 공유: 초안 작성 중\n\n| 항목 | 담당 | 남은 일수 |\n|---|---|---:|\n| 장소 | 총무 | 0 |\n| 간식 | 살림 | 2 |\n| 발제문 | 발제자 | 12 |\n'),

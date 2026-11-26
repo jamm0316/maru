@@ -78,7 +78,9 @@ contextBridge.exposeInMainWorld('maru', {
   talkGet: (id, key) => ipcRenderer.invoke('talk:get', { id: String(id).slice(0, 64), key: typeof key === 'string' ? key.slice(0, 64) : '' }),
   // 읽기 화면 입력창: 글을 터미널에 보낸다. 검사·정리는 main 이 다시 한다
   readSend: (id, text) => ipcRenderer.invoke('read:send', { id: String(id).slice(0, 64), text }),
-  readMark: (kind) => ipcRenderer.send('read:mark', kind === 'on' ? 'on' : ''), // 읽기 화면을 단추로 켰다는 표지(횟수만 센다)
+  onReadSnapReq: (cb) => { ipcRenderer.on('read:snap-req', (_e, id, nonce) => cb(String(id), String(nonce))); }, // 첫 메시지 길: main 이 그 작업 공간 터미널의 보이는 화면을 요청한다
+  readSnap: (id, nonce, snap) => ipcRenderer.send('read:snap', String(id).slice(0, 64), String(nonce).slice(0, 64), snap),
+  readMark: (kind) => ipcRenderer.send('read:mark', kind === 'on' || kind === 'surf' || kind === 'fill' ? kind : ''), // 읽기 화면을 단추로 켰다·화면 블록을 그렸다·단추로 입력창을 채웠다는 표지(횟수만 센다)
   setWsCollapsed: (id, on) => ipcRenderer.invoke('ws:set-collapsed', String(id), on === true),
   // 동의 창 답: 한 번만 쓰는 토큰과 'open'|'cancel' 만. main 이 토큰·보낸 창을 다시 검증한다
   answerChildConsent: (token, answer, squad) => ipcRenderer.invoke('child:answer', String(token).slice(0, 64), answer === 'open' ? 'open' : 'cancel', typeof squad === 'string' ? squad.slice(0, 40) : null), // squad: 고른 팀 slug 또는 null(팀 없이). main 이 설치된 목록과 다시 대조한다

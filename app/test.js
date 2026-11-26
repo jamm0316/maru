@@ -4550,7 +4550,7 @@ t('원격 토글 연결: main 은 고정 문장만 쓰고, 렌더러·메뉴·i1
   assert.ok(/ipcMain\.handle\('rc:toggle', \(e, id\) => \{\n  const w = wsFrom\(e, id\);/.test(main), '발신자·작업 공간 검사');
   assert.ok(/rc: rcViewOf\(w, rec, now\)/.test(main) && /L\.rcScan\(w\.rcTail, d\)/.test(main) && /L\.draftStep\(w\.draft, data\)/.test(main));
   assert.strictEqual((main.match(/rcReset\(w\)/g) || []).length >= 6, true, 'pty 가 새로 뜨거나 끝나는 모든 자리에서 초기화');
-  assert.strictEqual((main.match(/w\.draft = true/g) || []).length, 4, '프로그램이 입력줄에 채우는 네 자리(writePrompt·files:drop·prefillChild·첫 만남)');
+  assert.strictEqual((main.match(/w\.draft = true/g) || []).length, 5, '프로그램이 입력줄에 채우는 다섯 자리(writePrompt·files:drop·prefillChild·첫 만남·입력창 첫 메시지 길 readSendFirst)');
   const mi = main.slice(main.indexOf("label: tr('menu.rc')"), main.indexOf("label: tr('menu.rc')") + 260);
   assert.ok(/label: tr\('menu\.rc'\)/.test(main) && !/accelerator/.test(mi.split('click')[0]), '메뉴에 단축키 없음');
   assert.ok(/sendToRenderer\('ui:rc-toggle'\)/.test(mi) && !/rcToggle\(/.test(mi), '메뉴는 렌더러의 같은 처리를 거친다(main 이 직접 부르지 않는다)');
@@ -4676,7 +4676,8 @@ t('mdParse 코드 펜스: 언어 이름, 안의 #·|·** 는 해석하지 않는
   assert.strictEqual(b.length, 3);
 });
 t('mdParse 닫히지 않은 펜스는 글 끝까지 코드, 짧은 닫는 줄은 닫지 못한다', () => {
-  assert.deepStrictEqual(mdB('```py\nprint(1)\n\n# 끝'), [{ t: 'code', lang: 'py', text: 'print(1)\n\n# 끝' }]);
+  assert.deepStrictEqual(mdB('```py\nprint(1)\n\n# 끝'), [{ t: 'code', lang: 'py', text: 'print(1)\n\n# 끝', open: true }]); // 닫는 펜스가 없으면 open
+  assert.deepStrictEqual(mdB('```py\nprint(1)\n```'), [{ t: 'code', lang: 'py', text: 'print(1)' }]); // 닫혔으면 open 키가 없다
   const b = mdB('````\n```\n안\n````');
   assert.strictEqual(b[0].text, '```\n안'); assert.strictEqual(b.length, 1);
 });
@@ -4971,10 +4972,323 @@ t('talkParse __proto__ 키가 든 줄은 필요한 필드만 옮긴다', () => {
   assert.strictEqual({}.polluted, undefined); assert.strictEqual(Object.getPrototypeOf(r.items[0]), Object.prototype);
 });
 
+// ---- surfaceParse (화면 블록) ----
+const sp = (s) => L.surfaceParse(s);
+const SURF_EXAMPLE = [
+  'title: 읽기 화면 1부 점검', 'stat: 앱 시험 | 448 | 실패 0', 'stat: 스크립트 시험 | 6 | 모두 통과', 'bar: 구현 단계 | 6 / 6', 'bar: 실제 사용 확인 | 1 / 7',
+  'kv: 브랜치 | main', 'kv: 커밋 | 9b6662e', 'warn: 설치된 앱은 아직 새 빌드가 아닙니다.', 'table: 남은 확인', '| 항목 | 상태 |', '|---|---|', '| 한글 조합 중 Enter | 확인 전 |', '| 만족도 설문 | 확인 전 |',
+  'choice: 다음에 무엇을 할까요?', '- 설치된 앱을 새 빌드로 교체해', '- 커밋만 해', 'next: 남은 위험을 자세히 알려 줘', 'next: 2부 범위를 다시 보여 줘',
+].join('\n');
+t('surfaceParse 11.3 예시 블록 전체', () => {
+  const r = sp(SURF_EXAMPLE);
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.title, '읽기 화면 1부 점검'); assert.strictEqual(r.truncated, false);
+  assert.deepStrictEqual(r.parts.map((p) => p.t), ['stats', 'bars', 'kv', 'note', 'table', 'choice']);
+  assert.deepStrictEqual(r.parts[0].items, [{ label: '앱 시험', value: '448', note: '실패 0' }, { label: '스크립트 시험', value: '6', note: '모두 통과' }]);
+  assert.deepStrictEqual(r.parts[1].items, [{ label: '구현 단계', value: 6, max: 6, text: '6 / 6' }, { label: '실제 사용 확인', value: 1, max: 7, text: '1 / 7' }]);
+  assert.deepStrictEqual(r.parts[2].items, [{ k: '브랜치', v: 'main' }, { k: '커밋', v: '9b6662e' }]);
+  assert.deepStrictEqual(r.parts[3], { t: 'note', kind: 'warn', text: '설치된 앱은 아직 새 빌드가 아닙니다.' });
+  assert.strictEqual(r.parts[4].title, '남은 확인'); assert.strictEqual(r.parts[4].rows.length, 2); assert.deepStrictEqual(r.parts[4].head, [[{ s: 'text', v: '항목' }], [{ s: 'text', v: '상태' }]]);
+  assert.deepStrictEqual(r.parts[5], { t: 'choice', q: '다음에 무엇을 할까요?', options: ['설치된 앱을 새 빌드로 교체해', '커밋만 해'] });
+  assert.deepStrictEqual(r.next, ['남은 위험을 자세히 알려 줘', '2부 범위를 다시 보여 줘']);
+});
+t('surfaceParse title: 첫 줄만, 60자', () => {
+  const r = sp('title: ' + '가'.repeat(70) + '\ntitle: 둘째');
+  assert.strictEqual(r.title.length, 60); assert.strictEqual(r.ok, true); assert.strictEqual(r.truncated, true); assert.strictEqual(r.parts.length, 0);
+  assert.strictEqual(sp('title: 하나').title, '하나');
+});
+t('surfaceParse stat: 보조 글 생략, 칸 부족은 글, \\| 와 공백', () => {
+  let r = sp('stat:   a  |  b  ');
+  assert.deepStrictEqual(r.parts, [{ t: 'stats', items: [{ label: 'a', value: 'b', note: '' }] }]);
+  r = sp('stat: 이름만'); assert.strictEqual(r.ok, false); assert.deepStrictEqual(r.parts, [{ t: 'text', text: 'stat: 이름만' }]);
+  r = sp('stat: a \\| b | c \\| d | e'); assert.deepStrictEqual(r.parts[0].items[0], { label: 'a | b', value: 'c | d', note: 'e' });
+  r = sp('stat: x | y\nbar: q | 1 / 2\nstat: z | w'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['stats', 'bars', 'stats']); // 종류가 바뀌면 묶음도 바뀐다
+});
+t('surfaceParse stat: 9번째부터 버리고 truncated, 글자 수 제한', () => {
+  const r = sp(Array.from({ length: 10 }, (_, k) => 'stat: n' + k + ' | v').join('\n'));
+  assert.strictEqual(r.parts.length, 1); assert.strictEqual(r.parts[0].items.length, L.SURF_STATS_MAX); assert.strictEqual(r.truncated, true);
+  const q = sp('stat: ' + 'a'.repeat(40) + ' | ' + 'b'.repeat(30) + ' | ' + 'c'.repeat(50)).parts[0].items[0];
+  assert.deepStrictEqual([q.label.length, q.value.length, q.note.length], [30, 20, 40]);
+});
+t('surfaceParse bar: 값/최대, 퍼센트, 소수', () => {
+  let r = sp('bar: a | 3 / 4\nbar: b | 72%\nbar: c | 0.5/2');
+  assert.deepStrictEqual(r.parts[0].items, [{ label: 'a', value: 3, max: 4, text: '3 / 4' }, { label: 'b', value: 72, max: 100, text: '72%' }, { label: 'c', value: 0.5, max: 2, text: '0.5/2' }]);
+  assert.strictEqual(r.parts.length, 1);
+});
+t('surfaceParse bar: 범위 밖은 맞추고, 숫자 아님·max 0 이하·칸 부족은 글', () => {
+  let r = sp('bar: a | 9 / 4\nbar: b | 150%');
+  assert.deepStrictEqual(r.parts[0].items.map((x) => [x.value, x.max]), [[4, 4], [100, 100]]);
+  r = sp('bar: a | 많음\nbar: b | 3 / 0\nbar: c | -1 / 5\nbar: d\nbar: | 1 / 2\nbar: e | 1e3 / 5');
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.parts.length, 6); assert.ok(r.parts.every((p) => p.t === 'text'));
+  r = sp('bar: a | 1 / 5\nbar: b | x'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['bars', 'text']);
+  r = sp('bar: a | ' + '9'.repeat(400) + ' / 5'); assert.strictEqual(r.parts[0].t, 'text'); // 무한대는 숫자가 아니다
+});
+t('surfaceParse bar: 9개째부터 버린다', () => {
+  const r = sp(Array.from({ length: 9 }, (_, k) => 'bar: b' + k + ' | 1 / 2').join('\n'));
+  assert.strictEqual(r.parts[0].items.length, 8); assert.strictEqual(r.truncated, true);
+});
+t('surfaceParse kv: 정상, 칸 부족, \\|, 제한', () => {
+  let r = sp('kv: 경로 | a \\| b');
+  assert.deepStrictEqual(r.parts, [{ t: 'kv', items: [{ k: '경로', v: 'a | b' }] }]);
+  r = sp('kv: 항목만'); assert.deepStrictEqual(r.parts, [{ t: 'text', text: 'kv: 항목만' }]);
+  r = sp(Array.from({ length: 13 }, (_, k) => 'kv: k' + k + ' | v').join('\n')); assert.strictEqual(r.parts[0].items.length, 12); assert.strictEqual(r.truncated, true);
+  r = sp('kv: ' + 'k'.repeat(40) + ' | ' + 'v'.repeat(250)); assert.deepStrictEqual([r.parts[0].items[0].k.length, r.parts[0].items[0].v.length], [30, 200]);
+});
+t('surfaceParse note·warn: 정상, 빈 글, 4개 제한, 글 안 꾸밈은 글자 그대로', () => {
+  let r = sp('note: **굵게** `코드`\nwarn: 주의');
+  assert.deepStrictEqual(r.parts, [{ t: 'note', kind: 'note', text: '**굵게** `코드`' }, { t: 'note', kind: 'warn', text: '주의' }]);
+  r = sp('note:'); assert.strictEqual(r.ok, false);
+  r = sp(['note: 1', 'warn: 2', 'note: 3', 'warn: 4', 'note: 5'].join('\n')); assert.strictEqual(r.parts.length, 4); assert.strictEqual(r.truncated, true);
+  assert.strictEqual(sp('note: ' + 'x'.repeat(400)).parts[0].text.length, 300);
+});
+t('surfaceParse table: 정렬, 칸 \\|, 칸 부족·초과, 6열 20행', () => {
+  let r = sp('table:\n| a | b |\n|:--|--:|\n| 1 \\| 2 | 3 |\n| 4 |');
+  const tb = r.parts[0];
+  assert.strictEqual(tb.t, 'table'); assert.strictEqual(tb.title, ''); assert.deepStrictEqual(tb.align, ['left', 'right']);
+  assert.deepStrictEqual(tb.rows, [[[{ s: 'text', v: '1 | 2' }], [{ s: 'text', v: '3' }]], [[{ s: 'text', v: '4' }], []]]);
+  r = sp('table: 제목\n' + '| ' + Array.from({ length: 8 }, (_, k) => 'h' + k).join(' | ') + ' |\n|' + '---|'.repeat(8) + '\n' + Array.from({ length: 25 }, () => '| 1 | 2 |').join('\n'));
+  assert.strictEqual(r.parts[0].head.length, 6); assert.strictEqual(r.parts[0].rows.length, 20); assert.strictEqual(r.parts[0].cut, true); assert.strictEqual(r.truncated, true);
+  assert.deepStrictEqual(r.parts[0].align.length, 6);
+});
+t('surfaceParse table: 표 줄이 없으면 글, 둘째 표는 버린다, **굵게**는 글자 그대로', () => {
+  let r = sp('table: 제목만\nkv: a | b'); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text', 'kv']);
+  r = sp('table: 하나\n| a |\n| 1 |\ntable: 둘\n| b |\n| 2 |'); assert.strictEqual(r.parts.length, 1); assert.strictEqual(r.truncated, true);
+  r = sp('table:\n| **a** |\n| `b` |'); assert.deepStrictEqual(r.parts[0].head, [[{ s: 'text', v: '**a**' }]]); assert.deepStrictEqual(r.parts[0].rows, [[[{ s: 'text', v: '`b`' }]]]);
+});
+t('surfaceParse mdParse 표와 같은 모양(함수 공유)', () => {
+  const md = L.mdParse('| a | b |\n|:-:|---|\n| 1 | 2 |').blocks[0];
+  const sf = sp('table:\n| a | b |\n|:-:|---|\n| 1 | 2 |').parts[0];
+  assert.deepStrictEqual([sf.align, sf.head, sf.rows], [md.align, md.head, md.rows]);
+});
+t('surfaceParse choice: 정상, 선택지 1개·0개는 글, 5개 제한, 둘째 묶음', () => {
+  let r = sp('choice: 질문\n- 가\n- 나\n- 다');
+  assert.deepStrictEqual(r.parts, [{ t: 'choice', q: '질문', options: ['가', '나', '다'] }]);
+  r = sp('choice: 질문\n- 하나만'); assert.strictEqual(r.ok, false); assert.deepStrictEqual(r.parts, [{ t: 'text', text: '질문' }, { t: 'text', text: '하나만' }]);
+  r = sp('choice: 질문'); assert.deepStrictEqual(r.parts, [{ t: 'text', text: '질문' }]);
+  r = sp('choice: q\n' + Array.from({ length: 7 }, (_, k) => '- o' + k).join('\n')); assert.ok(r.parts.every((p) => p.t === 'text')); assert.strictEqual(r.truncated, true); // 5개 넘으면 일부만 단추로 만들지 않는다
+  r = sp('choice: a\n- 1\n- 2\nchoice: b\n- 3\n- 4'); assert.strictEqual(r.parts.length, 1); assert.strictEqual(r.truncated, true);
+  r = sp('choice: q\n- ' + 'x'.repeat(120) + '\n- y'); assert.strictEqual(r.parts[0].options[0].length, 120); assert.strictEqual(r.truncated, false); // 120자는 단추
+  r = sp('- 선택지 아닌 줄'); assert.deepStrictEqual(r.parts, [{ t: 'text', text: '- 선택지 아닌 줄' }]);
+});
+t('surfaceParse choice·next: 제어 문자를 지우고 한 줄로, 빈 것은 버린다', () => {
+  const r = sp('choice: q\n- 열어\u001b[201~ 줘\u0007\n- ​‮\n- 둘\u0000째\n- 셋째\nnext: 다음\u001b[31m 질문\nnext: \u0003\nnext:');
+  assert.deepStrictEqual(r.parts[0].options, ['열어[201~ 줘', '둘째', '셋째']);
+  assert.deepStrictEqual(r.next, ['다음[31m 질문']);
+  for (const o of r.parts[0].options.concat(r.next)) assert.ok(!/[\u0000-\u001f\u007f-\u009f​‮]/.test(o));
+  assert.deepStrictEqual(sp('choice: q\n- a\tb\n- c').parts[0].options, ['a b', 'c']);
+  const one = sp('choice: q\n- \u0007\n- 하나'); assert.strictEqual(one.parts[0].t, 'text'); // 정리 뒤 비면 버려 1개가 남는다
+});
+t('surfaceParse next: 3개, 120자, 블록 어디에 있든 모은다', () => {
+  const r = sp('next: a\nkv: x | y\nnext: ' + 'b'.repeat(120) + '\nnote: n\nnext: c\nnext: d');
+  assert.strictEqual(r.next.length, 3); assert.strictEqual(r.next[1].length, 120); assert.strictEqual(r.truncated, true);
+  assert.deepStrictEqual(r.parts.map((p) => p.t), ['kv', 'note']);
+  assert.deepStrictEqual(sp('next: 하나'), { ok: true, title: '', parts: [], next: ['하나'], truncated: false });
+});
+t('surfaceParse 모르는 줄은 글, 키워드는 줄 맨 앞 소문자 영어 + 콜론', () => {
+  const r = sp('그냥 글\n     stat: a | b\nSTAT: a | b\nstat a | b\nfoo: bar\nkv: a | b\n\n\n뒤 글');
+  assert.deepStrictEqual(r.parts.map((p) => p.t + (p.text ? ':' + p.text : '')), ['text:그냥 글', 'text:stat: a | b', 'text:STAT: a | b', 'text:stat a | b', 'text:foo: bar', 'kv', 'text:뒤 글']);
+  assert.strictEqual(r.ok, true);
+});
+t('surfaceParse 부품 없음은 ok false', () => {
+  for (const v of ['', '   \n  ', '그냥 글\n둘째 줄', 'stat: 칸부족', 'title:']) assert.strictEqual(sp(v).ok, false);
+  for (const v of [null, undefined, 5, {}, []]) assert.deepStrictEqual(sp(v), { ok: false, title: '', parts: [], next: [], truncated: false });
+  assert.deepStrictEqual(sp(''), { ok: false, title: '', parts: [], next: [], truncated: false });
+});
+t('surfaceParse 40줄·4000자 제한', () => {
+  let r = sp(Array.from({ length: 50 }, (_, k) => 'note: ' + k).join('\n'));
+  assert.strictEqual(r.truncated, true); assert.strictEqual(r.parts.length, 4); // 4개 제한도 걸린다
+  r = sp(Array.from({ length: 41 }, () => '그냥').join('\n')); assert.strictEqual(r.parts.length, 40); assert.strictEqual(r.truncated, true);
+  r = sp(Array.from({ length: 40 }, () => '그냥').join('\n')); assert.strictEqual(r.parts.length, 40); assert.strictEqual(r.truncated, false);
+  r = sp('kv: a | ' + 'x'.repeat(5000)); assert.strictEqual(r.truncated, true); assert.strictEqual(r.ok, false); assert.strictEqual(r.parts.length, 0); // 줄 중간에서 잘리면 그 줄은 버린다
+  r = sp('kv: a | b\nkv: c | ' + 'x'.repeat(5000)); assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.parts[0].items, [{ k: 'a', v: 'b' }]);
+  r = sp('title: t\n' + ' '.repeat(10) + '\n'.repeat(3) + 'kv: a | b\n'); assert.strictEqual(r.truncated, false);
+});
+t('surfaceParse 아주 긴 입력·이상한 입력에서 예외 없음', () => {
+  for (const v of ['x'.repeat(5 * 1024 * 1024), 'stat: a | b\n'.repeat(500000), '|'.repeat(300000), '\\|'.repeat(200000), 'table:\n' + '| a '.repeat(100000), '\u0000‮'.repeat(100000), 'choice: q\n' + '- a\n'.repeat(100000), '\ud800'.repeat(50000), '\r\n'.repeat(100000)]) {
+    const r = sp(v);
+    assert.strictEqual(typeof r.ok, 'boolean'); assert.ok(Array.isArray(r.parts)); assert.ok(r.next.length <= 3);
+  }
+  assert.strictEqual(sp('x'.repeat(5 * 1024 * 1024)).truncated, true);
+});
+
+// ---- 11절 보강: 잘리거나 위험한 글은 단추가 되지 않는다 ----
+const surfFill = (n) => { // 줄 구분 글자까지 합쳐 정확히 n 글자인 채움 줄들(끝 \n 포함, 한 줄 1330자 이하, 줄 수는 4 이하)
+  const out = []; let left = n;
+  while (left > 0) { const len = Math.min(left, 1331); out.push('가'.repeat(len - 1)); left -= len; }
+  return out.join('\n') + '\n';
+};
+t('surfaceParse 4000자 경계: 줄 중간에서 잘리면 그 줄을 버린다("하지 마" 가 잘린 next 는 단추가 되지 않는다)', () => {
+  const fill = surfFill(3992); assert.strictEqual(fill.length, 3992);
+  const line = 'next: 푸시하지 마'; // 3992 + 8 = 4000 에서 '푸시' 뒤가 아니라 '하지 마' 앞이 아닌 곳이 잘린다
+  const cutAt = (fill + line).slice(0, 4000); assert.ok(cutAt.endsWith('푸시'));
+  const r = sp(fill + line);
+  assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.next, []); assert.ok(!JSON.stringify(r).includes('푸시'));
+  assert.deepStrictEqual(sp(fill + 'next: 푸시하지 마\nnext: 둘').next, []);
+});
+t('surfaceParse 4000자 경계: 줄이 끝난 곳에서 잘리면 그 앞 줄은 남는다', () => {
+  const fill = surfFill(3990); const r = sp(fill + 'next: 하나\nnext: 둘');
+  assert.strictEqual(r.truncated, true); assert.ok(r.parts.length >= 1);
+  const r2 = sp('kv: a | b\n' + surfFill(3985) + 'next: 잘림'); assert.deepStrictEqual(r2.next, []); assert.strictEqual(r2.parts[0].t, 'kv');
+});
+t('surfaceParse 4000자 경계: 선택지 줄이 잘리면 묶음 전체가 글(일부 선택지가 단추가 되지 않는다)', () => {
+  const fill = surfFill(3990);
+  for (const tail of ['choice: 질문\n- 가\n- 나\n- 다다다다다다다다다다', 'choice: 질문\n- 가\n- 나']) {
+    const r = sp(fill + tail);
+    assert.strictEqual(r.truncated, true); assert.ok(r.parts.every((p) => p.t !== 'choice'), tail);
+  }
+});
+t('surfaceParse 40줄: choice 의 선택지 줄 중간·바로 뒤에서 잘리면 단추가 되지 않는다', () => {
+  const pad = (n) => Array.from({ length: n }, (_, k) => '줄' + k).join('\n') + '\n';
+  const kinds = (s) => sp(s).parts.map((p) => p.t);
+  // 37줄 뒤의 choice: 38 질문, 39·40 선택지, 41 선택지(잘림)
+  let r = sp(pad(37) + 'choice: 질문\n- 가\n- 나\n- 다'); assert.ok(!kinds(pad(37) + 'choice: 질문\n- 가\n- 나\n- 다').includes('choice')); assert.strictEqual(r.truncated, true);
+  assert.ok(r.parts.filter((p) => p.t === 'text').some((p) => p.text === '질문')); assert.ok(r.parts.some((p) => p.text === '나'));
+  // 선택지 줄 바로 뒤에서 잘림(40줄째가 마지막 선택지)
+  assert.ok(!kinds(pad(37) + 'choice: 질문\n- 가\n- 나\n뒤 글').includes('choice'));
+  assert.ok(!kinds(pad(38) + 'choice: 질문\n- 가\n- 나\n- 다').includes('choice')); // 40줄째가 선택지 줄
+  assert.ok(!kinds(pad(39) + 'choice: 질문\n- 가\n- 나').includes('choice')); // 40줄째가 choice 줄
+  // 잘린 줄이 choice 와 상관없으면 단추
+  assert.ok(kinds(pad(10) + 'choice: 질문\n- 가\n- 나\n' + pad(40)).includes('choice'));
+  r = sp(pad(10) + 'choice: 질문\n- 가\n- 나\n' + pad(40)); assert.strictEqual(r.truncated, true);
+  // 40줄을 넘지 않으면 끝에 있어도 단추
+  assert.ok(kinds(pad(36) + 'choice: 질문\n- 가\n- 나\n- 다').includes('choice'));
+});
+t('surfaceParse 선택지 120자 초과: 자르지 않고 묶음 전체가 글', () => {
+  const long = 'ㄱ'.repeat(121);
+  let r = sp('choice: 질문\n- 가\n- ' + long);
+  assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text', 'text', 'text']);
+  assert.deepStrictEqual(r.parts.map((p) => p.text), ['질문', '가', long]); assert.strictEqual(r.ok, false);
+  r = sp('choice: 질문\n- ' + long + '\n- 가'); assert.ok(r.parts.every((p) => p.t === 'text'));
+  assert.deepStrictEqual(sp('choice: q\n- ' + 'ㄱ'.repeat(120) + '\n- 나').parts[0].options[0].length, 120);
+  // 정리 뒤 글자 수로 센다: 공백 정리 뒤 120자면 단추
+  assert.strictEqual(sp('choice: q\n- ' + 'ㄱ'.repeat(60) + '   ' + 'ㄴ'.repeat(59) + '\n- 나').parts[0].t, 'choice');
+});
+t('surfaceParse next 120자 초과: 자르지 않고 text 부품', () => {
+  const long = 'ㄱ'.repeat(121);
+  const r = sp('next: ' + long + '\nnext: 정상');
+  assert.deepStrictEqual(r.next, ['정상']); assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.parts, [{ t: 'text', text: long }]);
+  const r2 = sp('next: ' + 'ㄱ'.repeat(120)); assert.strictEqual(r2.next[0].length, 120); assert.strictEqual(r2.truncated, false);
+});
+t('surfaceParse 선택지·next 가 ! / # 로 시작하면 단추가 되지 않는다', () => {
+  for (const c of ['!rm -rf x', '/clear', '#메모', '  !공백 뒤']) {
+    const r = sp('choice: 질문\n- 정상\n- ' + c);
+    assert.ok(r.parts.every((p) => p.t !== 'choice'), c); assert.deepStrictEqual(r.parts.map((p) => p.text), ['질문', '정상', c.trim()]);
+    const n = sp('next: 정상 하나\nnext: ' + c);
+    assert.deepStrictEqual(n.next, ['정상 하나']); assert.deepStrictEqual(n.parts, [{ t: 'text', text: c.trim() }]);
+  }
+  const c2 = sp('choice: q\n- \u0007/clear\n- 나'); assert.strictEqual(c2.parts[0].t, 'text'); // 제어 문자를 지운 뒤 맨 앞 글자로 본다
+  assert.strictEqual(sp('choice: q\n- 가!\n- 나/다#').parts[0].t, 'choice'); // 맨 앞 글자만 본다
+  assert.deepStrictEqual(sp('next: 가/나').next, ['가/나']);
+});
+t('surfaceParse 선택지 6개 이상: 일부만 단추로 만들지 않고 묶음 전체가 글', () => {
+  const r = sp('choice: q\n' + Array.from({ length: 6 }, (_, k) => '- o' + k).join('\n'));
+  assert.strictEqual(r.truncated, true); assert.deepStrictEqual(r.parts.map((p) => p.t), ['text', 'text', 'text', 'text', 'text', 'text', 'text']);
+  assert.strictEqual(sp('choice: q\n' + Array.from({ length: 5 }, (_, k) => '- o' + k).join('\n')).parts[0].options.length, 5);
+});
+t('surfaceParse 둘째 title 은 버리고 truncated', () => {
+  const r = sp('title: 하나\ntitle: 둘\nkv: a | b'); assert.strictEqual(r.title, '하나'); assert.strictEqual(r.truncated, true); assert.strictEqual(r.parts.length, 1);
+  assert.strictEqual(sp('title: 하나\nkv: a | b').truncated, false);
+  assert.deepStrictEqual(sp('next:  \nnext: 하나').next, ['하나']); assert.strictEqual(sp('next:\nnext: 하나').truncated, false); // 빈 next 는 조용히 버린다
+});
+t('surfaceParse 관용: 키 줄 앞 공백 4칸 이하, 콜론 앞 공백, choice 뒤 빈 줄 하나, * 선택지', () => {
+  let r = sp('    stat: a | b\n  kv :  c | d\ntitle : 제목\n   next : 다음');
+  assert.deepStrictEqual(r.parts.map((p) => p.t), ['stats', 'kv']); assert.strictEqual(r.title, '제목'); assert.deepStrictEqual(r.next, ['다음']);
+  r = sp('     stat: a | b'); assert.deepStrictEqual(r.parts, [{ t: 'text', text: 'stat: a | b' }]); // 5칸은 키 줄이 아니다
+  r = sp('choice: 질문\n\n- 가\n- 나'); assert.deepStrictEqual(r.parts, [{ t: 'choice', q: '질문', options: ['가', '나'] }]);
+  r = sp('choice: 질문\n\n\n- 가\n- 나'); assert.ok(r.parts.every((p) => p.t === 'text') || r.parts[0].t !== 'choice'); // 빈 줄 둘은 받지 않는다
+  r = sp('choice: 질문\n* 가\n* 나\n- 다'); assert.deepStrictEqual(r.parts[0].options, ['가', '나', '다']);
+  r = sp('choice: 질문\n1. 가\n2. 나'); assert.ok(r.parts.every((p) => p.t === 'text')); // 번호 목록은 받지 않는다
+  r = sp('stat： a | b'); assert.deepStrictEqual(r.parts, [{ t: 'text', text: 'stat： a | b' }]); // 전각 콜론은 받지 않는다
+});
+t('BAD_CHARS: U+17B4 U+17B5 U+180B~U+180D U+180F 도 나쁜 글자', () => {
+  for (const cp of [0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180E, 0x180F]) {
+    const c = String.fromCodePoint(cp);
+    assert.ok(L.hasBadChars('a' + c + 'b'), cp.toString(16));
+    assert.strictEqual(sp('choice: q\n- 가' + c + '나\n- 다').parts[0].options[0], '가나');
+    assert.strictEqual(L.mdParse('가' + c + '나').blocks[0].inl[0].v, '가나');
+  }
+  assert.ok(!L.hasBadChars('정상 ក 몽골 ᠠ'));
+});
+
+const SURF_ANS = (body) =>'답변입니다\n\n```maru-surface\n' + body + '\n```\n';
+t('talkParse: 답변의 maru-surface 블록은 surface 블록으로', () => {
+  const r = L.talkParse(tl('assistant', SURF_ANS('title: 점검\nkv: a | b\nnext: 다음')));
+  const bl = r.items[0].blocks;
+  assert.deepStrictEqual(bl.map((b) => b.t), ['p', 'surface']);
+  assert.deepStrictEqual(bl[1], { t: 'surface', title: '점검', parts: [{ t: 'kv', items: [{ k: 'a', v: 'b' }] }], next: ['다음'], truncated: false });
+});
+t('talkParse: surface 블록 둘이면 마지막만 화면, 앞의 것은 코드', () => {
+  const r = L.talkParse(tl('assistant', SURF_ANS('kv: a | 1') + '\n중간\n\n```maru-surface\nkv: b | 2\n```'));
+  assert.deepStrictEqual(r.items[0].blocks.map((b) => b.t), ['p', 'code', 'p', 'surface']);
+  assert.strictEqual(r.items[0].blocks[1].lang, 'maru-surface');
+  assert.strictEqual(r.items[0].blocks[3].parts[0].items[0].k, 'b');
+});
+t('talkParse: 마지막 블록이 부품 없음이면 둘 다 코드(앞의 것도 화면이 되지 않는다)', () => {
+  const r = L.talkParse(tl('assistant', SURF_ANS('kv: a | 1') + '\n```maru-surface\n그냥 글\n```'));
+  assert.deepStrictEqual(r.items[0].blocks.map((b) => b.t), ['p', 'code', 'code']);
+});
+t('talkParse: 언어 이름이 정확히 maru-surface 가 아니면 코드', () => {
+  for (const lang of ['maru-surface2', 'Maru-Surface', 'surface', 'maru_surface', '']) {
+    const r = L.talkParse(tl('assistant', '```' + lang + '\nkv: a | b\n```'));
+    assert.strictEqual(r.items[0].blocks[0].t, 'code', lang);
+  }
+});
+t('talkParse: 질문(user) 항목 안의 블록은 건드리지 않는다', () => {
+  const r = L.talkParse(tl('user', '```maru-surface\nkv: a | b\n```'));
+  assert.deepStrictEqual(Object.keys(r.items[0]), ['role', 'at', 'text']);
+  assert.ok(r.items[0].text.includes('maru-surface'));
+});
+t('talkParse: 잘린 코드 블록·잘린 기록·잃은 답변은 화면으로 바꾸지 않는다', () => {
+  const body = Array.from({ length: 450 }, () => 'kv: a | b').join('\n');
+  let r = L.talkParse(tl('assistant', SURF_ANS(body)));
+  assert.strictEqual(r.items[0].blocks[1].t, 'code'); assert.strictEqual(r.items[0].blocks[1].cut, true);
+  r = L.talkParse(tl('assistant', SURF_ANS('kv: a | b'), { cut: true })); assert.strictEqual(r.items[0].blocks[1].t, 'code');
+  r = L.talkParse(tl('assistant', '', { lost: true })); assert.deepStrictEqual(r.items[0].blocks, []);
+});
+t('talkParse: 닫는 펜스가 없는 maru-surface 블록은 화면이 되지 않는다', () => {
+  const r = L.talkParse(tl('assistant', '답\n\n```maru-surface\nkv: a | b\nchoice: 질문\n- 푸시해\n- 푸시하지 마'));
+  assert.deepStrictEqual(r.items[0].blocks.map((b) => b.t), ['p', 'code']); assert.strictEqual(r.items[0].blocks[1].open, true);
+  // 마지막 블록이 열려 있으면 앞의 닫힌 블록도 화면이 되지 않는다(마지막 것만 후보)
+  const r2 = L.talkParse(tl('assistant', SURF_ANS('kv: a | 1') + '\n```maru-surface\nkv: b | 2'));
+  assert.deepStrictEqual(r2.items[0].blocks.map((b) => b.t), ['p', 'code', 'code']);
+});
+t('talkParse: 답변이 256K 를 넘어 잘리면 어떤 maru-surface 블록도 화면이 되지 않는다', () => {
+  const r = L.talkParse(tl('assistant', SURF_ANS('kv: a | b\nchoice: 질문\n- 가\n- 나') + '\n' + 'x'.repeat(300 * 1024)));
+  assert.strictEqual(r.items[0].truncated, true); assert.ok(r.items[0].blocks.every((b) => b.t !== 'surface'));
+  assert.ok(r.items[0].blocks.some((b) => b.t === 'code' && b.lang === 'maru-surface'));
+  const ok = L.talkParse(tl('assistant', SURF_ANS('kv: a | b\nchoice: 질문\n- 가\n- 나') + '\n끝'));
+  assert.ok(ok.items[0].blocks.some((b) => b.t === 'surface'));
+});
+t('talkParse: 블록 수 초과로 잘린 답변도 화면이 되지 않는다', () => {
+  const many = Array.from({ length: 450 }, (_, k) => '문단' + k).join('\n\n');
+  const r = L.talkParse(tl('assistant', SURF_ANS('kv: a | b') + '\n' + many));
+  assert.strictEqual(r.items[0].truncated, true); assert.ok(r.items[0].blocks.every((b) => b.t !== 'surface'));
+});
+t('talkParse: surface 블록은 블록 1개로 센다', () => {
+  const text = SURF_ANS(Array.from({ length: 20 }, (_, k) => 'kv: a' + k + ' | b').join('\n'));
+  const lines = [tl('assistant', text), tl('assistant', text)].join('\n');
+  assert.strictEqual(L.talkParse(lines, { blocksMax: 4 }).items.length, 2); // 답변마다 문단 1 + 화면 1 = 2
+  assert.strictEqual(L.talkParse(lines, { blocksMax: 3 }).items.length, 1);
+});
+
 // ---- 읽기 화면 배치·표·저장 ----
 t('readIsNarrow: 1100px 이하만 좁다, 모르면 좁지 않다', () => {
   assert.strictEqual(L.readIsNarrow(1100), true); assert.strictEqual(L.readIsNarrow(1101), false); assert.strictEqual(L.readIsNarrow(900), true);
   for (const v of [undefined, null, NaN, '900', 0, -5]) assert.strictEqual(L.readIsNarrow(v), false);
+});
+t('readSideShown: 터미널 띠(34px)일 때 오른쪽 카드 열을 보일 수 있는 폭', () => {
+  assert.strictEqual(L.READ_RAIL_W, 34);
+  assert.strictEqual(L.readSideShown(1440, 220, 340), true); // 1440 - 80 - 220 - 34 - 340 = 766
+  const edge = 360 + 80 + 480 + 34 + 560; // 1514: 읽기 영역이 정확히 360(넓은 창)
+  assert.strictEqual(L.readSideShown(edge, 480, 560), true); assert.strictEqual(L.readSideShown(edge - 1, 480, 560), false);
+  const nedge = 360 + 80 + 150 + 34 + 340; // 964: 좁은 창(왼쪽 150)에서 정확히 360
+  assert.strictEqual(L.readSideShown(nedge, 480, 340), true); assert.strictEqual(L.readSideShown(nedge - 1, 480, 340), false);
+  assert.strictEqual(L.readSideShown(1100, 220, 340), true); // 좁은 창: 왼쪽 열은 150 으로 계산: 1100 - 80 - 150 - 34 - 340 = 496
+  assert.strictEqual(L.readSideShown(900, 480, 340), false); // 900 - 80 - 150 - 34 - 340 = 296 < 360
+  assert.strictEqual(L.readSideShown(900, 480, 260), true); // 900 - 80 - 150 - 34 - 260 = 376
+  assert.strictEqual(L.readSideShown(1000, 220, 260), true); // 좁은 창 1000 - 80 - 150 - 34 - 260 = 476
+  assert.strictEqual(L.readSideShown(1440, undefined, undefined), true); // 모르면 기본 220·340
+  for (const v of [undefined, null, NaN, '900', 0, -5]) assert.strictEqual(L.readSideShown(v, 220, 340), false);
+  assert.strictEqual(L.readTermMax(1440, 220), 796); // 터미널을 펴면 오른쪽 열이 숨으므로 최대 폭은 그대로다
 });
 t('readTermWidth: 최소 320, 읽기 영역 360 이상 남기기, 숫자 아니면 기본 420', () => {
   assert.strictEqual(L.readTermMax(1440, 220), 1440 - 64 - 220 - 360); // 796
@@ -5008,7 +5322,14 @@ t('readParseStore·readStoreSet: 깨진 값은 버리고 상한을 지킨다', (
   const r = L.readParseStore(JSON.stringify({ a: { on: true, w: 500, rail: true }, b: { on: 'yes', w: 'x' }, c: 5, d: [], '': { on: true } }));
   assert.deepStrictEqual(r, { a: { on: true, w: 500, rail: true }, b: { on: false, w: 420, rail: false } });
   assert.strictEqual(Object.getPrototypeOf(L.readParseStore('{"__proto__":{"on":true}}')), Object.prototype);
-  let s = L.readStoreSet({}, 'w1', { on: true }); assert.deepStrictEqual(s, { w1: { on: true, w: 420, rail: false } });
+  // 새 기본값: 저장된 상태가 없으면 읽기 화면이 켜지고 터미널은 접힌 띠. 저장된 상태(끈 것 포함)는 그대로 따른다
+  assert.deepStrictEqual(L.readDefault(), { on: true, w: 420, rail: true });
+  assert.deepStrictEqual(L.readStoreSet({}, 'w0', { w: 500 }).w0, { on: true, w: 500, rail: true });
+  assert.deepStrictEqual(L.readStoreSet({}, 'w0', { on: false }).w0, { on: false, w: 420, rail: true });
+  const kept = L.readParseStore(JSON.stringify({ off: { on: false, w: 420, rail: false } }));
+  assert.deepStrictEqual(L.readStoreSet(kept, 'off', { w: 400 }).off, { on: false, w: 400, rail: false }); // 끈 것은 꺼진 채
+  assert.strictEqual(kept.zz, undefined);
+  let s = L.readStoreSet({}, 'w1', { on: true }); assert.deepStrictEqual(s, { w1: { on: true, w: 420, rail: true } });
   s = L.readStoreSet(s, 'w1', { w: 350.4, rail: true }); assert.deepStrictEqual(s.w1, { on: true, w: 350, rail: true });
   s = L.readStoreSet(s, 'w1', { w: 'x' }); assert.strictEqual(s.w1.w, 420);
   let big = {}; for (let i = 0; i < 105; i++) big = L.readStoreSet(big, 'id' + i, { on: true });
@@ -5126,6 +5447,164 @@ t('readCanSend: 이유별 거부와 통과 조합은 하나뿐', () => {
   walk(0, {});
   assert.strictEqual(oks, 1); assert.ok(total > 1000);
 });
+t('readCanSend 회귀: 첫 메시지 길의 조건만 맞는 입력에도 first', () => {
+  const NOW = 1700000100000;
+  const c = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'none', bg: 0, bracketed: true, quietMs: 1500, dirty: false,
+    rawState: null, recAt: NaN, talkRole: null, talkAt: NaN, inAt: 5000, launchInAt: 5000, inN: 3, launchInN: 3, startAt: 1000, claudeUpAt: NOW - 3000, now: NOW };
+  assert.deepStrictEqual(L.readCanSendFirst(c), { ok: true });
+  assert.deepStrictEqual(L.readCanSend(c), { ok: false, reason: 'first' });
+});
+t('readCanSendFirst: 통과 하나, 조건을 하나씩 뒤집으면 거부', () => {
+  const NOW = 1700000100000;
+  const base = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'none', bg: 0, bracketed: true, quietMs: 1000, dirty: false,
+    rawState: null, inAt: 5000, launchInAt: 5000, inN: 3, launchInN: 3, claudeUpAt: NOW - 2000, now: NOW };
+  const r = (p) => L.readCanSendFirst({ ...base, ...p });
+  assert.deepStrictEqual(r({}), { ok: true });
+  assert.deepStrictEqual(r({ rawState: undefined }), { ok: true });
+  const no = (p, reason) => assert.deepStrictEqual(r(p), { ok: false, reason }, JSON.stringify(p));
+  no({ hasTerm: false }, 'nosession'); no({ cc: false }, 'nosession'); no({ hasTerm: undefined }, 'nosession');
+  no({ knownName: '' }, 'notclaude'); no({ knownName: undefined }, 'notclaude'); no({ knownName: '', procName: 'claude' }, 'notclaude');
+  no({ procName: 'zsh' }, 'notclaude'); no({ procName: 'ssh' }, 'notclaude'); no({ knownName: 'zsh', procName: 'zsh' }, 'notclaude');
+  no({ claudeUp: false }, 'nosession'); no({ claudeUp: undefined }, 'nosession');
+  no({ hooked: false }, 'nosession');
+  no({ rawState: 'idle' }, 'first'); no({ rawState: 'busy', ux: 'none' }, 'first'); no({ ux: 'unknown' }, 'first'); no({ ux: 'idle' }, 'first'); no({ ux: undefined }, 'first');
+  no({ ux: 'busy' }, 'busy'); no({ ux: 'waiting' }, 'waiting');
+  no({ bg: 1 }, 'busy'); no({ bg: undefined }, 'nosession'); no({ bg: -1 }, 'nosession');
+  no({ bracketed: false }, 'nosession');
+  no({ dirty: true }, 'draft'); no({ dirty: undefined }, 'draft');
+  no({ inN: 4 }, 'touched'); no({ inN: 2 }, 'touched'); no({ inN: NaN }, 'first'); no({ inN: undefined }, 'first');
+  no({ launchInN: undefined }, 'first'); no({ launchInN: 0, inN: 0 }, 'first'); no({ launchInN: NaN }, 'first');
+  assert.deepStrictEqual(r({ inAt: 5001 }), { ok: true }); assert.deepStrictEqual(r({ inAt: NaN, launchInAt: 0 }), { ok: true }); // 입력 판정은 횟수로 한다: 시각은 보지 않는다
+  assert.deepStrictEqual(r({ inAt: 5000, launchInAt: 5000, inN: 4 }), { ok: false, reason: 'touched' }); // 같은 밀리초에 입력이 또 있어도 횟수가 다르면 거부
+  no({ quietMs: 999 }, 'settling'); no({ quietMs: NaN }, 'settling'); no({ quietMs: undefined }, 'settling');
+  no({ claudeUpAt: NOW - 1999 }, 'settling'); no({ claudeUpAt: 0 }, 'settling'); no({ claudeUpAt: undefined }, 'settling'); no({ now: undefined }, 'settling');
+  assert.deepStrictEqual(r({ claudeUpAt: NOW - 2000 }), { ok: true });
+  for (const v of [null, undefined, 5, 'x', [], true]) assert.deepStrictEqual(L.readCanSendFirst(v), { ok: false, reason: 'nosession' });
+  assert.doesNotThrow(() => L.readCanSendFirst({ get hasTerm() { throw new Error('x'); } }));
+});
+t('promptBoxCheck 사전 확인: 빈 입력줄 상자만 통과', () => {
+  const B = '─'.repeat(40);
+  const mk = (lines, cursorY, extra) => ({ lines, plain: lines.slice(), cursorX: 2, cursorY, rows: lines.length, cols: 80, ...extra });
+  const empty =(mark, bd) => { const l = mark + ' '; return mk(['앞선 출력', '', bd || B, l, bd || B, '  ? for shortcuts'], 3, { cursorX: l.length - l.replace(/^[\s│]+/, '').length + 2 }); }; // 커서는 입력줄 표시 칸 + 2
+  for (const m of ['>', '❯', ' > ', '│ >', '│ ❯']) assert.strictEqual(L.promptBoxCheck(empty(m)).ok, true, m);
+  for (const bd of ['─'.repeat(8), '╭' + '─'.repeat(30), '╰' + '─'.repeat(30) + '╯', '  ' + B]) assert.strictEqual(L.promptBoxCheck(empty('>', bd)).ok, true, bd);
+  const no = (s, m) => assert.strictEqual(L.promptBoxCheck(s).ok, false, m);
+  no(mk([B, '> ', '  ', B], 1), '상자 안 두 줄(빈 줄도 거부)');
+  no(mk([B, '> ', B], 1, { cursorX: 3 }), 'cursorX 가 표시 + 2 보다 뒤'); no(mk([B, '> ', B], 1, { cursorX: 0 }), 'cursorX 가 표시 자리');
+  assert.strictEqual(L.promptBoxCheck(mk([B, '> ', B], 1, { cursorX: 1 })).ok, true); // 표시 + 1
+  no(mk([B, '> ' + ' '.repeat(40), B], 1, { cursorX: 42 }), 'cursorX 가 줄 끝');
+  no(mk([B, '│ > ', B], 1, { cursorX: 2 }), '│ 뒤 표시: 칸 위치는 2 이므로 cursorX 는 3~4');
+  assert.strictEqual(L.promptBoxCheck(mk([B, '│ > ', B], 1, { cursorX: 4 })).ok, true);
+  no(mk(['  1: Bad    2: Fine   3: Good   0: Dismiss', B, '> ', B], 2), '한 줄 설문'); no(mk([B, '> ', B, '  1: Bad    2: Fine   3: Good   0: Dismiss'], 1), '한 줄 설문(아래)');
+  no(mk(['Do you trust the files in this folder?', '', '❯ 1. Yes, proceed', '  2. No, exit', '', 'Enter to confirm'], 2), '폴더 신뢰 확인(경계선 없음)');
+  no(mk(['╭' + B, '│ Bash command', '│  ls -la', '│ Do you want to proceed?', '│ ❯ 1. Yes', '│   2. No', '╰' + B], 4), '권한 확인 창');
+  no(mk([B, '● Bash command', 'Do you want to proceed?', '❯ 1. Yes', '  2. No', B], 3), '권한 확인 창(경계선 사이에 커서)');
+  no(mk(['x', B, '> ', B], 0), '커서가 상자 밖(위)'); no(mk(['x', B, '> ', B, 'y'], 4), '커서가 상자 밖(아래)'); no(mk(['x', B, '> ', B], 1), '커서가 경계선 줄');
+  no(mk(['x', B, '> '], 2), '경계선 하나(위)'); no(mk(['> ', B, 'x'], 0), '경계선 하나(아래)');
+  no(mk([B, '> 쓰던 글', B], 1), '상자 안에 글'); no(mk([B, '> ', '  이어진 글', B], 1), '둘째 줄에 글');
+  no(mk(['❯ 1. Yes', B, '> ', B], 2), '상자 밖 ❯ 1.'); no(mk(['> 1. Yes', B, '> ', B], 2), '상자 밖 > 1.'); no(mk([B, '> ', B, '  ❯ 2. No'], 1));
+  no(mk(['1: Bad', '2: Fine', B, '> ', B], 3), '설문'); no(mk([B, '> ', B, '1: a', '2: b', '3: c'], 1), '설문(아래)');
+  assert.strictEqual(L.promptBoxCheck(mk(['1: 하나', 'x', B, '> ', B], 3)).ok, true); // 쌍점 줄이 하나뿐이면 설문이 아니다
+  no(mk([B, 'x', B], 1), '입력줄 표시 없음'); no(mk([B, '', B, 'x'], 1)); no(mk([B, B], 0));
+  no(mk([], 0), '빈 화면'); no(mk([''], 0)); no(mk(['', '', ''], 1));
+  const big = Array.from({ length: 1001 }, () => ''); big[500] = B; big[501] = '> '; big[502] = B;
+  no({ lines: big, plain: big, cursorX: 0, cursorY: 501, rows: 1001, cols: 80 }, '줄 수 상한');
+  no(mk([B, '> ' + 'x'.repeat(2000), B], 1), '줄 길이 상한');
+  const tall = [B, '> ', ...Array.from({ length: 30 }, () => ''), B]; no(mk(tall, 1), '상자 31줄');
+  no(mk([B, '> ', ...Array.from({ length: 29 }, () => ''), B], 1), '사전 확인은 상자 한 줄만(30줄도 거부)');
+  for (const v of [null, undefined, 5, 'x', [], {}, { lines: 'x' }, { lines: [1], cursorX: 0, cursorY: 0, rows: 1, cols: 1 }]) no(v, 'shape ' + JSON.stringify(v));
+  for (const p of [{ cursorX: '2' }, { cursorY: '3' }, { cursorY: 1.5 }, { cursorY: -1 }, { cursorY: 99 }, { cursorX: -1 }, { rows: 'a' }, { cols: 0 }, { rows: NaN }]) no(empty('>') && { ...empty('>'), ...p }, JSON.stringify(p));
+  // 입력줄 표시 뒤는 공백·U+00A0·줄 끝만
+  assert.strictEqual(L.promptBoxCheck(mk([B, '❯ ', B], 1)).ok, true); assert.strictEqual(L.promptBoxCheck(mk([B, '❯', B], 1)).ok, true);
+  no(mk([B, '>x', B], 1), '표시 뒤에 바로 글');
+  no(mk([B, '> ', '  ', B], 2), '사전 확인: 커서가 입력줄 표시 줄이 아님');
+  no({ lines: [B, '> ', B], cursorX: 2, cursorY: 1, rows: 3, cols: 80 }, 'plain 없음'); no(mk([B, '> ', B], 1, { plain: [B, '> '] }), 'plain 줄 수 다름(함수도 거부)');
+  no(mk([B, '> ', B], 1, { plain: [B, 5, B] }), 'plain 에 문자열 아닌 것');
+  // 실제 화면(100칸, 빈 입력줄): 26줄의 안내 글은 흐린 글자라 plain 에서는 공백이다
+  const R = '─'.repeat(100); const NB = ' ';
+  const real = (l26, p26, extra) => {
+    const rest = ['', '', ' '.repeat(81) + '◐ medium · /effort', R, null, R, '  [model] | [folder] | [branch]', '  ░░░░░░░░░░ 0% | $0.00 | ⏱️ 0m 0s', '  ⏵⏵ auto mode on (shift+tab to cycle)'];
+    const lines = rest.map((s) => (s === null ? l26 : s)); const plain = rest.map((s) => (s === null ? p26 : s));
+    return { lines, plain, cursorX: 2, cursorY: 4, rows: 9, cols: 100, ...extra };
+  };
+  const hint = '❯' + NB + 'Try "how do I log an error?"';
+  assert.deepStrictEqual(L.promptBoxCheck(real(hint, '❯')), { ok: true, why: 'empty' }); // 안내 글이 있어도 통과; 상태 줄(⏵⏵ ░ |)은 선택 창 흔적이 아니다
+  assert.strictEqual(L.promptBoxCheck(real(hint, '❯' + NB)).ok, true);
+  no(real(hint, '❯' + NB + 'Try "how do I log an error?"'), '같은 화면인데 plain 에도 글이 남음 = 입력된 글');
+  no(real('❯ 안녕', '❯ 안녕'), '입력된 글');
+  no(real(hint, '❯', { plain: undefined }), 'plain 없음(실제 화면)');
+});
+t('promptBoxCheck 사후 확인: 붙여넣은 글이 상자 안에 보인다', () => {
+  const B = '─'.repeat(40);
+  const mk = (inner, mark) => { const rows = String(inner).split('\n'); const lines = ['앞선 출력', B, (mark || '>') + ' ' + rows[0], ...rows.slice(1).map((s) => '  ' + s), B, '  ? for shortcuts']; return { lines, plain: lines.slice(), cursorX: 2, cursorY: 2, rows: 6 + rows.length - 1, cols: 80 }; };
+  const yes = (inner, text, mark) => assert.strictEqual(L.promptBoxCheck(mk(inner, mark), text).ok, true, inner + ' / ' + text);
+  const no = (inner, text) => assert.strictEqual(L.promptBoxCheck(mk(inner), text).ok, false, inner + ' / ' + text);
+  yes('안녕하세요', '안녕하세요'); yes('안녕하세요', '안녕하세요', '❯'); yes('hello world', 'hello  world');
+  const long = '가나다라마바사아자차카타파하 '.repeat(8).trim(); // 한 줄 40자 넘는 글
+  yes(long.slice(0, 50) + '\n' + long.slice(50, 100) + '\n' + long.slice(100), long); // 상자 안에서 줄바꿈된 긴 글
+  yes('첫째 줄\n  둘째 줄\n셋째 줄', '첫째 줄\n둘째 줄\n셋째 줄');
+  yes('첫째 줄 둘째 줄', '첫째 줄\n둘째 줄'); no('첫째 줄', '첫째 줄\n둘째 줄'); // 첫 줄이 8자 미만이면 둘째 줄까지 이어야 한다
+  yes('가나다라마바사아자', '가나다라마바사아자\n다음 줄'); no('가나다라마바사', '가나다라마바사아자\n다음 줄'); // 8자 이상이면 첫 줄 전체로 시작해야 한다
+  no('가\n다른 글', '가\n나다라'); no('가 나다라', '가\n다른 글'); yes('가 다른 글 더', '가\n다른 글'); // 한 글자 첫 줄의 여러 줄 글이 다른 상자 글로 통과하지 않는다
+  yes('[Pasted text #1 +12 lines]', '줄\n'.repeat(12) + '끝'); yes('[Pasted text #12 +3 lines]', 'a\nb\nc\nd');
+  yes('[Pasted text #2 +1 lines]', 'x'.repeat(800)); no('[Pasted text #2]', 'x'.repeat(799)); no('[Pasted text #1 +2 lines]', '짧은 한 줄 글'); // 접힘 표시는 여러 줄이거나 800자 이상일 때만
+  no('x'.repeat(40), 'x'.repeat(40) + '추가'); no('x'.repeat(40) + '뒤에 더', 'x'.repeat(60)); yes('x'.repeat(60), 'x'.repeat(60));
+  no('안녕하세요 다른 글이 붙음', '안녕하세요'); no('안녕하세요', '안녕하세요 그리고');
+  no('다른 글', '안녕하세요'); no('', '안녕하세요'); no('안녕', '안녕하세요'); no('안녕하세요 그리고 더', '안녕하세요'); // 짧은 한 줄 글은 전체가 같아야 한다
+  no('[Pasted text', '긴 글'); no('[Pasted note #1]', '긴 글');
+  // 글이 상자 밖에만 보임
+  const out = { lines: ['> 안녕하세요', B, '> ', B], plain: ['> 안녕하세요', B, '> ', B], cursorX: 2, cursorY: 2, rows: 4, cols: 80 };
+  assert.strictEqual(L.promptBoxCheck(out, '안녕하세요').ok, false);
+  assert.strictEqual(L.promptBoxCheck(mk('안녕하세요'), '').ok, false); assert.strictEqual(L.promptBoxCheck(mk('안녕하세요'), 5).ok, false);
+  assert.strictEqual(L.promptBoxCheck(mk('안녕하세요'), '  \n안녕').ok, false);
+  // 사전 조건은 사후에도 적용된다
+  const sel = mk('안녕하세요'); sel.lines.push('❯ 1. Yes'); sel.plain.push('❯ 1. Yes'); sel.rows++; assert.strictEqual(L.promptBoxCheck(sel, '안녕하세요').ok, false);
+  // 실제 화면: 붙여넣은 글은 흐리지 않아 plain 에 그대로 있다(커서는 글 끝). 안내 글이 남아 있어도 plain 에서는 공백이다
+  const R = '─'.repeat(100); const NB = ' ';
+  const real = (l26, p26, cx) => ({ lines: ['', ' '.repeat(81) + '◐ medium · /effort', R, l26, R, '  [model] | [folder] | [branch]', '  ░░░░░░░░░░ 0% | $0.00 | ⏱️ 0m 0s', '  ⏵⏵ auto mode on (shift+tab to cycle)'], plain: ['', ' '.repeat(81) + '◐ medium · /effort', R, p26, R, '  [model] | [folder] | [branch]', '  ░░░░░░░░░░ 0% | $0.00 | ⏱️ 0m 0s', '  ⏵⏵ auto mode on (shift+tab to cycle)'], cursorX: cx, cursorY: 3, rows: 8, cols: 100 });
+  const pasted = '❯ 안녕 첫 메시지 시험입니다 hello';
+  assert.deepStrictEqual(L.promptBoxCheck(real(pasted, pasted, 30), '안녕 첫 메시지 시험입니다 hello'), { ok: true, why: 'same' });
+  assert.strictEqual(L.promptBoxCheck(real('❯' + NB + '안녕 첫 메시지 시험입니다 hello', '❯' + NB + '안녕' + NB + '첫 메시지 시험입니다 hello', 30), '안녕 첫 메시지 시험입니다 hello').ok, true); // U+00A0 는 공백처럼 뺀다
+  assert.strictEqual(L.promptBoxCheck(real('❯' + NB + 'Try "how do I log an error?"', '❯', 2), '안녕 첫 메시지 시험입니다 hello').ok, false); // 글이 안 들어갔다
+  assert.strictEqual(L.promptBoxCheck({ ...real(pasted, pasted, 30), plain: undefined }, '안녕 첫 메시지 시험입니다 hello').ok, false);
+  assert.strictEqual(L.promptBoxCheck(null, 'x').ok, false);
+});
+t('firstSendVerdict: Enter 를 보낼지 가리는 판단', () => {
+  const ctx = { hasTerm: true, cc: true, procName: 'claude', knownName: 'claude', claudeUp: true, hooked: true, ux: 'none', bg: 0, bracketed: true, dirty: true };
+  const base = { elapsedMs: 200, now: 10000, pasteAt: 9000, lastOutputAt: 9500, snapAt: 9800, boxOk: true, ctx, sameWs: true, sameTerm: true, ptyInN: 4, firstPasteInN: 4 };
+  const v = (p) => L.firstSendVerdict({ ...base, ...p });
+  assert.deepStrictEqual(v({}), { act: 'send' }); // dirty 는 앱이 방금 붙여넣어 참이다: 보지 않는다
+  assert.strictEqual(v({ boxOk: false }).act, 'wait'); assert.strictEqual(v({ lastOutputAt: 9000 }).act, 'wait'); assert.strictEqual(v({ lastOutputAt: 8000 }).act, 'wait');
+  assert.strictEqual(v({ now: 9600 }).act, 'wait'); assert.strictEqual(v({ now: 9650 }).act, 'send'); // 출력 150ms 이상 조용
+  assert.deepStrictEqual(v({ boxOk: false, elapsedMs: 1500 }), { act: 'fail', why: 'timeout' }); assert.strictEqual(v({ boxOk: false, elapsedMs: 1499 }).act, 'wait');
+  assert.strictEqual(v({ elapsedMs: 1500 }).act, 'send'); // 준비됐으면 시간이 지나도 보낸다(마지막 확인과 같은 시각)
+  assert.deepStrictEqual(v({ ptyInN: 5 }), { act: 'fail', why: 'input' }); assert.strictEqual(v({ ptyInN: undefined }).act, 'fail'); assert.strictEqual(v({ firstPasteInN: undefined, ptyInN: undefined }).act, 'fail'); assert.strictEqual(v({ ptyInN: 3 }).act, 'fail');
+  // 출력이 화면을 요청한 뒤에 왔다면 그 화면은 낡았을 수 있다: send 가 아니다
+  assert.strictEqual(v({ lastOutputAt: 9900 }).act, 'wait'); assert.strictEqual(v({ lastOutputAt: 9800 }).act, 'wait'); assert.strictEqual(v({ lastOutputAt: 9799 }).act, 'send');
+  assert.strictEqual(v({ snapAt: undefined }).act, 'wait'); assert.strictEqual(v({ snapAt: NaN }).act, 'wait');
+  assert.deepStrictEqual(v({ lastOutputAt: 9900, now: 10100, elapsedMs: 1500 }), { act: 'fail', why: 'timeout' });
+  assert.deepStrictEqual(v({ sameWs: false }), { act: 'fail', why: 'workspace' }); assert.deepStrictEqual(v({ sameTerm: false }), { act: 'fail', why: 'pty' });
+  assert.strictEqual(v({ ctx: { ...ctx, ux: 'waiting' } }).act, 'fail'); assert.strictEqual(v({ ctx: { ...ctx, ux: 'busy' } }).act, 'fail');
+  assert.strictEqual(v({ ctx: { ...ctx, knownName: '' } }).act, 'fail'); assert.strictEqual(v({ ctx: { ...ctx, bg: 1 } }).act, 'fail');
+  assert.strictEqual(v({ ctx: { ...ctx, bracketed: false } }).act, 'fail'); assert.strictEqual(v({ ctx: { ...ctx, claudeUp: false } }).act, 'fail');
+  assert.strictEqual(v({ ctx: { ...ctx, hasTerm: false } }).act, 'fail'); assert.strictEqual(v({ ctx: null }).act, 'fail');
+  for (const x of [null, undefined, 5, 'x']) assert.strictEqual(L.firstSendVerdict(x).act, 'fail');
+});
+t('첫 메시지 길 연결: 사전 확인 → 붙여넣기 → 판정 → Enter 순서, 새 길로 가는 조건, 초기화', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const s0 = src.indexOf('async function readSendFirst('); assert.ok(s0 > 0);
+  const body = src.slice(s0, src.indexOf('\n}\n', s0));
+  const pre = body.indexOf('L.promptBoxCheck('); const paste = body.indexOf('term.write(paste)'); assert.ok(pre > 0 && paste > pre, '첫 붙여넣기는 사전 확인 뒤'); assert.strictEqual(body.indexOf('term.write('), paste, '사전 확인 전에 쓰는 것이 없다');
+  const cr = [...body.matchAll(/term\.write\('\\r'\)/g)].map((m) => m.index); assert.strictEqual(cr.length, 1);
+  const verdict = body.indexOf('L.firstSendVerdict('); const gate = body.indexOf("v.act !== 'send'"); assert.ok(verdict > paste && gate > verdict && cr[0] > gate, 'Enter 는 send 판정 뒤에만');
+  const last = body.indexOf('w.lastOutputAt < snapAt'); assert.ok(last > gate && last < cr[0], 'Enter 직전에 출력이 snapAt 보다 먼저인지 다시 본다');
+  assert.ok(/const snapAt = Date\.now\(\);[^\n]*\n\s*const boxOk = live \? L\.promptBoxCheck\(await readSnapOf\(w\), text\)/.test(body), 'snapAt 은 화면을 요청하기 직전');
+  assert.ok(/firstSendVerdict\(\{[^\n]*snapAt[^\n]*ptyInN: w\.ptyInN, firstPasteInN: w\.firstPasteInN/.test(body));
+  const route = src.split('\n').find((l) => l.includes('return readSendFirst(w, c.text)')); assert.ok(route && /can\.reason === 'first'/.test(route) && /ctx\.rawState == null/.test(route) && /ctx\.ux === 'none'/.test(route));
+  const spawn = src.split('\n').find((l) => l.includes('w.launchInN = 0')); assert.ok(spawn && /w\.claudeUpAt = 0/.test(spawn) && /w\.firstPasteInN = 0/.test(spawn));
+  assert.ok(/w\.ptyInAt = 0; w\.ptyInN = 0;/.test(src)); assert.ok(/function markIn\(w\) \{ w\.ptyInAt = Date\.now\(\); w\.ptyInN = /.test(src));
+  assert.ok(/w\.launchInN = w\.ptyInN/.test(src)); assert.ok(/inN: Number\.isSafeInteger\(w\.ptyInN\)/.test(src) && /launchInN: Number\.isSafeInteger\(w\.launchInN\)/.test(src));
+});
 t('isTermReply: 터미널의 자동 응답만 true, 조금이라도 다르면 입력', () => {
   for (const s of ['\x1b[I', '\x1b[O', '\x1b[24;80R', '\x1b[1;1R', '\x1b[?1;2c', '\x1b[?62;4c', '\x1b[>0;276;0c', '\x1b[>1;10;0c', '\x1b[0n', '\x1b[3n', '\x1b[1;9R', '\x1b[1;10R', '\x1b[1;20R', '\x1b[2;2R', '\x1b[11;2R', '\x1b[I\x1b[O', '\x1b[24;80R\x1b[?1;2c\x1b[I']) assert.strictEqual(L.isTermReply(s), true, JSON.stringify(s));
   for (const s of ['', '\x1b[A', '\x1b[B', '\x1b[1;2R', '\x1b[1;3R', '\x1b[1;5R', '\x1b[1;8R', '\x1b[24;80R\x1b[1;2R', '\x1b[1;2R\x1b[I', '\x1b[I a', '\x1b[Ia', 'a\x1b[I', '\x1b[I\r', '\r', ' ', 'x', '\x1b[24;80', '\x1b[;R', '\x1b[R', '\x1b[24;80Rx', '\x1b[?1;2cx', '\x1b[?1;2;a c', '\x1b[4n', '\x1b[0n\n', '\x1b[200~x\x1b[201~', '\x1b]11;rgb:0/0/0\x07', '\x1b[1~', '\x1b[<0;1;1M', '\x1b']) assert.strictEqual(L.isTermReply(s), false, JSON.stringify(s));
@@ -5180,6 +5659,37 @@ t('읽기 화면 연결: 개발 모드 3개와 i18n 키 짝', () => {
   assert.ok(/!app\.isPackaged && \['read', 'readrail', 'readwait'/.test(mainSrc)); // 패키징 빌드에서는 무시
   const rk = Object.keys(I.STR.ko).filter((k) => k.startsWith('read.')); assert.ok(rk.length >= 15);
   for (const k of rk) assert.ok(I.STR.en[k], k);
+  for (const m of ['readsurf', 'readempty']) assert.ok(mainSrc.includes("'" + m + "'"), m);
+});
+
+t('화면 블록 단추: 보내는 길을 부르지 않고 입력창만 채운다', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  const a = src.indexOf('function readSurfFill('); const b = src.indexOf('function readSurfBtn(');
+  assert.ok(a > 0 && b > a);
+  const body = src.slice(a, b);
+  for (const bad of [/readSendNow/, /readSend\b/, /read:send/, /innerHTML/]) assert.ok(!bad.test(body), String(bad)); // readSending(보내는 중 표지 읽기)은 허용
+  assert.ok(body.includes('Lib.readCleanSend(') && body.includes('readLock()') && body.includes("readMark('fill')"));
+  const c = src.indexOf('function readSurface('); const d = src.indexOf('function readBlock(');
+  assert.ok(c > 0 && d > c && !src.slice(c, d).includes('innerHTML'));
+  const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(/kind !== 'surf' && kind !== 'fill'/.test(mainSrc));
+  const pre = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8'); assert.ok(/kind === 'surf'/.test(pre) && /kind === 'fill'/.test(pre));
+});
+
+t('읽기 화면 배치·단추 안전: 접힘 때 카드 열, Enter 반복, 보내기 뒤 단추, 마지막 답변만 센다', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, 'renderer', 'style.css'), 'utf8');
+  const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.ok(src.includes('Lib.readSideShown(') && src.includes("classList.toggle('read-side'"));
+  assert.ok(css.includes('.cols.read-on:not(.read-side) .right-col'));
+  const kd = src.indexOf("readTa.addEventListener('keydown'"); const kb = src.slice(kd, kd + 1200);
+  assert.ok(kb.includes('e.repeat') && kb.includes('readFillHeld') && kb.includes('< 500'));
+  assert.ok(src.includes("readSurfHold = true") && src.includes('!readSurfHold'));
+  assert.ok(src.includes('ctx.last && ctx.key && !readSurfSeen.has'));
+  assert.ok(/surf: 1000, fill: 300/.test(mainSrc));
+  assert.ok(src.includes('c.text !== text') && src.includes('readLastFill'));
+  assert.ok(/\.read-surf-note\.sw\{[^}]*\}/.test(css) && !/\.read-surf-note\.sw\{[^}]*--or/.test(css)); // warn 띠는 권한 대기 주황을 쓰지 않는다
+  assert.ok(mainSrc.includes("'readsurftop'") && src.includes("m === 'readsurftop'"));
 });
 
 t('읽기 사용 횟수: readDayKey·Parse·Bump·저장', () => {
@@ -5188,14 +5698,18 @@ t('읽기 사용 횟수: readDayKey·Parse·Bump·저장', () => {
   const empty = { v: 1, days: {} };
   for (const bad of [null, undefined, 5, '', '{', '[]', '{"v":2,"days":{}}', '{"v":1,"days":[]}', '{"v":1}']) assert.deepStrictEqual(L.readStatsParse(bad), empty, String(bad));
   const p = L.readStatsParse('{"v":1,"days":{"2026-01-01":{"on":2,"sent":"3"},"bad":{"on":1,"sent":1},"2026-13-01":{"on":1,"sent":1},"2026-01-02":{"on":-1,"sent":1.5},"__proto__":{"on":9,"sent":9},"2026-01-03":[1]}}');
-  assert.deepStrictEqual(p, { v: 1, days: { '2026-01-01': { on: 2, sent: 0 }, '2026-01-02': { on: 0, sent: 0 } } });
+  assert.deepStrictEqual(p, { v: 1, days: { '2026-01-01': { on: 2, sent: 0, surf: 0, fill: 0 }, '2026-01-02': { on: 0, sent: 0, surf: 0, fill: 0 } } });
+  assert.deepStrictEqual(L.readStatsParse('{"v":1,"days":{"2026-01-01":{"on":1,"surf":3,"fill":"x"}}}').days['2026-01-01'], { on: 1, sent: 0, surf: 3, fill: 0 }); // 옛 파일에 없는 키는 0
   assert.strictEqual(({}).on, undefined);
-  const a = { v: 1, days: { '2026-01-01': { on: 1, sent: 0 } } };
+  const a = { v: 1, days: { '2026-01-01': { on: 1, sent: 0, surf: 0, fill: 0 } } };
   const snap = JSON.stringify(a);
   const b = L.readStatsBump(a, '2026-01-01', 'on', 60);
   assert.strictEqual(JSON.stringify(a), snap);
-  assert.deepStrictEqual(b.days['2026-01-01'], { on: 2, sent: 0 });
-  assert.deepStrictEqual(L.readStatsBump(a, '2026-01-02', 'sent', 60).days['2026-01-02'], { on: 0, sent: 1 });
+  assert.deepStrictEqual(b.days['2026-01-01'], { on: 2, sent: 0, surf: 0, fill: 0 });
+  assert.deepStrictEqual(L.readStatsBump(a, '2026-01-02', 'sent', 60).days['2026-01-02'], { on: 0, sent: 1, surf: 0, fill: 0 });
+  assert.deepStrictEqual(L.readStatsBump(a, '2026-01-02', 'surf', 60).days['2026-01-02'], { on: 0, sent: 0, surf: 1, fill: 0 });
+  assert.deepStrictEqual(L.readStatsBump(L.readStatsBump(a, '2026-01-01', 'fill', 60), '2026-01-01', 'fill', 60).days['2026-01-01'], { on: 1, sent: 0, surf: 0, fill: 2 });
+  assert.deepStrictEqual(Object.keys(L.readStatsBump(a, '2026-01-01', 'fill', 60).days['2026-01-01']).sort(), ['fill', 'on', 'sent', 'surf']); // 내용 필드가 없다
   for (const k of ['text', '__proto__', 'ON', '', undefined]) assert.deepStrictEqual(L.readStatsBump(a, '2026-01-01', k, 60), a);
   assert.deepStrictEqual(L.readStatsBump(a, 'x', 'on', 60), a);
   let s = { v: 1, days: {} };

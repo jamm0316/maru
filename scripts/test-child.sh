@@ -370,7 +370,7 @@ rm -f "$PD/pen.txt"
 # ============================================================== Part C: 보고(쓰기)
 echo "== maru-claude.sh: 마루 폴더 밖 세션의 상태 훅(--settings)"
 OUTD="$T/out side"; mkdir -p "$OUTD"
-wrap_in() { local d=$1; shift; rm -f "$STUB_OUT" "$STUB_OUT.env"; ( cd "$d" && run_env MARU_NO_SQUADS=1 STUB_OUT="$STUB_OUT" "$@" -- bash "$WR" ${WARGS[@]+"${WARGS[@]}"} ); }
+wrap_in() { local d=$1; shift; rm -f "$STUB_OUT" "$STUB_OUT.env"; ( cd "$d" && run_env MARU_NO_SQUADS=1 MARU_NO_SURFACE=1 STUB_OUT="$STUB_OUT" "$@" -- bash "$WR" ${WARGS[@]+"${WARGS[@]}"} ); }
 hooks_ok() { "$REAL_PY" -I -c '
 import json, shlex, sys
 raw = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
@@ -396,6 +396,18 @@ check "저장소 밖 + MARU_APP_SESSION: --settings 로 상태 훅 8종(PreToolU
 WARGS=(--resume 11111111-2222-3333-4444-555555555555); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 >/dev/null
 check "받은 인자는 --settings 뒤에 그대로" hooks_ok --resume 11111111-2222-3333-4444-555555555555
 check "붙였으면 표지 파일(<id>.hooked)을 남긴다" [ -f "$DATA/state/app/outside-12345.hooked" ]
+# 스쿼드 경로(--agents 가 붙는 실행): 지시문은 사용자 인자 앞에 한 번만 붙는다(MARU_NO_SURFACE·MARU_NO_SQUADS 를 비워 둘 다 켠다)
+WARGS=(--resume 11111111-2222-3333-4444-555555555555); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 MARU_NO_SURFACE= MARU_NO_SQUADS= >/dev/null
+check "스쿼드 경로: --agents, --settings, --append-system-prompt(한 번, 파일 내용) 순서로 사용자 인자 앞에 붙음" "$REAL_PY" -I -c '
+import sys
+a = [x.decode() for x in open(sys.argv[1], "rb").read().split(b"\0")[:-1]]
+want = open(sys.argv[2], encoding="utf-8").read().rstrip("\n")
+assert a[0] == "--agents" and a[1].startswith("{\"sq-"), a[:2]
+assert a[2] == "--settings", a[2]
+assert a[4] == "--append-system-prompt" and a[5] == want, a[4:5]
+assert a.count("--append-system-prompt") == 1
+assert a[6:] == ["--resume", "11111111-2222-3333-4444-555555555555"], a[6:]' "$STUB_OUT" "$R/prompts/read-surface.md"
+rm -f "$DATA/state/app/"*.hooked
 rm -f "$DATA/state/app/outside-12345.hooked"
 WARGS=(); wrap_in "$OUTD" >/dev/null; check "MARU_APP_SESSION 없음(앱 밖 실행): 붙이지 않음" argv_is '[]'
 WARGS=(); wrap_in "$R" MARU_APP_SESSION=outside-12345 >/dev/null; check "저장소 폴더 안: 상태 훅은 붙이지 않음(프로젝트 설정의 훅이 이미 돈다). statusLine 만 붙는다" "$REAL_PY" -I -c '
@@ -406,7 +418,7 @@ d = json.loads(a[1]); assert list(d) == ["statusLine"], list(d)' "$STUB_OUT"
 mkdir -p "$R/sub/dir"; wrap_in "$R/sub/dir" MARU_APP_SESSION=outside-12345 >/dev/null; check "저장소의 하위 폴더: 붙인다(프로젝트 설정은 시작한 폴더에서만 읽힌다)" hooks_ok
 mkdir -p "${R}x"; wrap_in "${R}x" MARU_APP_SESSION=outside-12345 >/dev/null; check "이름만 저장소로 시작하는 형제 폴더는 밖이다" hooks_ok; rmdir "${R}x"
 rm -f "$DATA/state/app/"*.hooked
-WARGS=(); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 MARU_TOOL_DIRS= PATH="$T/stub:/bin" >/dev/null; check "python3 가 없으면 붙이지 않고 그대로 실행" argv_is '[]'
+WARGS=(); wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 MARU_NO_SURFACE= MARU_TOOL_DIRS= PATH="$T/stub:/bin" >/dev/null; check "python3 가 없으면 붙이지 않고 그대로 실행(MARU_NO_SURFACE 없이: 화면 블록 지시문도 안 붙음)" argv_is '[]'
 check "python3 가 없으면 표지도 남기지 않음" [ ! -e "$DATA/state/app/outside-12345.hooked" ]
 WARGS=(); wrap_in "$OUTD" MARU_APP_SESSION='bad id!' >/dev/null; check "id 형식이 틀리면 표지를 만들지 않음" [ -z "$(ls "$DATA/state/app" | grep hooked)" ]
 WARGS=(); mkprompt 'hello' ph.txt; wrap_in "$OUTD" MARU_APP_SESSION=outside-12345 MARU_CHILD_PROMPT_FILE="$PD/ph.txt" >/dev/null
